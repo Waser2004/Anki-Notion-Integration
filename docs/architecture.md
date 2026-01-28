@@ -26,7 +26,7 @@ This document describes a scalable MVP architecture for the **Anki add-on** vari
   - Deletion handling (prompt user; delete/suspend/keep)
 
 ### 3) Notion Client
-- Fetch selected pages and their blocks (MVP: toggles + text).
+- Fetch selected pages and their blocks (MVP: toggles + text; future: images for image occlusion).
 - Normalizes Notion block structures into an internal representation for parsing.
 
 ### 4) Parser / Renderer
@@ -34,7 +34,9 @@ This document describes a scalable MVP architecture for the **Anki add-on** vari
 - MVP rules:
   - Toggle title → front
   - Toggle content → back
-- Future: extend supported block types (lists, images, tables, etc.) behind feature flags.
+- Future:
+  - Image blocks → image occlusion notes (mask created/edited by user).
+  - Extend supported block types (lists, tables, etc.) behind feature flags.
 
 ### 5) Sync Engine
 Responsibilities:
@@ -101,6 +103,10 @@ Stores:
 4. For blocks previously mapped but not found anymore:
    - Mark as deleted/missing and prompt user (MVP policy: keep cards by default).
 5. Update `last_synced_at` bookkeeping.
+
+## Notes On “Full Scan” vs Incremental (MVP)
+- MVP uses a simple **full scan of the selected pages** each time sync runs.
+- Updates are still “incremental” in effect because the add-on only creates/updates notes when the rendered `content_hash` differs from what’s stored in the local DB.
 
 ## Error Handling & Observability (MVP)
 - Show a simple user-facing error message in the UI.
