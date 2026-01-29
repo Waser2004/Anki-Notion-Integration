@@ -4,6 +4,7 @@ AI agents: follow these repo rules. Keep changes minimal and scoped.
 
 ## Start here
 - Project overview: `docs/overview.md`
+- Project architecture: `docs/architecture.md`
 
 ## Repo map
 - not set up yet
@@ -18,6 +19,7 @@ AI agents: follow these repo rules. Keep changes minimal and scoped.
 - Prefer clear diffs + brief rationale.
 - Note files changed and commands run.
 - Leave TODOs only when unavoidable and clearly scoped.
+- Always comment code to ensure readability by humans.
 
 ## Pull Requests
 - Create a pull request whenever you modify code.
