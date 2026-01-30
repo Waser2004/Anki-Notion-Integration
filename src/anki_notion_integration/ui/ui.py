@@ -17,6 +17,8 @@ try:
         QTabWidget,
         QVBoxLayout,
         QWidget,
+        QSizePolicy,
+        Qt,
     )
 except ImportError:  # pragma: no cover - exercised only inside Anki.
     gui_hooks = None
@@ -125,7 +127,8 @@ def initialize_ui() -> None:
 
     def add_toolbar_link(links: list[str], toolbar: Any) -> None:
         # Inject a top-toolbar link via the supported GUI hook.
-        links.append(
+        links.insert(
+            -1, # Before the Sync button.
             toolbar.create_link(
                 cmd="notion",
                 label="Notion",
@@ -187,16 +190,18 @@ else:
 
             # Use QTabWidget to match Anki's Preferences-style UI.
             self._tabs = QTabWidget(self)
-            self._tabs.setDocumentMode(True)
+            self._tabs.setDocumentMode(False)
+            # self._tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             self._tabs.currentChanged.connect(self._on_tab_changed)
 
+            # Ensure the tabs expand to fill the dialog area.
             layout = QVBoxLayout(self)
+            layout.setContentsMargins(11, 11, 11, 11)
             layout.addWidget(self._tabs)
-            self.setLayout(layout)
 
             self._build_tabs()
             if self._schema.pages:
-                self._tabs.setCurrentIndex(0)
+                # self._tabs.setCurrentIndex(0)
                 self._on_tab_changed(0)
 
         def _build_tabs(self) -> None:
@@ -228,7 +233,8 @@ else:
                     raise UiSchemaError(
                         f"Page '{page.key}' missing factory '{page.factory}'."
                     )
-                widget = factory(self._stack, self._context)
+                # Parent the page widget to the tab widget so it renders inside the tab.
+                widget = factory(self._tabs, self._context)
                 if QWidget is None or not isinstance(widget, QWidget):
                     raise UiSchemaError(
                         f"Page '{page.key}' factory did not return a QWidget."
