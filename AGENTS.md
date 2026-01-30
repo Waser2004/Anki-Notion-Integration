@@ -2,12 +2,27 @@
 
 AI agents: follow these repo rules. Keep changes minimal and scoped.
 
-## Start here
-- Project overview: `docs/overview.md`
-- Project architecture: `docs/architecture.md`
-
 ## Repo map
-- not set up yet
+.
+├─ AGENTS.md
+├─ plan.md
+├─ docs/
+│  ├─ overview.md
+│  ├─ architecture.md
+│  └─ user_interface.md
+├─ src/
+│  └─ anki_notion_integration/
+│     ├─ __init__.py
+│     ├─ ...
+│     ├─ ui/
+│     └─ db/
+└─ tests/
+
+Quick notes:
+- `docs/`: product + architecture documentation (start here for context).
+- `src/anki_notion_integration/`: main Python package.
+- `src/anki_notion_integration/ui/`: UI code lives here.
+- `tests/`: automated tests live here.
 
 ## Guardrails
 - Don’t refactor unrelated code.
