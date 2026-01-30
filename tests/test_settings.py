@@ -14,6 +14,7 @@ from keyring.backend import KeyringBackend
 
 from anki_notion_integration.db import Database
 from anki_notion_integration.settings import (
+    KeyringSecretStore,
     SettingsStore,
     create_default_settings,
     load_settings_schema,
@@ -68,3 +69,12 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(store.get_value("notion_api_key"), "secret-value")
         store.set_value("notion_api_key", "")
         self.assertEqual(store.get_value("notion_api_key"), "")
+
+    def test_keyring_secret_store_operations(self) -> None:
+        secret_store = KeyringSecretStore("anki_notion_integration", "profile-a")
+        self.assertIsNone(secret_store.get_secret("notion_api_key"))
+        secret_store.set_secret("notion_api_key", "value-1")
+        self.assertEqual(secret_store.get_secret("notion_api_key"), "value-1")
+        secret_store.delete_secret("notion_api_key")
+        self.assertIsNone(secret_store.get_secret("notion_api_key"))
+        secret_store.delete_secret("notion_api_key")
