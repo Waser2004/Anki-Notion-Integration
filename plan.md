@@ -9,7 +9,7 @@ Build an Anki add-on that syncs Notion toggles into Basic Anki notes, using a lo
 ## Action items
 - [x] Design SQLLite schema (pages, cards, settings)
 - [x] Create db at startup if it does not yet exist
-- [ ] Implement settings.py / settings.json
+- [x] Implement settings.py / settings.json
     - settings.json stores relevant information for each setting i.e. `type` (boolean, checkbox, text, dropdown, etc.), `name` (display name), `description` (short consice description). The settings are grouped into subcategoires.
     - settings.py provides an interface for settings_ui.py to read settings. It reads and provides values from db and updates db entrys if changes to settings happen.
     - settings.py also provides a function to create default settings when db is created.
