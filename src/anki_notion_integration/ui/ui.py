@@ -17,8 +17,6 @@ try:
         QTabWidget,
         QVBoxLayout,
         QWidget,
-        QSizePolicy,
-        Qt,
     )
 except ImportError:  # pragma: no cover - exercised only inside Anki.
     gui_hooks = None
@@ -201,8 +199,10 @@ else:
 
             self._build_tabs()
             if self._schema.pages:
-                # self._tabs.setCurrentIndex(0)
+                self._tabs.setCurrentIndex(0)
                 self._on_tab_changed(0)
+                self._tabs.tabBar().update()
+                self._tabs.update()
 
         def _build_tabs(self) -> None:
             """Create a tab and placeholder slot for every page."""
@@ -260,6 +260,8 @@ else:
             self._tabs.setCurrentIndex(index)
             self._tabs.setUpdatesEnabled(True)
             self._tabs.blockSignals(False)
+            self._tabs.tabBar().update()
+            self._tabs.update()
             if placeholder is not None:
                 placeholder.deleteLater()
 
