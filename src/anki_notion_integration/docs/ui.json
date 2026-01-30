@@ -1,0 +1,16 @@
+{
+  "pages": [
+    {
+      "key": "pages",
+      "name": "Pages",
+      "module": "anki_notion_integration.ui.pages_ui",
+      "factory": "build_page"
+    },
+    {
+      "key": "settings",
+      "name": "Settings",
+      "module": "anki_notion_integration.ui.settings_ui",
+      "factory": "build_page"
+    }
+  ]
+}
