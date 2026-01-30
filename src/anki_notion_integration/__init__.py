@@ -29,6 +29,13 @@ def on_profile_did_open() -> None:
         db = Database(db_path)
         db.initialize()
         create_default_settings(db)
+        # Register the toolbar action after the profile data is ready.
+        try:
+            from .ui.ui import initialize_ui
+            initialize_ui()
+        except Exception:
+            # Keep startup resilient if UI assets are missing during tests or packaging.
+            return
         
     QTimer.singleShot(0, work)
 
