@@ -12,26 +12,18 @@ try:
     # Import Anki/Qt modules only when running inside Anki.
     from aqt import gui_hooks, mw
     from aqt.qt import (
-        QHBoxLayout,
         QDialog,
         QLabel,
-        QStackedWidget,
-        QSizePolicy,
-        QTabBar,
-        Qt,
+        QTabWidget,
         QVBoxLayout,
         QWidget,
     )
 except ImportError:  # pragma: no cover - exercised only inside Anki.
     gui_hooks = None
     mw = None
-    QHBoxLayout = None
     QDialog = None
     QLabel = None
-    QStackedWidget = None
-    QSizePolicy = None
-    QTabBar = None
-    Qt = None
+    QTabWidget = None
     QVBoxLayout = None
     QWidget = None
 
@@ -193,38 +185,26 @@ else:
             self.setWindowTitle("Notion")
             self.setMinimumSize(520, 620)
 
-            # Top navigation bar that mirrors the Preferences style.
-            self._tab_bar = QTabBar(self)
-            self._tab_bar.setExpanding(False)
-            self._tab_bar.setMovable(False)
-            self._tab_bar.currentChanged.connect(self._on_tab_changed)
-
-            toolbar_row = QHBoxLayout()
-            toolbar_row.setContentsMargins(0, 0, 0, 0)
-            toolbar_row.addStretch(1)
-            toolbar_row.addWidget(self._tab_bar)
-            toolbar_row.addStretch(1)
-
-            # Content area that swaps in page widgets on demand.
-            self._stack = QStackedWidget(self)
+            # Use QTabWidget to match Anki's Preferences-style UI.
+            self._tabs = QTabWidget(self)
+            self._tabs.setDocumentMode(True)
+            self._tabs.currentChanged.connect(self._on_tab_changed)
 
             layout = QVBoxLayout(self)
-            layout.addLayout(toolbar_row)
-            layout.addWidget(self._stack)
+            layout.addWidget(self._tabs)
             self.setLayout(layout)
 
             self._build_tabs()
             if self._schema.pages:
-                self._tab_bar.setCurrentIndex(0)
+                self._tabs.setCurrentIndex(0)
                 self._on_tab_changed(0)
 
         def _build_tabs(self) -> None:
             """Create a tab and placeholder slot for every page."""
             for page in self._schema.pages:
-                self._tab_bar.addTab(page.name)
                 placeholder = self._build_placeholder_widget("Loading...")
                 self._placeholders[page.key] = placeholder
-                self._stack.addWidget(placeholder)
+                self._tabs.addTab(placeholder, page.name)
 
         def _on_tab_changed(self, index: int) -> None:
             """Load the selected page on demand and show it."""
@@ -233,14 +213,11 @@ else:
             page = self._schema.pages[index]
             if page.key not in self._page_widgets:
                 widget = self._load_page_widget(page)
-                wrapped = self._wrap_centered(widget)
-                self._page_widgets[page.key] = wrapped
+                self._page_widgets[page.key] = widget
                 placeholder = self._placeholders.pop(page.key, None)
-                if placeholder is not None:
-                    self._stack.removeWidget(placeholder)
-                    placeholder.deleteLater()
-                self._stack.insertWidget(index, wrapped)
-            self._stack.setCurrentIndex(index)
+                # Replace the placeholder tab with the real widget.
+                self._replace_tab(index, widget, page.name, placeholder)
+            self._tabs.setCurrentIndex(index)
 
         def _load_page_widget(self, page: UiPageDefinition) -> QWidget:
             """Import the page module and build its widget."""
@@ -262,21 +239,23 @@ else:
                     f"Failed to load page '{page.name}'.\n{exc}"
                 )
 
-        def _wrap_centered(self, widget: QWidget) -> QWidget:
-            """Wrap a page widget in a horizontally-centered container."""
-            if QSizePolicy is not None:
-                widget.setSizePolicy(
-                    QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
-                )
-            container = QWidget(self._stack)
-            layout = QHBoxLayout(container)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.addStretch(1)
-            layout.addWidget(widget)
-            layout.addStretch(1)
-            if Qt is not None:
-                layout.setAlignment(widget, Qt.AlignmentFlag.AlignHCenter)
-            return container
+        def _replace_tab(
+            self,
+            index: int,
+            widget: QWidget,
+            label: str,
+            placeholder: QWidget | None,
+        ) -> None:
+            """Swap the placeholder tab widget with the real page widget."""
+            self._tabs.blockSignals(True)
+            self._tabs.setUpdatesEnabled(False)
+            self._tabs.removeTab(index)
+            self._tabs.insertTab(index, widget, label)
+            self._tabs.setCurrentIndex(index)
+            self._tabs.setUpdatesEnabled(True)
+            self._tabs.blockSignals(False)
+            if placeholder is not None:
+                placeholder.deleteLater()
 
         def _build_placeholder_widget(self, text: str) -> QWidget:
             """Create a basic placeholder label widget."""
