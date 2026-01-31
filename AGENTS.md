@@ -5,8 +5,9 @@ AI agents: follow these repo rules. Keep changes minimal and scoped.
 ## Repo map
 .
 ├─ AGENTS.md
-├─ plan.md
 ├─ docs/
+│  ├─ plans/
+│  ├─ documentation/
 │  ├─ overview.md
 │  ├─ architecture.md
 │  └─ user_interface.md
