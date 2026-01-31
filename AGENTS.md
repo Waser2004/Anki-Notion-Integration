@@ -21,6 +21,7 @@ AI agents: follow these repo rules. Keep changes minimal and scoped.
 
 Quick notes:
 - `docs/`: product + architecture documentation (start here for context).
+- `docs/documentation`: code documentation.
 - `src/anki_notion_integration/`: main Python package.
 - `src/anki_notion_integration/ui/`: UI code lives here.
 - `tests/`: automated tests live here.
