@@ -12,6 +12,7 @@ from typing import Any, Iterable
 from aqt import gui_hooks, mw
 from aqt.qt import (
     QDialog,
+    QDialogButtonBox,
     QLabel,
     QTabWidget,
     QVBoxLayout,
@@ -180,6 +181,14 @@ class NotionWindow(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(11, 11, 11, 11)
         layout.addWidget(self._tabs)
+
+        # Bottom-right close button for users who prefer a visible "Close" action.
+        button_row = QDialogButtonBox(self)
+        close_button = button_row.addButton("Close", QDialogButtonBox.ButtonRole.RejectRole)
+        close_button.setAutoDefault(False)
+        close_button.setDefault(False)
+        close_button.clicked.connect(self.close)
+        layout.addWidget(button_row)
 
         # Build tabs without triggering change signals during construction.
         self._tabs.blockSignals(True)
