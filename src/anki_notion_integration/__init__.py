@@ -13,9 +13,6 @@ from aqt.qt import QTimer
 __all__ = ["Database", "create_default_settings"]
 
 def on_profile_did_open() -> None:
-    if mw is None or gui_hooks is None or QTimer is None:
-        return
-
     profile_folder = mw.pm.profileFolder()
 
     def work() -> None:

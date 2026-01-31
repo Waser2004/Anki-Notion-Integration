@@ -36,6 +36,4 @@ Quick notes:
 - Leave TODOs only when unavoidable and clearly scoped.
 - Always comment code to ensure readability by humans.
 
-## Pull Requests
-- Create a pull request whenever you modify code.
-- Include a clear description of the changes and their rationale.
+Use a dedicated Git feature branch for each feature.

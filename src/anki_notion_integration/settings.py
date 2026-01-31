@@ -17,7 +17,6 @@ class SettingsError(RuntimeError):
 @dataclass(frozen=True)
 class SettingDefinition:
     """Metadata describing a single configurable setting."""
-
     key: str
     type: str
     name: str
@@ -30,7 +29,6 @@ class SettingDefinition:
 @dataclass(frozen=True)
 class SettingsCategory:
     """A logical grouping of settings for display and organization."""
-
     key: str
     name: str
     description: str
@@ -39,7 +37,6 @@ class SettingsCategory:
 
 class SettingsSchema:
     """Parsed settings schema with lookup helpers."""
-
     def __init__(self, categories: Iterable[SettingsCategory]) -> None:
         self._categories = tuple(categories)
         self._settings_by_key = {
@@ -74,24 +71,31 @@ _DEFAULT_PROFILE_NAME = "default"
 def load_settings_schema(path: Path | None = None) -> SettingsSchema:
     """Load and validate the settings schema from JSON."""
     schema_path = path or _DEFAULT_SETTINGS_PATH
+
     if not schema_path.exists():
         raise SettingsError(f"Settings schema not found: {schema_path}")
+    
     with schema_path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
+    
     if "categories" not in payload or not isinstance(payload["categories"], list):
         raise SettingsError("Settings schema must include a list of categories.")
+    
     categories: list[SettingsCategory] = []
     for category_payload in payload["categories"]:
-        category_key = category_payload.get("key")
-        category_name = category_payload.get("name")
+        category_key         = category_payload.get("key")
+        category_name        = category_payload.get("name")
         category_description = category_payload.get("description", "")
-        settings_payload = category_payload.get("settings", [])
+        settings_payload     = category_payload.get("settings", [])
+        
         if not category_key or not category_name:
             raise SettingsError("Each category requires a key and name.")
+        
         settings: list[SettingDefinition] = []
         for setting_payload in settings_payload:
             setting = _parse_setting_definition(setting_payload)
             settings.append(setting)
+
         categories.append(
             SettingsCategory(
                 key=category_key,
@@ -100,18 +104,22 @@ def load_settings_schema(path: Path | None = None) -> SettingsSchema:
                 settings=tuple(settings),
             )
         )
+    
     return SettingsSchema(categories)
 
 
 def _parse_setting_definition(payload: Mapping[str, Any]) -> SettingDefinition:
     """Parse and validate a single setting definition."""
-    key = payload.get("key")
+    # Extract fields from payload
+    key          = payload.get("key")
     setting_type = payload.get("type")
-    name = payload.get("name")
-    description = payload.get("description", "")
-    default = payload.get("default")
-    options = payload.get("options")
-    storage = payload.get("storage", "db")
+    name         = payload.get("name")
+    description  = payload.get("description", "")
+    default      = payload.get("default")
+    options      = payload.get("options")
+    storage      = payload.get("storage", "db")
+
+    # Validate required fields and types
     if not key or not setting_type or not name:
         raise SettingsError("Each setting requires key, type, and name.")
     if setting_type not in _SUPPORTED_TYPES:
@@ -122,6 +130,7 @@ def _parse_setting_definition(payload: Mapping[str, Any]) -> SettingDefinition:
         options_tuple = tuple(str(option) for option in options)
     else:
         options_tuple = None
+
     return SettingDefinition(
         key=key,
         type=setting_type,
@@ -182,7 +191,6 @@ def _get_keyring_module():
 
 class KeyringSecretStore:
     """Wrapper around keyring to store per-profile secrets."""
-
     def __init__(self, service_name: str, profile_name: str) -> None:
         self._service_name = service_name
         self._profile_name = profile_name

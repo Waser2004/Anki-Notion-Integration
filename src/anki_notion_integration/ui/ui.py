@@ -8,25 +8,16 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
-try:
-    # Import Anki/Qt modules only when running inside Anki.
-    from aqt import gui_hooks, mw
-    from aqt.qt import (
-        QDialog,
-        QLabel,
-        QTabWidget,
-        QVBoxLayout,
-        QWidget,
-    )
-except ImportError:  # pragma: no cover - exercised only inside Anki.
-    gui_hooks = None
-    mw = None
-    QDialog = None
-    QLabel = None
-    QTabWidget = None
-    QVBoxLayout = None
-    QWidget = None
-
+# Import Anki/Qt modules only when running inside Anki.
+from aqt import gui_hooks, mw
+from aqt.qt import (
+    QDialog,
+    QLabel,
+    QTabWidget,
+    QVBoxLayout,
+    QTimer,
+    QWidget,
+)
 
 class UiSchemaError(RuntimeError):
     """Raised when ui.json cannot be loaded or validated."""
@@ -80,28 +71,35 @@ _window: "NotionWindow | None" = None
 def load_ui_schema(path: Path | None = None) -> UiSchema:
     """Load and validate the UI schema from ui.json."""
     schema_path = path or _DEFAULT_UI_PATH
+
     if not schema_path.exists():
         raise UiSchemaError(f"UI schema not found: {schema_path}")
+    
     with schema_path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
     pages_payload = payload.get("pages")
+
     if not isinstance(pages_payload, list) or not pages_payload:
         raise UiSchemaError("UI schema must include a non-empty 'pages' list.")
+    
     pages: list[UiPageDefinition] = []
     seen_keys: set[str] = set()
     for page_payload in pages_payload:
         if not isinstance(page_payload, dict):
             raise UiSchemaError("Each page entry must be an object.")
-        key = page_payload.get("key")
-        name = page_payload.get("name")
-        module = page_payload.get("module")
+        
+        key     = page_payload.get("key")
+        name    = page_payload.get("name")
+        module  = page_payload.get("module")
         factory = page_payload.get("factory", _DEFAULT_FACTORY)
+
         if not key or not name or not module:
             raise UiSchemaError("Each page requires 'key', 'name', and 'module'.")
         if not isinstance(factory, str) or not factory:
             raise UiSchemaError(f"Invalid factory for page '{key}'.")
         if key in seen_keys:
             raise UiSchemaError(f"Duplicate page key: {key}")
+        
         seen_keys.add(key)
         pages.append(
             UiPageDefinition(
@@ -111,13 +109,12 @@ def load_ui_schema(path: Path | None = None) -> UiSchema:
                 factory=str(factory),
             )
         )
+    
     return UiSchema(pages)
 
 
 def initialize_ui() -> None:
     """Register the toolbar link that opens the Notion window."""
-    if mw is None or gui_hooks is None:
-        return
     global _initialized
     if _initialized:
         return
@@ -146,9 +143,12 @@ def initialize_ui() -> None:
 def _show_window(schema: UiSchema) -> None:
     """Create or reuse the Notion window and bring it to the front."""
     global _window
+    # build the window on first use
     if _window is None:
         context = _build_context()
         _window = NotionWindow(schema, context, parent=mw)
+
+    # show and focus the window - Automatically loads the active tab.
     _window.show()
     _window.raise_()
     _window.activateWindow()
@@ -156,122 +156,122 @@ def _show_window(schema: UiSchema) -> None:
 
 def _build_context() -> UiContext:
     """Build the shared context passed to page factories."""
-    if mw is None:
-        raise UiSchemaError("UI context can only be built inside Anki.")
     profile_folder = Path(mw.pm.profileFolder())
     db_path = profile_folder / "Anki_Notion_Integration" / "db" / "notion_integration.db"
+
     return UiContext(mw=mw, profile_folder=profile_folder, db_path=db_path)
 
 
-if QDialog is None:
+class NotionWindow(QDialog):
+    """Dedicated add-on window with top navigation and content area."""
 
-    class NotionWindow:
-        """Fallback stub when Anki/Qt is unavailable."""
+    def __init__(self, schema: UiSchema, context: UiContext, parent: QWidget | None) -> None:
+        super().__init__(parent)
+        self._schema = schema
+        self._context = context
+        self._page_widgets: dict[str, QWidget] = {}
+        self._placeholders: dict[str, QWidget] = {}
+        self.setWindowTitle("Notion")
+        self.setMinimumSize(520, 620)
 
-        def __init__(self, *_: Any, **__: Any) -> None:
-            # Avoid construction outside Anki while keeping imports testable.
-            raise UiSchemaError("NotionWindow requires the Anki Qt runtime.")
+        self._tabs = QTabWidget(self)
+        self._tabs.currentChanged.connect(self._on_tab_changed)
 
-else:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(11, 11, 11, 11)
+        layout.addWidget(self._tabs)
 
-    class NotionWindow(QDialog):
-        """Dedicated add-on window with top navigation and content area."""
+        # Build tabs without triggering change signals during construction.
+        self._tabs.blockSignals(True)
+        self._build_tabs()
+        self._tabs.blockSignals(False)
 
-        def __init__(self, schema: UiSchema, context: UiContext, parent: QWidget | None) -> None:
-            super().__init__(parent)
-            self._schema = schema
-            self._context = context
-            self._page_widgets: dict[str, QWidget] = {}
-            self._placeholders: dict[str, QWidget] = {}
-            self.setWindowTitle("Notion")
-            self.setMinimumSize(520, 620)
+        # Defer loading of the initial tab until after the event loop ticks.
+        QTimer.singleShot(0, self._load_initial_tab)
 
-            # Use QTabWidget to match Anki's Preferences-style UI.
-            self._tabs = QTabWidget(self)
-            self._tabs.setDocumentMode(False)
-            # self._tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-            self._tabs.currentChanged.connect(self._on_tab_changed)
+    def _load_initial_tab(self) -> None:
+        """Load the current tab after the widget has been laid out."""
+        self._on_tab_changed(self._tabs.currentIndex())
 
-            # Ensure the tabs expand to fill the dialog area.
-            layout = QVBoxLayout(self)
-            layout.setContentsMargins(11, 11, 11, 11)
-            layout.addWidget(self._tabs)
+    def _build_tabs(self) -> None:
+        """Create a tab and placeholder slot for every page."""
+        for page in self._schema.pages:
+            placeholder = self._build_placeholder_widget("Loading...")
+            self._placeholders[page.key] = placeholder
+            self._tabs.addTab(placeholder, page.name)
 
-            self._build_tabs()
-            if self._schema.pages:
-                self._tabs.setCurrentIndex(0)
-                self._on_tab_changed(0)
-                self._tabs.tabBar().update()
-                self._tabs.update()
+    def _on_tab_changed(self, index: int) -> None:
+        """Load the selected page on demand and show it."""
+        if index < 0 or index >= len(self._schema.pages):
+            return
+        
+        page = self._schema.pages[index]
+        if page.key not in self._page_widgets:
+            # Load the page widget.
+            widget = self._load_page_widget(page)
+            self._page_widgets[page.key] = widget
+            placeholder = self._placeholders.pop(page.key, None)
 
-        def _build_tabs(self) -> None:
-            """Create a tab and placeholder slot for every page."""
-            for page in self._schema.pages:
-                placeholder = self._build_placeholder_widget("Loading...")
-                self._placeholders[page.key] = placeholder
-                self._tabs.addTab(placeholder, page.name)
+            # Replace the placeholder widget with the real page widget.
+            self._replace_tab(index, widget, page.name, placeholder)
 
-        def _on_tab_changed(self, index: int) -> None:
-            """Load the selected page on demand and show it."""
-            if index < 0 or index >= len(self._schema.pages):
-                return
-            page = self._schema.pages[index]
-            if page.key not in self._page_widgets:
-                widget = self._load_page_widget(page)
-                self._page_widgets[page.key] = widget
-                placeholder = self._placeholders.pop(page.key, None)
-                # Replace the placeholder tab with the real widget.
-                self._replace_tab(index, widget, page.name, placeholder)
-            self._tabs.setCurrentIndex(index)
-
-        def _load_page_widget(self, page: UiPageDefinition) -> QWidget:
-            """Import the page module and build its widget."""
-            try:
-                module = importlib.import_module(page.module)
-                factory = getattr(module, page.factory, None)
-                if factory is None:
-                    raise UiSchemaError(
-                        f"Page '{page.key}' missing factory '{page.factory}'."
-                    )
-                # Parent the page widget to the tab widget so it renders inside the tab.
-                widget = factory(self._tabs, self._context)
-                if QWidget is None or not isinstance(widget, QWidget):
-                    raise UiSchemaError(
-                        f"Page '{page.key}' factory did not return a QWidget."
-                    )
-                return widget
-            except Exception as exc:  # pragma: no cover - visual fallback in Anki.
-                return self._build_error_widget(
-                    f"Failed to load page '{page.name}'.\n{exc}"
+    def _load_page_widget(self, page: UiPageDefinition) -> QWidget:
+        """Import the page module and build its widget."""
+        try:
+            # Dynamically import the module and get the factory function.
+            module = importlib.import_module(page.module)
+            factory = getattr(module, page.factory, None)
+            if factory is None:
+                raise UiSchemaError(
+                    f"Page '{page.key}' missing factory '{page.factory}'."
                 )
+            
+            # Parent the page widget to the tab widget so it renders inside the tab.
+            widget = factory(self._tabs, self._context)
+            if QWidget is None or not isinstance(widget, QWidget):
+                raise UiSchemaError(
+                    f"Page '{page.key}' factory did not return a QWidget."
+                )
+            return widget
+        
+        # pragma: no cover - visual fallback in Anki.
+        except Exception as exc:
+            return self._build_error_widget(
+                f"Failed to load page '{page.name}'.\n{exc}"
+            )
 
-        def _replace_tab(
-            self,
-            index: int,
-            widget: QWidget,
-            label: str,
-            placeholder: QWidget | None,
-        ) -> None:
-            """Swap the placeholder tab widget with the real page widget."""
-            self._tabs.blockSignals(True)
-            self._tabs.setUpdatesEnabled(False)
-            self._tabs.removeTab(index)
-            self._tabs.insertTab(index, widget, label)
-            self._tabs.setCurrentIndex(index)
-            self._tabs.setUpdatesEnabled(True)
-            self._tabs.blockSignals(False)
-            self._tabs.tabBar().update()
-            self._tabs.update()
-            if placeholder is not None:
-                placeholder.deleteLater()
+    def _replace_tab(
+        self,
+        index: int,
+        widget: QWidget,
+        label: str,
+        placeholder: QWidget | None,
+    ) -> None:
+        """Swap the placeholder tab widget with the real page widget."""
+        # delete placesholder and add new widget without flicker
+        self._tabs.blockSignals(True)
+        self._tabs.setUpdatesEnabled(False)
+        self._tabs.removeTab(index)
+        self._tabs.insertTab(index, widget, label)
+        self._tabs.setCurrentIndex(index)
+        self._tabs.setUpdatesEnabled(True)
+        self._tabs.blockSignals(False)
 
-        def _build_placeholder_widget(self, text: str) -> QWidget:
-            """Create a basic placeholder label widget."""
-            label = QLabel(text, self)
-            label.setWordWrap(True)
-            label.setMargin(16)
-            return label
+        # update appearance
+        self._tabs.update()
+        self._tabs.tabBar().update()
+        
+        # delete the placeholder to free resources
+        if placeholder is not None:
+            placeholder.deleteLater()
 
-        def _build_error_widget(self, message: str) -> QWidget:
-            """Create a visible error widget for failed page loads."""
-            return self._build_placeholder_widget(message)
+    def _build_placeholder_widget(self, text: str) -> QWidget:
+        """Create a basic placeholder label widget."""
+        label = QLabel(text, self)
+        label.setWordWrap(True)
+        label.setMargin(16)
+        return label
+
+    def _build_error_widget(self, message: str) -> QWidget:
+        """Create a visible error widget for failed page loads."""
+        return self._build_placeholder_widget(message)

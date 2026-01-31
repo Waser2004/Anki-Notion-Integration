@@ -71,9 +71,11 @@ class Database:
     def connect(self) -> sqlite3.Connection:
         """Open a SQLite connection with foreign keys and row access by name."""
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+
         connection = sqlite3.connect(self._db_path)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+
         return connection
 
     def initialize(self) -> None:
@@ -88,6 +90,7 @@ class Database:
                 "SELECT value FROM settings WHERE key = ?",
                 (key,),
             ).fetchone()
+        
         return None if row is None else row["value"]
 
     def set_setting(self, key: str, value: str) -> None:
@@ -117,10 +120,12 @@ class Database:
         row = connection.execute(
             "SELECT MAX(version) AS version FROM schema_migrations"
         ).fetchone()
+
         current_version = 0 if row is None or row["version"] is None else int(row["version"])
         for migration in self._pending_migrations(current_version):
             for statement in migration.statements:
                 connection.execute(statement)
+                
             connection.execute(
                 "INSERT INTO schema_migrations (version) VALUES (?)",
                 (migration.version,),
