@@ -5,6 +5,7 @@ from __future__ import annotations
 from .db import Database
 from .settings import create_default_settings
 from .notion_client import NotionClient
+from .cards import ensure_notion_toggle_model
 from .ui.ui import initialize_ui
 
 from pathlib import Path
@@ -26,6 +27,7 @@ def on_profile_did_open() -> None:
         db.initialize()
 
         create_default_settings(db)
+        ensure_notion_toggle_model(mw)
         initialize_ui()
 
         # Install keyring dependency if not already installed
