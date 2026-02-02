@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .db import Database
 from .settings import create_default_settings
+from .notion_client import NotionClient
 from .ui.ui import initialize_ui
 
 from pathlib import Path
@@ -13,7 +14,7 @@ import subprocess
 import sys
 import importlib.util
 
-__all__ = ["Database", "create_default_settings"]
+__all__ = ["Database", "NotionClient", "create_default_settings"]
 
 def on_profile_did_open() -> None:
     profile_folder = mw.pm.profileFolder()

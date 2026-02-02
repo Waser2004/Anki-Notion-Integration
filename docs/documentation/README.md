@@ -3,6 +3,7 @@
 - `settings.md`: How settings are defined and stored.
 - `ui_pages.md`: How to add a new UI tab/page.
 - `database.md`: SQLite schema and migration model.
+- `notion_client.md`: Notion API client behavior and API reference.
 
 Related high-level docs:
 
