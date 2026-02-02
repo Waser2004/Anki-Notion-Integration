@@ -38,4 +38,9 @@ Quick notes:
 - Leave TODOs only when unavoidable and clearly scoped.
 - Always comment code to ensure readability by humans.
 
+## Testing
+- Activate the project virtual environment (`.venv\Scripts\Activate.ps1`).
+- From the repository root run: `python -m unittest discover -s tests`.
+- Ensure dev/test dependencies are installed in the active environment.
+
 Use a dedicated Git feature branch for each feature.
