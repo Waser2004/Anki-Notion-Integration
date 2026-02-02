@@ -7,6 +7,7 @@ from .settings import create_default_settings
 from .notion_client import NotionClient
 from .ui.ui import initialize_ui
 from .ui.style_patcher import mirror_checkbox_indicator_to_tree_indicators
+from .cards import ensure_notion_toggle_model
 
 from pathlib import Path
 from aqt import mw, gui_hooks
@@ -27,6 +28,7 @@ def on_profile_did_open() -> None:
         db.initialize()
 
         create_default_settings(db)
+        ensure_notion_toggle_model(mw)
         initialize_ui()
 
         # Install keyring dependency if not already installed
