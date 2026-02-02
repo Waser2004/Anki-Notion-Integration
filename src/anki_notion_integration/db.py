@@ -80,22 +80,30 @@ class Database:
 
     def initialize(self) -> None:
         """Create schema and apply any pending migrations."""
-        with self.connect() as connection:
+        connection = self.connect()
+        try:
             self._apply_migrations(connection)
+            connection.commit()
+        finally:
+            connection.close()
 
     def get_setting(self, key: str) -> Optional[str]:
         """Return a settings value by key, or None if missing."""
-        with self.connect() as connection:
+        connection = self.connect()
+        try:
             row = connection.execute(
                 "SELECT value FROM settings WHERE key = ?",
                 (key,),
             ).fetchone()
+        finally:
+            connection.close()
         
         return None if row is None else row["value"]
 
     def set_setting(self, key: str, value: str) -> None:
         """Insert or update a settings entry."""
-        with self.connect() as connection:
+        connection = self.connect()
+        try:
             connection.execute(
                 """
                 INSERT INTO settings (key, value, updated_at)
@@ -106,6 +114,9 @@ class Database:
                 """,
                 (key, value),
             )
+            connection.commit()
+        finally:
+            connection.close()
 
     def _apply_migrations(self, connection: sqlite3.Connection) -> None:
         """Apply any migrations not yet recorded in schema_migrations."""

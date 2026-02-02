@@ -65,5 +65,8 @@ Columns:
 - `initialize()` applies migrations.
 - `get_setting(key)` / `set_setting(key, value)` are convenience helpers for the `settings` table.
 
+### Connection lifecycle note (Windows)
+`Database.initialize()`, `Database.get_setting(...)`, and `Database.set_setting(...)` explicitly close their connections to avoid keeping SQLite files locked on Windows (this matters for unit tests that create temporary DB files).
+
 For higher-level settings access (defaults, type coercion, keyring integration), use `SettingsStore` from `src/anki_notion_integration/settings.py`.
 
