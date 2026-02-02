@@ -6,6 +6,7 @@ from .db import Database
 from .settings import create_default_settings
 from .notion_client import NotionClient
 from .ui.ui import initialize_ui
+from .ui.style_patcher import mirror_checkbox_indicator_to_tree_indicators
 
 from pathlib import Path
 from aqt import mw, gui_hooks
@@ -34,4 +35,9 @@ def on_profile_did_open() -> None:
         
     QTimer.singleShot(0, work)
 
+# Register hooks
 gui_hooks.profile_did_open.append(on_profile_did_open)
+gui_hooks.profile_did_open.append(mirror_checkbox_indicator_to_tree_indicators)
+
+if hasattr(gui_hooks, "theme_did_change"):
+    gui_hooks.theme_did_change.append(mirror_checkbox_indicator_to_tree_indicators)

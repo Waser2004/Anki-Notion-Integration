@@ -14,6 +14,7 @@ from aqt.qt import (
     QDialog,
     QDialogButtonBox,
     QLabel,
+    QShowEvent,
     QTabWidget,
     QVBoxLayout,
     QTimer,
@@ -184,10 +185,19 @@ class NotionWindow(QDialog):
 
         # Bottom-right close button for users who prefer a visible "Close" action.
         button_row = QDialogButtonBox(self)
+
+        # Refresh button for pages that support reloading.
+        self._refresh_button = button_row.addButton("Refresh", QDialogButtonBox.ButtonRole.ActionRole)
+        self._refresh_button.setAutoDefault(False)
+        self._refresh_button.setDefault(False)
+        self._refresh_button.clicked.connect(self._refresh_current_page)
+        self._refresh_button.hide()
+
         close_button = button_row.addButton("Close", QDialogButtonBox.ButtonRole.RejectRole)
         close_button.setAutoDefault(False)
         close_button.setDefault(False)
         close_button.clicked.connect(self.close)
+
         layout.addWidget(button_row)
 
         # Build tabs without triggering change signals during construction.
@@ -201,6 +211,11 @@ class NotionWindow(QDialog):
     def _load_initial_tab(self) -> None:
         """Load the current tab after the widget has been laid out."""
         self._on_tab_changed(self._tabs.currentIndex())
+
+    def showEvent(self, event: QShowEvent) -> None:
+        """Handle window show events to ensure tabs have focus."""
+        super().showEvent(event)
+        self._tabs.setFocus()
 
     def _build_tabs(self) -> None:
         """Create a tab and placeholder slot for every page."""
@@ -223,6 +238,35 @@ class NotionWindow(QDialog):
 
             # Replace the placeholder widget with the real page widget.
             self._replace_tab(index, widget, page.name, placeholder)
+
+        self._update_refresh_button_visibility(page.key)
+
+    def _refresh_current_page(self) -> None:
+        """Call `reload` on the currently visible page widget."""
+        widget = self._tabs.currentWidget()
+        reload_action = getattr(widget, "reload", None)
+
+        if not callable(reload_action):
+            return
+
+        self._refresh_button.setEnabled(False)
+        try:
+            reload_action()
+        finally:
+            self._refresh_button.setEnabled(True)
+            self._tabs.setFocus()
+
+    def _update_refresh_button_visibility(self, page_key: str) -> None:
+        """Show the footer refresh button only when the target page exposes `reload`."""
+        # check for reload capability
+        widget = self._page_widgets.get(page_key)
+        reload_action = getattr(widget, "reload", None)
+        visible = bool(widget is not None and callable(reload_action))
+
+        # update button visibility
+        self._refresh_button.setVisible(visible)
+        if visible:
+            self._refresh_button.setEnabled(True)
 
     def _load_page_widget(self, page: UiPageDefinition) -> QWidget:
         """Import the page module and build its widget."""

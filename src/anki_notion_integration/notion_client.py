@@ -116,21 +116,19 @@ class NotionClient:
 
     def list_pages(self, include_database_pages: bool = False) -> list[NotionPage]:
         """Return all accessible Notion pages using the search endpoint."""
+        return list(self.iter_pages(include_database_pages=include_database_pages))
+
+    def iter_pages(self, include_database_pages: bool = False) -> Iterable[NotionPage]:
+        """Yield accessible Notion pages as they are received from the API."""
         payload: dict[str, Any] = {
             "filter": {"property": "object", "value": "page"},
         }
-        pages: list[NotionPage] = []
 
         for page_payload in self._paginate_search(payload):
             page = self._normalize_page(page_payload)
-
-            # skip database pages unless requested
             if not include_database_pages and page.parent_type == "database_id":
                 continue
-
-            pages.append(page)
-        
-        return pages
+            yield page
 
     def list_pages_tree(self, include_database_pages: bool = False) -> list[PageNode]:
         """Return pages organized into a parent/child hierarchy."""

@@ -1,0 +1,239 @@
+"""Helpers for reading and writing page-selection state in the local database."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import sqlite3
+from typing import Mapping
+
+from .db import Database
+from .notion_client import NotionPage, PageNode
+
+
+@dataclass(frozen=True)
+class StoredPage:
+    """Represents one row from the `pages` table."""
+
+    notion_page_id: str
+    anki_deck_name: str
+    sync_enabled: bool
+    last_synced_at: str | None
+
+
+def flatten_page_tree(roots: list[PageNode]) -> dict[str, PageNode]:
+    """Return a page-id indexed view of a page tree."""
+    pages_by_id: dict[str, PageNode] = {}
+
+    def visit(node: PageNode) -> None:
+        if node.page.page_id in pages_by_id:
+            return
+        
+        pages_by_id[node.page.page_id] = node
+        for child in node.children:
+            visit(child)
+
+    for root in roots:
+        visit(root)
+
+    return pages_by_id
+
+
+def build_children_map(roots: list[PageNode]) -> dict[str, tuple[str, ...]]:
+    """Return a map from page id to its direct child page ids."""
+    children_map: dict[str, tuple[str, ...]] = {}
+
+    def visit(node: PageNode) -> None:
+        children_map[node.page.page_id] = tuple(child.page.page_id for child in node.children)
+        for child in node.children:
+            visit(child)
+
+    for root in roots:
+        visit(root)
+
+    return children_map
+
+
+def build_children_map_from_pages(pages_by_id: Mapping[str, NotionPage]) -> dict[str, tuple[str, ...]]:
+    """Return a children map for known pages from a page-id indexed collection."""
+    children_by_parent: dict[str, list[str]] = {
+        page_id: []
+        for page_id in pages_by_id
+    }
+
+    for page_id, page in pages_by_id.items():
+        parent_id = page.parent_id if page.parent_type == "page_id" else None
+        if parent_id and parent_id in children_by_parent:
+            children_by_parent[parent_id].append(page_id)
+    
+    return {
+        page_id: tuple(children)
+        for page_id, children in children_by_parent.items()
+    }
+
+
+def get_descendant_ids(page_id: str, children_map: Mapping[str, tuple[str, ...]]) -> set[str]:
+    """Return all descendants for a page id, excluding the page itself."""
+    descendants: set[str] = set()
+    queue = list(children_map.get(page_id, ()))
+
+    while queue:
+        current = queue.pop()
+        if current in descendants:
+            continue
+        descendants.add(current)
+        queue.extend(children_map.get(current, ()))
+
+    return descendants
+
+
+def apply_selection_rule(
+    page_id: str,
+    checked: bool,
+    selected_ids: set[str],
+    children_map: Mapping[str, tuple[str, ...]],
+) -> set[str]:
+    """Apply the asymmetric selection behavior and return the updated selected set."""
+    updated = set(selected_ids)
+
+    # Deselecting a page only deselects that page.
+    if not checked:
+        updated.discard(page_id)
+        return updated
+
+    # Selecting a page selects it and all its descendants, if all descendants are not already selected.
+    updated.add(page_id)
+    descendants = get_descendant_ids(page_id, children_map)
+    has_selected_descendant = any(descendant in selected_ids for descendant in descendants)
+    if not has_selected_descendant:
+        updated.update(descendants)
+
+    return updated
+
+
+def _normalize_deck_segment(title: str) -> str:
+    """Normalize one deck-name segment for predictable deck paths."""
+    cleaned = " ".join(str(title).split()).strip()
+    if not cleaned:
+        return "Untitled"
+
+    return cleaned.replace("::", "∷")
+
+
+def build_deck_names(roots: list[PageNode], prefix: str = "Notion") -> dict[str, str]:
+    """Build deck names using the `Notion::<Parent>::<Child>` convention."""
+    deck_names: dict[str, str] = {}
+
+    def visit(node: PageNode, path: tuple[str, ...]) -> None:
+        current_path = path + (_normalize_deck_segment(node.page.title),)
+        deck_names[node.page.page_id] = "::".join((prefix, *current_path))
+        for child in node.children:
+            visit(child, current_path)
+
+    for root in roots:
+        visit(root, ())
+
+    return deck_names
+
+
+def build_deck_names_from_pages(
+    pages_by_id: Mapping[str, NotionPage],
+    prefix: str = "Notion",
+) -> dict[str, str]:
+    """Build deck names for pages that may arrive incrementally and out of order."""
+    deck_names: dict[str, str] = {}
+    children_map = build_children_map_from_pages(pages_by_id)
+    roots: list[str] = []
+
+    for page_id, page in pages_by_id.items():
+        parent_id = page.parent_id if page.parent_type == "page_id" else None
+        if not parent_id or parent_id not in pages_by_id:
+            roots.append(page_id)
+
+    def visit(page_id: str, path: tuple[str, ...], seen: set[str]) -> None:
+        if page_id in seen:
+            return
+        page = pages_by_id.get(page_id)
+        if page is None:
+            return
+        
+        current_path = path + (_normalize_deck_segment(page.title),)
+        deck_names[page_id] = "::".join((prefix, *current_path))
+        next_seen = set(seen)
+        next_seen.add(page_id)
+        
+        for child_id in children_map.get(page_id, ()):
+            visit(child_id, current_path, next_seen)
+
+    for root_id in roots:
+        visit(root_id, (), set())
+
+    for page_id in pages_by_id:
+        if page_id not in deck_names:
+            visit(page_id, (), set())
+
+    return deck_names
+
+
+class PagesStore:
+    """Persistence helper for the `pages` table used by the Pages tab."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def get_pages(self) -> dict[str, StoredPage]:
+        """Return all stored page rows indexed by notion page id."""
+        connection = self._db.connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT notion_page_id, anki_deck_name, sync_enabled, last_synced_at
+                FROM pages
+                """
+            ).fetchall()
+        finally:
+            connection.close()
+
+        return {
+            str(row["notion_page_id"]): StoredPage(
+                notion_page_id=str(row["notion_page_id"]),
+                anki_deck_name=str(row["anki_deck_name"]),
+                sync_enabled=bool(row["sync_enabled"]),
+                last_synced_at=row["last_synced_at"],
+            )
+            for row in rows
+        }
+
+    def get_selected_page_ids(self) -> set[str]:
+        """Return notion page ids that are currently enabled for sync."""
+        return {
+            page_id
+            for page_id, page in self.get_pages().items()
+            if page.sync_enabled
+        }
+
+    def upsert_page_selection(
+        self,
+        deck_names_by_page_id: Mapping[str, str],
+        selected_page_ids: set[str],
+    ) -> None:
+        """Upsert page rows for all known pages and persist `sync_enabled` flags."""
+        connection = self._db.connect()
+        try:
+            cursor = connection.cursor()
+            for page_id, deck_name in deck_names_by_page_id.items():
+                cursor.execute(
+                    """
+                    INSERT INTO pages (notion_page_id, anki_deck_name, sync_enabled)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(notion_page_id) DO UPDATE SET
+                        anki_deck_name = excluded.anki_deck_name,
+                        sync_enabled = excluded.sync_enabled
+                    """,
+                    (page_id, deck_name, 1 if page_id in selected_page_ids else 0),
+                )
+            connection.commit()
+        except sqlite3.Error:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
