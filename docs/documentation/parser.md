@@ -37,7 +37,7 @@ Keep the parser free of Anki/`aqt` imports so it can be unit-tested outside Anki
 
 ## High-level flow
 1. **Walk the block tree** depth-first starting from the page’s top-level blocks.
-2. **Collect toggle blocks** at any depth (`block.block_type == "toggle"`).
+2. **Collect toggle blocks** only at the page root level (top-level children where `block.block_type == "toggle"`).
 3. For each toggle:
    - Extract the title from `block.raw["toggle"]["rich_text"]`.
    - Render the children blocks into HTML for the back field.
@@ -46,10 +46,10 @@ Keep the parser free of Anki/`aqt` imports so it can be unit-tested outside Anki
      - `Back` (HTML)
      - `Notion Block ID` (plain string id)
 
-### Nested toggles (recommended)
-Treat **every** toggle block as its own card, even when nested. This matches “toggle → card” and ensures each toggle is independently learnable/syncable.
+### Nested toggles
+Treat only **root toggles** as cards.
 
-In addition, when rendering a parent toggle’s back field, render nested toggles **inline** (e.g. as `<details><summary>…</summary>…</details>`) so the parent card visually matches Notion’s expanded view.
+When rendering a parent toggle’s back field, render nested toggles **inline** (e.g. as `<details><summary>…</summary>…</details>`) so the parent card visually matches Notion’s expanded view, but do **not** emit separate card payloads for nested toggles.
 
 ## Rich text → HTML rules
 Notion represents formatted text as an array of `rich_text` items. Each item has:
@@ -94,7 +94,7 @@ The stylesheet in `src/anki_notion_integration/docs/Notion_Card_Stylesheet.css` 
 So the renderer should emit `<span class="highlight-<color>">`.
 
 ### Inline equations
-For `rich_text.type == "equation"`, render the expression as MathJax/LaTeX:
+For `rich_text.type == "equation"`, render the expression using **MathJax delimiters** (Anki-native):
 
 - Inline math: `\\( … \\)`
 
@@ -138,6 +138,7 @@ Same as bulleted lists but using `<ol>`.
 - Output:
   - `<pre><code class="language-<lang>">…</code></pre>`
   - Escape code content.
+  - Keep content as plain text for MVP (no syntax highlighter dependency).
 
 ### Block equations (`"equation"`)
 - Source: `block.raw["equation"]["expression"]`
