@@ -103,7 +103,9 @@ class PagesPage(QWidget):
             self._children_map = {}
             self._deck_names_by_page_id = {}
             self._selected_ids = self._store.get_selected_page_ids()
-            self._cascade_selected_parent_ids = set(self._selected_ids)
+            # Cascade tracking is session-local user intent. Persisted DB state
+            # should be restored exactly and must not auto-select descendants.
+            self._cascade_selected_parent_ids = set()
             self._groupbox.setTitle("Loading Notion pages...")
         finally:
             self._suspend_item_events = False
@@ -155,15 +157,21 @@ class PagesPage(QWidget):
 
     def _handle_loaded_page(self, page: NotionPage) -> None:
         """Create/update one page item and refresh derived tree metadata."""
-        # Update or insert the page.
-        self._pages_by_id[page.page_id] = page
-        self._children_map = build_children_map_from_pages(self._pages_by_id)
-        self._deck_names_by_page_id = build_deck_names_from_pages(self._pages_by_id)
-        self._sync_tree_items()
+        previous_suspend_state = self._suspend_item_events
+        self._suspend_item_events = True
+        try:
+            # Prevent transient unchecked item states from triggering `itemChanged`
+            # while the tree is still being rebuilt during incremental loading.
+            self._pages_by_id[page.page_id] = page
+            self._children_map = build_children_map_from_pages(self._pages_by_id)
+            self._deck_names_by_page_id = build_deck_names_from_pages(self._pages_by_id)
+            self._sync_tree_items()
 
-        # Re-apply selection state with cascade rules.
-        self._selected_ids = self._apply_cascade_selection(self._selected_ids)
-        self._apply_selected_ids(self._selected_ids)
+            # Re-apply selection state with cascade rules.
+            self._selected_ids = self._apply_cascade_selection(self._selected_ids)
+            self._apply_selected_ids(self._selected_ids)
+        finally:
+            self._suspend_item_events = previous_suspend_state
 
         # Update progress label.
         self._page_count += 1
@@ -290,12 +298,15 @@ class PagesPage(QWidget):
         selected_ids = self._collect_selected_ids()
         descendants = get_descendant_ids(page_id, self._children_map)
         has_selected_descendant = any(descendant in selected_ids for descendant in descendants)
+        ancestor_ids = self._get_ancestor_ids(page_id)
 
         # Manage cascade-selected parents.
         if checked and not has_selected_descendant:
             self._cascade_selected_parent_ids.add(page_id)
         elif not checked:
             self._cascade_selected_parent_ids.discard(page_id)
+            # Manual deselection inside a subtree should stop parent auto-cascade.
+            self._cascade_selected_parent_ids.difference_update(ancestor_ids)
         
         updated_selected_ids = apply_selection_rule(
             page_id,
@@ -311,6 +322,25 @@ class PagesPage(QWidget):
 
         self._persist_selection_state()
 
+    def _get_ancestor_ids(self, page_id: str) -> set[str]:
+        """Return ancestor page ids for one page, guarding against cycles."""
+        ancestors: set[str] = set()
+        current_id = page_id
+
+        while True:
+            page = self._pages_by_id.get(current_id)
+            if page is None or page.parent_type != "page_id" or not page.parent_id:
+                break
+
+            parent_id = page.parent_id
+            if parent_id in ancestors:
+                break
+
+            ancestors.add(parent_id)
+            current_id = parent_id
+
+        return ancestors
+
     def _collect_selected_ids(self) -> set[str]:
         """Collect currently checked pages from the tree widget."""
         return {
@@ -321,6 +351,7 @@ class PagesPage(QWidget):
 
     def _apply_selected_ids(self, selected_ids: set[str]) -> None:
         """Apply a selected-id set to all tree items without recursive signal loops."""
+        previous_suspend_state = self._suspend_item_events
         self._suspend_item_events = True
         try:
             for page_id, item in self._items_by_id.items():
@@ -329,7 +360,7 @@ class PagesPage(QWidget):
                     self._check_state_checked() if page_id in selected_ids else self._check_state_unchecked(),
                 )
         finally:
-            self._suspend_item_events = False
+            self._suspend_item_events = previous_suspend_state
 
     def _toggle_item_from_click(self, click_pos: Any) -> bool:
         """Toggle the row's checkbox for valid clicks and return whether the event was handled."""
