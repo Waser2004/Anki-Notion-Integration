@@ -36,6 +36,7 @@ from anki_notion_integration.settings import (
     SettingsStore,
     load_settings_schema,
 )
+from anki_notion_integration.sync import run_notion_sync_with_progress, sync_notion_to_anki
 from anki_notion_integration.ui.ui import UiContext
 
 
@@ -255,8 +256,36 @@ class SettingsPage(QWidget):
 
     def _run_manual_notion_sync(self) -> None:
         """Trigger a manual Notion refresh through the Pages tab when available."""
-        # TODO: implement sync functionality
-        pass
+        binding = self._bindings.get("sync_notion_now")
+        button = binding.widget if binding is not None else None
+        if not isinstance(button, QPushButton):
+            self._show_error("Manual sync button is not available.")
+            return
+
+        button.setEnabled(False)
+        original_text = button.text()
+        button.setText("Syncing...")
+
+        def finish_manual_sync(result: Any) -> None:
+            # Always restore button state, regardless of success/failure/cancel.
+            button.setEnabled(True)
+            button.setText(original_text)
+            _ = result
+
+        started = run_notion_sync_with_progress(
+            mw=self._context.mw,
+            db_path=self._context.db_path,
+            on_done=finish_manual_sync,
+            parent=self,
+        )
+        if started:
+            return
+
+        result = sync_notion_to_anki(
+            mw=self._context.mw,
+            db_path=self._context.db_path,
+        )
+        finish_manual_sync(result)
 
     def _show_error(self, message: str) -> None:
         """Show an error message box."""

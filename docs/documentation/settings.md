@@ -63,6 +63,27 @@ Call `create_default_settings(db)` once after DB initialization to ensure all **
 
 In the add-on flow this is done in `src/anki_notion_integration/__init__.py` when the Anki profile opens.
 
+## Sync-related settings behavior
+
+The Sync category currently drives Notion → Anki behavior:
+
+- `notion_to_anki_auto_sync`: runs a background Notion → Anki sync after profile startup.
+- `sync_with_anki_sync_button`: runs Notion → Anki sync before Anki sync starts and shows Anki's native progress dialog.
+- `sync_notion_now`: runs Notion → Anki sync from the Settings tab button and shows the same native progress dialog.
+- `anki_to_notion_sync`: stored setting only (no active sync implementation yet).
+
+Progress/cancel behavior for the two manual sync triggers above:
+
+- Progress uses Anki's built-in dialog (`mw.progress`) so the look and behavior match Anki 25.x.
+- The dialog is cancelable; closing it (or pressing Escape) requests cancellation.
+- Cancellation returns a "Sync canceled." result and preserves partial stats up to the last completed unit of work.
+- If progress APIs are unavailable, the add-on falls back to the existing non-progress background/blocking behavior.
+
+Current source-of-truth for what gets synced:
+
+- Enabled pages come from the `pages` table (`sync_enabled = 1`).
+- Deck names come from `pages.anki_deck_name`.
+
 ## Provide settings to a UI
 
 `SettingsStore.get_grouped_settings()` returns a UI-friendly structure:

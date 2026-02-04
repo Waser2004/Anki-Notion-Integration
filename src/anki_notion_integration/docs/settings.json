@@ -35,13 +35,6 @@
           "default": true
         },
         {
-          "key": "anki_to_notion_sync",
-          "type": "checkbox",
-          "name": "Anki → Notion sync",
-          "description": "Enable experimental sync from Anki back to Notion.",
-          "default": false
-        },
-        {
           "key": "sync_notion_now",
           "type": "button",
           "name": "Sync Notion now",
