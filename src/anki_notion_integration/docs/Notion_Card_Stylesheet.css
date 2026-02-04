@@ -37,6 +37,17 @@ body {
 	--notion-code-bg: rgba(237, 237, 235, 1);
 	--notion-code-text: rgba(44, 44, 43, 1);
 	--notion-divider-color: rgba(230, 229, 227, 1);
+	--notion-code-border: rgba(220, 218, 214, 1);
+
+	/* Code syntax tokens (light) */
+	--syn-comment: rgba(130, 136, 149, 1);
+	--syn-keyword: rgba(154, 78, 219, 1);
+	--syn-string: rgba(19, 130, 90, 1);
+	--syn-number: rgba(162, 102, 24, 1);
+	--syn-function: rgba(33, 122, 190, 1);
+	--syn-type: rgba(61, 103, 196, 1);
+	--syn-operator: rgba(98, 104, 114, 1);
+	--syn-punctuation: rgba(98, 104, 114, 1);
 
 	/* Highlight text colors (light) */
 	--hl-default: rgba(44, 44, 43, 1);
@@ -78,6 +89,17 @@ html.night_mode,
 	--notion-code-bg: rgba(32, 32, 32, 1);
 	--notion-code-text: rgba(240, 239, 237, 1);
 	--notion-divider-color: rgba(48, 48, 46, 1);
+	--notion-code-border: rgba(66, 66, 62, 1);
+
+	/* Code syntax tokens (dark) */
+	--syn-comment: rgba(145, 152, 170, 1);
+	--syn-keyword: rgba(204, 154, 255, 1);
+	--syn-string: rgba(124, 217, 151, 1);
+	--syn-number: rgba(255, 186, 102, 1);
+	--syn-function: rgba(118, 191, 255, 1);
+	--syn-type: rgba(146, 183, 255, 1);
+	--syn-operator: rgba(210, 210, 210, 1);
+	--syn-punctuation: rgba(210, 210, 210, 1);
 
 	/* Highlight text colors (dark) */
 	--hl-default: rgba(240, 239, 237, 1);
@@ -269,6 +291,7 @@ code {
 .code {
 	border-radius: 10px;
 	padding: 1.5em 1em;
+	overflow-x: auto;
 }
 
 .code > code {
@@ -276,11 +299,44 @@ code {
 	padding: 0;
 	font-size: 100%;
 	color: inherit;
+	display: block;
+	line-height: 1.55;
 }
 
 pre {
 	white-space: pre-wrap;
 	word-break: break-all;
+}
+
+/* Scope syntax highlighting to block code only. */
+pre.code > code,
+pre code[class*="language-"] {
+	color: var(--notion-code-text) !important;
+}
+
+/* Fallback: unsupported languages still render with readable baseline styling. */
+pre.code > code:not([class*="language-"]) {
+	color: var(--notion-code-text) !important;
+}
+
+.notion-syn-comment { color: var(--syn-comment) !important; font-style: italic; }
+.notion-syn-keyword { color: var(--syn-keyword) !important; font-weight: 600; }
+.notion-syn-string { color: var(--syn-string) !important; }
+.notion-syn-number { color: var(--syn-number) !important; }
+.notion-syn-function { color: var(--syn-function) !important; }
+.notion-syn-type { color: var(--syn-type) !important; }
+.notion-syn-operator { color: var(--syn-operator) !important; }
+.notion-syn-punctuation { color: var(--syn-punctuation) !important; }
+
+/* Language-specific refinements for common languages. */
+code.language-json .notion-syn-keyword,
+code.language-yaml .notion-syn-keyword {
+	font-weight: 500;
+}
+
+code.language-sql .notion-syn-keyword {
+	text-transform: uppercase;
+	letter-spacing: 0.01em;
 }
 
 /* ============================================================

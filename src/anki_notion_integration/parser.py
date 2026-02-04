@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import html
+import re
 from typing import Any, Iterable
 from urllib.parse import urlsplit
 
@@ -13,6 +14,177 @@ from .notion_client import NotionBlock
 _SAFE_COLOR_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz_")
 _SAFE_LANG_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-")
 _UNSAFE_LINK_SCHEMES = frozenset({"javascript", "data", "vbscript"})
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_NUMBER_RE = re.compile(r"(?:0[xX][0-9A-Fa-f]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)")
+_OPERATOR_CHARS = frozenset("+-*/%=!<>|&^~?:")
+_PUNCTUATION_CHARS = frozenset("()[]{}.,;")
+
+# Canonical language labels and aliases for common Notion code-block values.
+_LANGUAGE_ALIASES = {
+    "py": "python",
+    "python": "python",
+    "js": "javascript",
+    "javascript": "javascript",
+    "jsx": "javascript",
+    "ts": "typescript",
+    "tsx": "typescript",
+    "typescript": "typescript",
+    "java": "java",
+    "c": "c",
+    "h": "c",
+    "c++": "cpp",
+    "cpp": "cpp",
+    "cc": "cpp",
+    "cxx": "cpp",
+    "hpp": "cpp",
+    "h++": "cpp",
+    "c#": "csharp",
+    "cs": "csharp",
+    "csharp": "csharp",
+    "go": "go",
+    "golang": "go",
+    "rs": "rust",
+    "rust": "rust",
+    "sql": "sql",
+    "mysql": "sql",
+    "postgresql": "sql",
+    "plsql": "sql",
+    "bash": "bash",
+    "shell": "bash",
+    "sh": "bash",
+    "zsh": "bash",
+    "json": "json",
+    "yaml": "yaml",
+    "yml": "yaml",
+    "html": "html",
+    "xml": "html",
+    "css": "css",
+}
+
+_LANGUAGE_KEYWORDS: dict[str, frozenset[str]] = {
+    "python": frozenset(
+        {
+            "and", "as", "assert", "async", "await", "break", "case", "class", "continue",
+            "def", "del", "elif", "else", "except", "finally", "for", "from", "global",
+            "if", "import", "in", "is", "lambda", "match", "nonlocal", "not", "or", "pass",
+            "raise", "return", "try", "while", "with", "yield",
+        }
+    ),
+    "javascript": frozenset(
+        {
+            "async", "await", "break", "case", "catch", "class", "const", "continue",
+            "debugger", "default", "delete", "do", "else", "export", "extends", "finally",
+            "for", "from", "function", "if", "import", "in", "instanceof", "let", "new",
+            "return", "switch", "throw", "try", "typeof", "var", "void", "while", "with",
+            "yield",
+        }
+    ),
+    "typescript": frozenset(
+        {
+            "abstract", "any", "as", "async", "await", "break", "case", "catch", "class",
+            "const", "continue", "declare", "default", "do", "else", "enum", "export",
+            "extends", "finally", "for", "from", "function", "if", "implements", "import",
+            "in", "infer", "instanceof", "interface", "keyof", "let", "namespace", "new",
+            "readonly", "return", "satisfies", "switch", "throw", "try", "type", "typeof",
+            "var", "while",
+        }
+    ),
+    "java": frozenset(
+        {
+            "abstract", "assert", "boolean", "break", "case", "catch", "class", "const",
+            "continue", "default", "do", "else", "enum", "extends", "final", "finally",
+            "for", "if", "implements", "import", "instanceof", "interface", "native", "new",
+            "package", "private", "protected", "public", "return", "static", "strictfp",
+            "super", "switch", "synchronized", "this", "throw", "throws", "transient", "try",
+            "void", "volatile", "while",
+        }
+    ),
+    "c": frozenset(
+        {
+            "auto", "break", "case", "const", "continue", "default", "do", "else", "enum",
+            "extern", "for", "goto", "if", "inline", "register", "restrict", "return",
+            "sizeof", "static", "struct", "switch", "typedef", "union", "volatile", "while",
+        }
+    ),
+    "cpp": frozenset(
+        {
+            "alignas", "auto", "break", "case", "catch", "class", "const", "constexpr",
+            "continue", "decltype", "default", "delete", "do", "else", "enum", "explicit",
+            "export", "extern", "for", "friend", "goto", "if", "inline", "mutable",
+            "namespace", "new", "noexcept", "operator", "private", "protected", "public",
+            "return", "static", "struct", "switch", "template", "this", "throw", "try",
+            "typedef", "typename", "union", "using", "virtual", "while",
+        }
+    ),
+    "csharp": frozenset(
+        {
+            "abstract", "as", "base", "break", "case", "catch", "class", "const", "continue",
+            "default", "delegate", "do", "else", "enum", "event", "explicit", "extern",
+            "finally", "for", "foreach", "if", "implicit", "in", "interface", "internal",
+            "is", "lock", "namespace", "new", "operator", "out", "override", "private",
+            "protected", "public", "readonly", "ref", "return", "sealed", "sizeof", "stackalloc",
+            "static", "struct", "switch", "this", "throw", "try", "typeof", "unchecked",
+            "unsafe", "using", "virtual", "void", "volatile", "while",
+        }
+    ),
+    "go": frozenset(
+        {
+            "break", "case", "chan", "const", "continue", "default", "defer", "else", "fallthrough",
+            "for", "func", "go", "goto", "if", "import", "interface", "map", "package", "range",
+            "return", "select", "struct", "switch", "type", "var",
+        }
+    ),
+    "rust": frozenset(
+        {
+            "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else",
+            "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop",
+            "match", "mod", "move", "mut", "pub", "ref", "return", "self", "static",
+            "struct", "super", "trait", "true", "type", "unsafe", "use", "where", "while",
+        }
+    ),
+    "sql": frozenset(
+        {
+            "select", "from", "where", "join", "inner", "left", "right", "full", "on", "group",
+            "by", "order", "having", "limit", "offset", "insert", "into", "values", "update",
+            "set", "delete", "create", "alter", "drop", "table", "view", "index", "distinct",
+            "and", "or", "not", "null", "is", "as", "case", "when", "then", "else", "end",
+        }
+    ),
+    "bash": frozenset(
+        {
+            "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done",
+            "case", "esac", "function", "in", "select", "time", "coproc", "return", "break",
+            "continue", "export", "local", "readonly",
+        }
+    ),
+    "json": frozenset({"true", "false", "null"}),
+    "yaml": frozenset({"true", "false", "null", "yes", "no", "on", "off"}),
+    "html": frozenset({"doctype"}),
+    "css": frozenset(
+        {
+            "@media", "@supports", "@keyframes", "@font-face", "@import",
+            "display", "position", "color", "background", "font-size", "grid", "flex",
+        }
+    ),
+}
+
+_LANGUAGE_TYPES: dict[str, frozenset[str]] = {
+    "python": frozenset({"int", "float", "str", "bool", "list", "dict", "tuple", "set"}),
+    "javascript": frozenset({"string", "number", "boolean", "object", "undefined"}),
+    "typescript": frozenset({"string", "number", "boolean", "void", "unknown", "never", "any"}),
+    "java": frozenset({"int", "long", "float", "double", "char", "boolean", "String"}),
+    "c": frozenset({"int", "long", "short", "float", "double", "char", "void", "size_t"}),
+    "cpp": frozenset({"int", "long", "short", "float", "double", "char", "void", "bool", "std"}),
+    "csharp": frozenset({"int", "long", "short", "float", "double", "decimal", "string", "bool", "var"}),
+    "go": frozenset({"int", "int64", "float32", "float64", "string", "bool", "byte", "rune", "error"}),
+    "rust": frozenset({"i32", "i64", "u32", "u64", "f32", "f64", "bool", "str", "String"}),
+    "sql": frozenset({"varchar", "int", "bigint", "date", "timestamp", "boolean"}),
+    "bash": frozenset({"PATH", "HOME", "PWD", "SHELL"}),
+    "json": frozenset(),
+    "yaml": frozenset(),
+    "html": frozenset({"html", "head", "body", "script", "style", "div", "span"}),
+    "css": frozenset({"px", "em", "rem", "vh", "vw"}),
+}
 
 
 @dataclass(frozen=True)
@@ -146,13 +318,15 @@ def _render_toggle_inline(block: NotionBlock) -> str:
 
 
 def _render_code_block(block: NotionBlock) -> str:
-    """Render a code block with escaped plain text."""
+    """Render a code block with lightweight syntax-highlight spans when possible."""
     payload = _block_payload(block)
     code_rich_text = payload.get("rich_text") if isinstance(payload.get("rich_text"), list) else []
     code_text = _rich_text_to_plain(code_rich_text)
     language = _sanitize_language(payload.get("language"))
+    canonical_language = _canonicalize_language(language)
     class_attr = f' class="language-{language}"' if language else ""
-    return f'<pre class="code"><code{class_attr}>{html.escape(code_text)}</code></pre>'
+    code_html = _render_highlighted_code(code_text, canonical_language)
+    return f'<pre class="code"><code{class_attr}>{code_html}</code></pre>'
 
 
 def _render_block_equation(block: NotionBlock) -> str:
@@ -213,6 +387,10 @@ def _render_rich_text_item(item: dict[str, Any]) -> str:
     if color and color != "default":
         rendered = f'<span class="highlight-{color}">{rendered}</span>'
 
+    background_color = _sanitize_color(annotations.get("background_color"))
+    if background_color and background_color != "default":
+        rendered = f'<span class="highlight-{background_color}_background">{rendered}</span>'
+
     return rendered
 
 
@@ -265,6 +443,160 @@ def _rich_text_to_plain(rich_text: Iterable[dict[str, Any]]) -> str:
     return "".join(segments)
 
 
+def _render_highlighted_code(code_text: str, canonical_language: str) -> str:
+    """Apply lightweight syntax highlighting spans for supported languages."""
+    if not code_text:
+        return ""
+    if not canonical_language:
+        return html.escape(code_text)
+
+    keywords = _LANGUAGE_KEYWORDS.get(canonical_language, frozenset())
+    type_names = _LANGUAGE_TYPES.get(canonical_language, frozenset())
+    line_comments, block_comments = _comment_delimiters(canonical_language)
+    chunks: list[str] = []
+    index = 0
+
+    # Parse left-to-right so comments/strings win before keyword matching.
+    while index < len(code_text):
+        comment_html, next_index = _consume_comment(code_text, index, line_comments, block_comments)
+        if comment_html is not None:
+            chunks.append(comment_html)
+            index = next_index
+            continue
+
+        string_html, next_index = _consume_string(code_text, index)
+        if string_html is not None:
+            chunks.append(string_html)
+            index = next_index
+            continue
+
+        number_match = _NUMBER_RE.match(code_text, index)
+        if number_match is not None:
+            token = number_match.group(0)
+            chunks.append(_highlight_token("number", token))
+            index = number_match.end()
+            continue
+
+        identifier_match = _IDENTIFIER_RE.match(code_text, index)
+        if identifier_match is not None:
+            token = identifier_match.group(0)
+            chunks.append(
+                _highlight_identifier(
+                    token=token,
+                    source=code_text,
+                    token_end=identifier_match.end(),
+                    keywords=keywords,
+                    type_names=type_names,
+                )
+            )
+            index = identifier_match.end()
+            continue
+
+        char = code_text[index]
+        if char in _OPERATOR_CHARS:
+            chunks.append(_highlight_token("operator", char))
+        elif char in _PUNCTUATION_CHARS:
+            chunks.append(_highlight_token("punctuation", char))
+        else:
+            chunks.append(html.escape(char))
+        index += 1
+
+    return "".join(chunks)
+
+
+def _comment_delimiters(canonical_language: str) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """Return line and block comment delimiters for one canonical language."""
+    if canonical_language in {"python", "bash", "yaml"}:
+        return ("#",), ()
+    if canonical_language in {"javascript", "typescript", "java", "c", "cpp", "csharp", "go", "rust", "css"}:
+        return ("//",), (("/*", "*/"),)
+    if canonical_language == "sql":
+        return ("--", "#"), (("/*", "*/"),)
+    if canonical_language == "html":
+        return (), (("<!--", "-->"),)
+    return (), ()
+
+
+def _consume_comment(
+    source: str,
+    index: int,
+    line_comments: tuple[str, ...],
+    block_comments: tuple[tuple[str, str], ...],
+) -> tuple[str | None, int]:
+    """Consume a line or block comment token when one starts at index."""
+    for start, end in block_comments:
+        if source.startswith(start, index):
+            close_at = source.find(end, index + len(start))
+            token_end = len(source) if close_at == -1 else close_at + len(end)
+            return _highlight_token("comment", source[index:token_end]), token_end
+
+    for marker in line_comments:
+        if source.startswith(marker, index):
+            newline_at = source.find("\n", index)
+            token_end = len(source) if newline_at == -1 else newline_at
+            return _highlight_token("comment", source[index:token_end]), token_end
+
+    return None, index
+
+
+def _consume_string(source: str, index: int) -> tuple[str | None, int]:
+    """Consume a quoted string when one starts at index."""
+    if index >= len(source):
+        return None, index
+
+    quote = source[index]
+    if quote not in {"'", '"', "`"}:
+        return None, index
+
+    triple_quote = source.startswith(quote * 3, index)
+    cursor = index + (3 if triple_quote else 1)
+    while cursor < len(source):
+        if triple_quote and source.startswith(quote * 3, cursor):
+            cursor += 3
+            break
+        if not triple_quote and source[cursor] == quote:
+            cursor += 1
+            break
+        if source[cursor] == "\\" and cursor + 1 < len(source):
+            cursor += 2
+            continue
+        cursor += 1
+
+    return _highlight_token("string", source[index:cursor]), cursor
+
+
+def _highlight_identifier(
+    *,
+    token: str,
+    source: str,
+    token_end: int,
+    keywords: frozenset[str],
+    type_names: frozenset[str],
+) -> str:
+    """Classify identifiers as keyword/type/function or leave plain."""
+    token_lower = token.lower()
+    if token_lower in keywords:
+        return _highlight_token("keyword", token)
+    if token in type_names or token_lower in type_names:
+        return _highlight_token("type", token)
+    if _has_call_suffix(source, token_end):
+        return _highlight_token("function", token)
+    return html.escape(token)
+
+
+def _has_call_suffix(source: str, token_end: int) -> bool:
+    """Return True when an identifier is followed by an opening call parenthesis."""
+    cursor = token_end
+    while cursor < len(source) and source[cursor].isspace():
+        cursor += 1
+    return cursor < len(source) and source[cursor] == "("
+
+
+def _highlight_token(token_type: str, value: str) -> str:
+    """Wrap one token in a syntax span class."""
+    return f'<span class="notion-syn-{token_type}">{html.escape(value)}</span>'
+
+
 def _sanitize_href(value: Any) -> str:
     """Return safe href values and drop unsafe URL schemes."""
     if not isinstance(value, str):
@@ -299,13 +631,24 @@ def _sanitize_language(value: Any) -> str:
     if not isinstance(value, str):
         return ""
 
-    cleaned = value.strip().lower()
+    cleaned = value.strip().lower().replace(" ", "-")
     if not cleaned:
         return ""
+
+    canonical = _canonicalize_language(cleaned)
+    if canonical:
+        return canonical
 
     if set(cleaned) <= _SAFE_LANG_CHARS:
         return cleaned
     return ""
+
+
+def _canonicalize_language(language: str) -> str:
+    """Map a language/alias to its canonical class name."""
+    if not language:
+        return ""
+    return _LANGUAGE_ALIASES.get(language, "")
 
 
 def _normalize_equation_expression(value: Any) -> str:

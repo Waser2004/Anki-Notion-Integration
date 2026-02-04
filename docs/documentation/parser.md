@@ -136,9 +136,15 @@ Same as bulleted lists but using `<ol>`.
 ### Code blocks (`"code"`)
 - Source: `block.raw["code"]["rich_text"]` and `block.raw["code"]["language"]`
 - Output:
-  - `<pre><code class="language-<lang>">…</code></pre>`
-  - Escape code content.
-  - Keep content as plain text for MVP (no syntax highlighter dependency).
+  - `<pre class="code"><code class="language-<lang>">…</code></pre>`
+  - Escape all code content before HTML output.
+  - Apply lightweight token spans for supported languages:
+    - `<span class="notion-syn-comment">`, `notion-syn-keyword`, `notion-syn-string`,
+      `notion-syn-number`, `notion-syn-function`, `notion-syn-type`,
+      `notion-syn-operator`, and `notion-syn-punctuation`.
+  - For unsupported languages (or missing language), render a safe plain escaped code block.
+  - Canonical language classes currently emphasize: Python, JavaScript/TypeScript, Java,
+    C/C++, C#, Go, Rust, SQL, Bash, JSON, YAML, and HTML/CSS (with alias mapping in parser).
 
 ### Block equations (`"equation"`)
 - Source: `block.raw["equation"]["expression"]`
