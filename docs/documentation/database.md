@@ -15,7 +15,7 @@ The add-on persists state locally in a per-Anki-profile SQLite database.
 
 This lets you evolve the schema without deleting user data.
 
-## Tables (migration version 1)
+## Tables (migration version 2)
 
 ### `pages`
 Stores which Notion pages are known/selected and how they map to Anki decks.
@@ -24,7 +24,9 @@ Columns:
 
 - `notion_page_id` (TEXT, PK): Notion page ID.
 - `anki_deck_name` (TEXT, NOT NULL): Target deck name for that page.
+- `anki_deck_id` (INTEGER, nullable): Target Anki deck id for stable deck references.
 - `sync_enabled` (INTEGER, NOT NULL, default `1`): Whether the page should sync.
+- `content_hash` (TEXT, nullable): Hash of page content from `notion_client.get_page_content(...)`.
 - `last_synced_at` (TEXT, nullable): Bookkeeping timestamp.
 
 ### `cards`

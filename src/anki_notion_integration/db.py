@@ -53,6 +53,14 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX IF NOT EXISTS idx_cards_page ON cards(notion_page_id)",
         ),
     ),
+    # Add anki_deck_id for better Anki deck management and content_hash for pages to speed up sync checks.
+    Migration(
+        version=2,
+        statements=(
+            "ALTER TABLE pages ADD COLUMN anki_deck_id INTEGER",
+            "ALTER TABLE pages ADD COLUMN content_hash TEXT",
+        ),
+    ),
 )
 
 
