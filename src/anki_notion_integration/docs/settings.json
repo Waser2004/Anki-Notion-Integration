@@ -21,6 +21,13 @@
       "description": "Sync behavior between Notion and Anki.",
       "settings": [
         {
+          "key": "sync_with_anki_sync_button",
+          "type": "checkbox",
+          "name": "Run Notion sync when Anki syncs",
+          "description": "Start the Notion sync flow whenever the Anki Sync button is used.",
+          "default": false
+        },
+        {
           "key": "notion_to_anki_auto_sync",
           "type": "checkbox",
           "name": "Notion → Anki auto-sync",
@@ -33,6 +40,13 @@
           "name": "Anki → Notion sync",
           "description": "Enable experimental sync from Anki back to Notion.",
           "default": false
+        },
+        {
+          "key": "sync_notion_now",
+          "type": "button",
+          "name": "Sync Notion now",
+          "description": "Run a manual Notion sync immediately.",
+          "default": null
         }
       ]
     }

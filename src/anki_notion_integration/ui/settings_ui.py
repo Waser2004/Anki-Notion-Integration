@@ -22,6 +22,7 @@ from aqt.qt import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPushButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
@@ -97,6 +98,9 @@ class SettingsPage(QWidget):
                 if isinstance(input_widget, QCheckBox):
                     input_widget.setText(setting.name)
                     form_layout.addRow(input_widget)
+                # add button
+                elif isinstance(input_widget, QPushButton):
+                    form_layout.addRow(input_widget)
                 # add other input types
                 else:
                     label = QLabel(setting.name, group)
@@ -137,6 +141,11 @@ class SettingsPage(QWidget):
             widget = QCheckBox(self)
             widget.setToolTip(setting.description)
 
+            return widget
+
+        if setting.type == "button":
+            widget = QPushButton(setting.name, self)
+            widget.setToolTip(setting.description)
             return widget
 
         if setting.type == "dropdown":
@@ -180,6 +189,8 @@ class SettingsPage(QWidget):
             # Saving on every keystroke is noisy (and for secrets may be undesirable);
             # `editingFinished` persists when the user leaves the field or presses Enter.
             widget.editingFinished.connect(lambda k=key: self._autosave_setting(k))
+        elif isinstance(widget, QPushButton):
+            widget.clicked.connect(lambda _checked=False, k=key: self._trigger_action(k))
 
     def reload_values(self) -> None:
         """Reload persisted values into the input widgets."""
@@ -187,13 +198,15 @@ class SettingsPage(QWidget):
         try:
             for key, binding in self._bindings.items():
                 setting = binding.definition
+                widget = binding.widget
+                if isinstance(widget, QPushButton):
+                    continue
                 try:
                     value = self._store.get_value(key)
                 except SettingsError as exc:
                     self._show_error(f"Failed to load setting '{key}'.\n\n{exc}")
                     continue
 
-                widget = binding.widget
                 if isinstance(widget, QCheckBox):
                     widget.setChecked(bool(value))
                 elif isinstance(widget, QComboBox):
@@ -231,6 +244,19 @@ class SettingsPage(QWidget):
             self._store.set_value(key, new_value)
         except SettingsError as exc:
             self._show_error(f"Failed to save setting '{key}'.\n\n{exc}")
+
+    def _trigger_action(self, key: str) -> None:
+        """Execute non-persistent action settings that are rendered as buttons."""
+        if key == "sync_notion_now":
+            self._run_manual_notion_sync()
+            return
+
+        QMessageBox.information(self, "Settings", f"No action is registered for '{key}'.")
+
+    def _run_manual_notion_sync(self) -> None:
+        """Trigger a manual Notion refresh through the Pages tab when available."""
+        # TODO: implement sync functionality
+        pass
 
     def _show_error(self, message: str) -> None:
         """Show an error message box."""

@@ -62,7 +62,7 @@ class SettingsSchema:
         return tuple(self._settings_by_key.values())
 
 
-_SUPPORTED_TYPES = {"text", "checkbox", "boolean", "dropdown"}
+_SUPPORTED_TYPES = {"text", "checkbox", "boolean", "dropdown", "button"}
 _DEFAULT_SETTINGS_PATH = Path(__file__).resolve().parent / "docs" / "settings.json"
 _DEFAULT_SERVICE_NAME = "anki_notion_integration"
 _DEFAULT_PROFILE_NAME = "default"
@@ -154,6 +154,9 @@ def _parse_bool(value: str) -> bool:
 
 def _coerce_value(setting: SettingDefinition, raw_value: str) -> Any:
     """Convert raw string values from storage into typed values."""
+    if setting.type == "button":
+        # Action-style settings have no persisted value and always expose defaults.
+        return setting.default
     if setting.type in {"checkbox", "boolean"}:
         return _parse_bool(raw_value)
     if setting.type == "dropdown":
@@ -165,6 +168,8 @@ def _coerce_value(setting: SettingDefinition, raw_value: str) -> Any:
 
 def _serialize_value(setting: SettingDefinition, value: Any) -> str:
     """Serialize a typed value into a string for database storage."""
+    if setting.type == "button":
+        raise SettingsError(f"Button setting '{setting.key}' cannot be serialized.")
     if setting.type in {"checkbox", "boolean"}:
         if isinstance(value, str):
             return "1" if _parse_bool(value) else "0"
@@ -235,6 +240,8 @@ class SettingsStore:
     def get_value(self, key: str) -> Any:
         """Return the current value for a setting key."""
         setting = self._schema.get_setting(key)
+        if setting.type == "button":
+            return setting.default
         if setting.storage == "keyring":
             return self._secret_store.get_secret(key) or setting.default
         raw_value = self._db.get_setting(key)
@@ -245,6 +252,8 @@ class SettingsStore:
     def set_value(self, key: str, value: Any) -> None:
         """Persist a value for the specified setting key."""
         setting = self._schema.get_setting(key)
+        if setting.type == "button":
+            raise SettingsError(f"Button setting '{key}' cannot be persisted.")
         if setting.storage == "keyring":
             if value is None or value == "":
                 self._secret_store.delete_secret(key)
@@ -290,6 +299,8 @@ def create_default_settings(db: Database, schema: SettingsSchema | None = None) 
     """Insert default settings values when they are missing."""
     resolved_schema = schema or load_settings_schema()
     for setting in resolved_schema.settings():
+        if setting.type == "button":
+            continue
         if setting.storage != "db":
             continue
         if db.get_setting(setting.key) is None:

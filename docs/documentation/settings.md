@@ -19,6 +19,7 @@ Supported setting types are currently:
 - `text`
 - `checkbox` / `boolean` (stored as `"1"`/`"0"` in the DB)
 - `dropdown` (requires an `options` list)
+- `button` (UI action only; no value stored in DB/keyring)
 
 ## Read & write settings values (code)
 
@@ -76,7 +77,7 @@ This is intended to drive a Settings tab/page without hardcoding UI labels.
 1. Edit `src/anki_notion_integration/docs/settings.json`.
 2. Add a new entry under the appropriate category:
    - `key` (unique)
-   - `type` (`text`, `checkbox`/`boolean`, `dropdown`)
+   - `type` (`text`, `checkbox`/`boolean`, `dropdown`, `button`)
    - `name`, `description`
    - `default`
    - optional `options` (required for `dropdown`)
