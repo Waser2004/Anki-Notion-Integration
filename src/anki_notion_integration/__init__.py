@@ -2,24 +2,38 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import importlib.util
+import subprocess
+import sys
+
 from .db import Database
 from .sync import trigger_startup_sync, trigger_sync_with_anki_button
 from .cards import ensure_notion_toggle_model
 from .settings import create_default_settings
 from .notion_client import NotionClient
-from .ui.ui import initialize_ui
-from .ui.style_patcher import mirror_checkbox_indicator_to_tree_indicators
 
-from aqt import mw, gui_hooks
-from aqt.qt import QTimer
-from pathlib import Path
-import subprocess
-import sys
-import importlib.util
+# This project is primarily an Anki add-on, but we also want the core modules to be
+# importable in plain Python test environments where `aqt` is not available.
+try:
+    from aqt import mw, gui_hooks  # type: ignore
+    from aqt.qt import QTimer  # type: ignore
+    from .ui.ui import initialize_ui
+    from .ui.style_patcher import mirror_checkbox_indicator_to_tree_indicators
+except ModuleNotFoundError:
+    mw = None
+    gui_hooks = None
+    QTimer = None
+    initialize_ui = None
+    mirror_checkbox_indicator_to_tree_indicators = None
 
 __all__ = ["Database", "NotionClient", "create_default_settings"]
 
 def on_profile_did_open() -> None:
+    """Initialize the add-on when an Anki profile opens."""
+    if mw is None or QTimer is None:
+        return
+
     profile_folder = mw.pm.profileFolder()
     db_path = Path(profile_folder) / "Anki_Notion_Integration" / "db" / "notion_integration.db"
 
@@ -30,7 +44,8 @@ def on_profile_did_open() -> None:
 
         create_default_settings(db)
         ensure_notion_toggle_model(mw)
-        initialize_ui()
+        if callable(initialize_ui):
+            initialize_ui()
 
         # Install keyring dependency if not already installed
         if importlib.util.find_spec("keyring") is None:
@@ -42,15 +57,21 @@ def on_profile_did_open() -> None:
 
 def _on_sync_will_start() -> None:
     """Run Notion sync before Anki sync starts."""
+    if mw is None:
+        return
+
     profile_folder = mw.pm.profileFolder()
     db_path = Path(profile_folder) / "Anki_Notion_Integration" / "db" / "notion_integration.db"
     trigger_sync_with_anki_button(mw=mw, db_path=db_path)
 
 # Register hooks
-gui_hooks.profile_did_open.append(on_profile_did_open)
-gui_hooks.profile_did_open.append(mirror_checkbox_indicator_to_tree_indicators)
-if hasattr(gui_hooks, "sync_will_start"):
-    gui_hooks.sync_will_start.append(_on_sync_will_start)
+if gui_hooks is not None:
+    gui_hooks.profile_did_open.append(on_profile_did_open)
+    if callable(mirror_checkbox_indicator_to_tree_indicators):
+        gui_hooks.profile_did_open.append(mirror_checkbox_indicator_to_tree_indicators)
+    if hasattr(gui_hooks, "sync_will_start"):
+        gui_hooks.sync_will_start.append(_on_sync_will_start)
 
-if hasattr(gui_hooks, "theme_did_change"):
-    gui_hooks.theme_did_change.append(mirror_checkbox_indicator_to_tree_indicators)
+    if hasattr(gui_hooks, "theme_did_change"):
+        if callable(mirror_checkbox_indicator_to_tree_indicators):
+            gui_hooks.theme_did_change.append(mirror_checkbox_indicator_to_tree_indicators)

@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from .cards import MODEL_NAME, ensure_notion_toggle_model
 from .db import Database
-from .notion_client import NotionClient
+from .notion_client import NotionBlock, NotionClient
 from .parser import ToggleCardPayload, parse_page_to_cards
 from .settings import SettingsStore, create_default_settings
 
@@ -43,7 +43,7 @@ class SyncError(RuntimeError):
 
 
 SyncDoneCallback = Callable[[SyncResult], None]
-SyncProgressCallback = Callable[[str, int | None, int | None], None]
+SyncProgressCallback = Callable[[str], None]
 SyncCancelCheck = Callable[[], bool]
 _sync_is_running = False
 
@@ -83,8 +83,6 @@ def sync_notion_to_anki(
     _publish_progress(
         callback=progress_callback,
         label="Preparing Notion sync...",
-        value=0,
-        maximum=len(enabled_pages),
     )
 
     # Iterate over enabled Notion pages and sync their content
@@ -94,39 +92,81 @@ def sync_notion_to_anki(
 
         _publish_progress(
             callback=progress_callback,
-            label=f"Syncing page {stats.pages_scanned + 1}/{len(enabled_pages)}...",
-            value=stats.pages_scanned,
-            maximum=len(enabled_pages),
+            label=f"{stats.pages_scanned}/{len(enabled_pages)} pages synced...",
         )
         stats = _replace_stats(stats, pages_scanned=stats.pages_scanned + 1)
+
         try:
+            # Check if the page has changed since last sync
             deck_id = _ensure_deck_id(collection, deck_name)
-            blocks = client.get_page_content(page_id)
-            payloads = parse_page_to_cards(page_id, blocks)
-            stats, page_errors, cancelled = _sync_page_payloads(
-                db=db,
-                collection=collection,
-                model=model,
-                page_id=page_id,
-                deck_id=deck_id,
-                payloads=payloads,
-                stats=stats,
-                should_cancel=should_cancel,
+            page_last_edited_time = client.get_page_last_edited_time(page_id)
+            stored_page_edit_time = _load_page_last_seen_notion_edit_time(db, page_id)
+            page_is_unchanged = (
+                page_last_edited_time is not None
+                and stored_page_edit_time is not None
+                and page_last_edited_time == stored_page_edit_time
             )
+
+            before_writes = stats.cards_created + stats.cards_updated
+            page_errors: list[str] = []
+            cancelled = False
+
+            if page_is_unchanged:
+                # Even when the page is unchanged in Notion, local Anki notes may be missing.
+                # We only contact Notion for those missing notes so we can recreate them.
+                stats, page_errors, cancelled = _repair_missing_notes_for_unchanged_page(
+                    db=db,
+                    collection=collection,
+                    model=model,
+                    page_id=page_id,
+                    deck_id=deck_id,
+                    client=client,
+                    stats=stats,
+                    should_cancel=should_cancel,
+                )
+            
+            else:
+                # Page changed: fetch only top-level blocks, then expand only the toggles that need work.
+                stats, page_errors, cancelled = _sync_changed_page_fast(
+                    db=db,
+                    collection=collection,
+                    model=model,
+                    page_id=page_id,
+                    deck_id=deck_id,
+                    client=client,
+                    stats=stats,
+                    should_cancel=should_cancel,
+                )
+
             if cancelled:
                 return _build_cancelled_result(stats)
+
             errors.extend(page_errors)
-            _mark_page_synced(db, page_id)
+
+            # Persist the last seen Notion edit time only when the page processed cleanly and
+            # the value actually changed (avoid unnecessary DB writes on skipped pages).
+            if (
+                not page_errors
+                and page_last_edited_time
+                and page_last_edited_time != stored_page_edit_time
+            ):
+                _set_page_last_seen_notion_edit_time(db, page_id, page_last_edited_time)
+
+            # Only mark the page as synced when we actually wrote changes to Anki.
+            after_writes = stats.cards_created + stats.cards_updated
+            if after_writes > before_writes:
+                _mark_page_synced(db, page_id)
+            
             _publish_progress(
                 callback=progress_callback,
                 label=f"Synced page {stats.pages_scanned}/{len(enabled_pages)}.",
-                value=stats.pages_scanned,
-                maximum=len(enabled_pages),
             )
+        
         except Exception as exc:
             errors.append(f"Page {page_id}: {exc}")
 
     _reset_mw_if_available(mw)
+    
     if errors:
         return SyncResult(
             ok=False,
@@ -140,31 +180,6 @@ def sync_notion_to_anki(
         message="Sync completed.",
         stats=stats,
     )
-
-
-def run_notion_sync_in_background(
-    mw: Any,
-    db_path: str | Path,
-    on_done: SyncDoneCallback | None = None,
-) -> bool:
-    """Run Notion → Anki sync on Anki's background task manager."""
-    taskman = getattr(mw, "taskman", None)
-    if taskman is None or not hasattr(taskman, "run_in_background"):
-        return False
-
-    def work() -> SyncResult:
-        return sync_notion_to_anki(mw=mw, db_path=db_path)
-
-    def done(future: Any) -> None:
-        try:
-            result = future.result()
-        except Exception as exc:
-            result = SyncResult(ok=False, message=f"Sync failed: {exc}", errors=(str(exc),))
-        if on_done is not None:
-            on_done(result)
-
-    taskman.run_in_background(work, done)
-    return True
 
 
 def run_notion_sync_with_progress(
@@ -186,16 +201,16 @@ def run_notion_sync_with_progress(
     if not callable(run_in_background):
         return False
     if not callable(start) or not callable(update) or not callable(finish):
-        return run_notion_sync_in_background(mw=mw, db_path=db_path, on_done=on_done)
+        return False
 
     start(parent=parent, label="Syncing Notion changes...", immediate=True, title="Sync Notion pages")
     set_title = getattr(progress, "set_title", None)
     if callable(set_title):
         set_title("Sync Notion pages")
 
-    def emit_progress(label: str, value: int | None, maximum: int | None) -> None:
+    def emit_progress(label: str) -> None:
         def apply_progress_update() -> None:
-            update(label=label, value=value, max=maximum)
+            update(label=label)
 
         # Ensure UI updates are always scheduled on the Qt main thread.
         if threading.current_thread() is threading.main_thread():
@@ -290,14 +305,9 @@ def trigger_sync_with_anki_button(
         on_done=on_done,
         parent=mw,
     )
-    if started:
-        return
-
-    # Fall back to the original blocking path when no background/progress API is available.
-    try:
-        sync_notion_to_anki(mw=mw, db_path=db_path)
-    finally:
+    if not started:
         _sync_is_running = False
+        return
 
 
 def _load_enabled_pages(db: Database) -> list[tuple[str, str]]:
@@ -344,65 +354,254 @@ def _resolve_profile_name(mw: Any) -> str | None:
     return None
 
 
-def _sync_page_payloads(
+def _sync_changed_page_fast(
     db: Database,
     collection: Any,
     model: Any,
     page_id: str,
     deck_id: int,
-    payloads: list[ToggleCardPayload],
+    client: NotionClient,
     stats: SyncStats,
     should_cancel: SyncCancelCheck | None = None,
 ) -> tuple[SyncStats, list[str], bool]:
-    """Sync one page worth of parsed toggle payloads."""
+    """Sync a page by expanding only toggles that are new/changed/missing locally."""
     existing_cards = _load_existing_cards_for_page(db, page_id)
+    payloads: list[ToggleCardPayload] = []
     errors: list[str] = []
 
-    for payload in payloads:
+    # Shallow fetch: direct children only (no recursion).
+    blocks = client.get_page_blocks_shallow(page_id)
+    toggles = [block for block in blocks if block.block_type == "toggle"]
+
+    for toggle in toggles:
         if _is_sync_cancelled(should_cancel):
             return stats, errors, True
 
+        # Count every root toggle as "seen", even when fast-skip decides no work is needed.
         stats = _replace_stats(stats, cards_seen=stats.cards_seen + 1)
-        mapping = existing_cards.get(payload.notion_block_id)
+
+        mapping = existing_cards.get(toggle.block_id)
         if mapping is not None and mapping["excluded"]:
             stats = _replace_stats(stats, cards_skipped=stats.cards_skipped + 1)
             continue
 
-        try:
-            if mapping is None:
-                note_id = _create_note(collection, model, deck_id, payload)
-                _upsert_card_mapping(db, payload, note_id, page_id)
-                stats = _replace_stats(stats, cards_created=stats.cards_created + 1)
-                continue
-
+        toggle_last_edited_time = _as_optional_string(toggle.raw.get("last_edited_time"))
+        can_skip = False
+        if mapping is not None:
             note_id = mapping["anki_note_id"]
-            if note_id is None:
-                note_id = _create_note(collection, model, deck_id, payload)
-                _upsert_card_mapping(db, payload, note_id, page_id)
-                stats = _replace_stats(stats, cards_created=stats.cards_created + 1)
-                continue
+            if (
+                note_id is not None
+                and mapping["last_seen_notion_edit_time"]
+                and mapping["last_seen_notion_edit_time"] == toggle_last_edited_time
+            ):
+                # Only skip when the local note still exists. If it is missing, we must
+                # re-fetch content from Notion to recreate it.
+                can_skip = _get_note(collection, note_id) is not None
 
-            note = _get_note(collection, note_id)
-            if note is None:
-                stats = _replace_stats(stats, cards_missing_note=stats.cards_missing_note + 1)
-                note_id = _create_note(collection, model, deck_id, payload)
-                _upsert_card_mapping(db, payload, note_id, page_id)
-                stats = _replace_stats(stats, cards_created=stats.cards_created + 1)
-                continue
+        if can_skip:
+            stats = _replace_stats(stats, cards_unchanged=stats.cards_unchanged + 1)
+            continue
 
-            _ensure_note_cards_in_deck(collection, note_id, deck_id)
-            if mapping["content_hash"] == payload.content_hash:
-                stats = _replace_stats(stats, cards_unchanged=stats.cards_unchanged + 1)
-                continue
+        # Expand only the toggles we need to sync (recursive).
+        # Avoid an extra API call when Notion indicates there are no child blocks.
+        children = client.get_block_children_recursive(toggle.block_id) if toggle.has_children else []
+        expanded_toggle = _with_children(toggle, children)
+        payloads.extend(parse_page_to_cards(page_id, [expanded_toggle]))
 
-            _apply_payload_to_note(note, payload)
-            _update_note(collection, note)
-            _upsert_card_mapping(db, payload, note_id, page_id)
-            stats = _replace_stats(stats, cards_updated=stats.cards_updated + 1)
-        except Exception as exc:
-            errors.append(f"Block {payload.notion_block_id}: {exc}")
+    # Sync only the payloads we actually expanded.
+    for payload in payloads:
+        if _is_sync_cancelled(should_cancel):
+            return stats, errors, True
+        stats, payload_errors, cancelled = _sync_one_payload(
+            db=db,
+            collection=collection,
+            model=model,
+            page_id=page_id,
+            deck_id=deck_id,
+            payload=payload,
+            stats=stats,
+            should_cancel=should_cancel,
+        )
+        errors.extend(payload_errors)
+        if cancelled:
+            return stats, errors, True
 
     return stats, errors, False
+
+
+def _repair_missing_notes_for_unchanged_page(
+    db: Database,
+    collection: Any,
+    model: Any,
+    page_id: str,
+    deck_id: int,
+    client: NotionClient,
+    stats: SyncStats,
+    should_cancel: SyncCancelCheck | None = None,
+) -> tuple[SyncStats, list[str], bool]:
+    """Recreate local Anki notes that are missing even though the Notion page is unchanged."""
+    existing_cards = _load_existing_cards_for_page(db, page_id)
+    errors: list[str] = []
+
+    # Collect only blocks that need local repair so we avoid a full Notion page fetch.
+    missing_block_ids: list[str] = []
+    for block_id, mapping in existing_cards.items():
+        if mapping["excluded"]:
+            continue
+        note_id = mapping["anki_note_id"]
+        if note_id is None:
+            missing_block_ids.append(block_id)
+            continue
+        if _get_note(collection, note_id) is None:
+            missing_block_ids.append(block_id)
+
+    if not missing_block_ids:
+        return stats, errors, False
+
+    for block_id in missing_block_ids:
+        if _is_sync_cancelled(should_cancel):
+            return stats, errors, True
+
+        stats = _replace_stats(stats, cards_seen=stats.cards_seen + 1)
+        try:
+            toggle = client.get_block(block_id)
+            if toggle.block_type != "toggle":
+                errors.append(f"Block {block_id}: expected toggle block, got {toggle.block_type!r}.")
+                continue
+            # Avoid an extra API call when Notion indicates there are no child blocks.
+            children = client.get_block_children_recursive(block_id) if toggle.has_children else []
+            expanded_toggle = _with_children(toggle, children)
+            payloads = parse_page_to_cards(page_id, [expanded_toggle])
+            for payload in payloads:
+                stats, payload_errors, cancelled = _sync_one_payload(
+                    db=db,
+                    collection=collection,
+                    model=model,
+                    page_id=page_id,
+                    deck_id=deck_id,
+                    payload=payload,
+                    stats=stats,
+                    should_cancel=should_cancel,
+                )
+                errors.extend(payload_errors)
+                if cancelled:
+                    return stats, errors, True
+        except Exception as exc:
+            errors.append(f"Block {block_id}: {exc}")
+
+    return stats, errors, False
+
+
+def _sync_one_payload(
+    db: Database,
+    collection: Any,
+    model: Any,
+    page_id: str,
+    deck_id: int,
+    payload: ToggleCardPayload,
+    stats: SyncStats,
+    should_cancel: SyncCancelCheck | None = None,
+) -> tuple[SyncStats, list[str], bool]:
+    """Sync a single card payload (small wrapper around the existing mapping logic)."""
+    if _is_sync_cancelled(should_cancel):
+        return stats, [], True
+
+    existing_cards = _load_existing_cards_for_page(db, page_id)
+    mapping = existing_cards.get(payload.notion_block_id)
+    if mapping is not None and mapping["excluded"]:
+        return _replace_stats(stats, cards_skipped=stats.cards_skipped + 1), [], False
+
+    try:
+        if mapping is None:
+            note_id = _create_note(collection, model, deck_id, payload)
+            _upsert_card_mapping(db, payload, note_id, page_id)
+            return _replace_stats(stats, cards_created=stats.cards_created + 1), [], False
+
+        note_id = mapping["anki_note_id"]
+        if note_id is None:
+            note_id = _create_note(collection, model, deck_id, payload)
+            _upsert_card_mapping(db, payload, note_id, page_id)
+            return _replace_stats(stats, cards_created=stats.cards_created + 1), [], False
+
+        note = _get_note(collection, note_id)
+        if note is None:
+            stats = _replace_stats(stats, cards_missing_note=stats.cards_missing_note + 1)
+            note_id = _create_note(collection, model, deck_id, payload)
+            _upsert_card_mapping(db, payload, note_id, page_id)
+            return _replace_stats(stats, cards_created=stats.cards_created + 1), [], False
+
+        _ensure_note_cards_in_deck(collection, note_id, deck_id)
+        if mapping["content_hash"] == payload.content_hash:
+            return _replace_stats(stats, cards_unchanged=stats.cards_unchanged + 1), [], False
+
+        _apply_payload_to_note(note, payload)
+        _update_note(collection, note)
+        _upsert_card_mapping(db, payload, note_id, page_id)
+        return _replace_stats(stats, cards_updated=stats.cards_updated + 1), [], False
+    except Exception as exc:
+        return stats, [f"Block {payload.notion_block_id}: {exc}"], False
+
+
+def _with_children(block: NotionBlock, children: list[NotionBlock]) -> NotionBlock:
+    """Return a copy of a block with a fully populated children tuple."""
+    return NotionBlock(
+        block_id=block.block_id,
+        block_type=block.block_type,
+        has_children=block.has_children,
+        parent_id=block.parent_id,
+        parent_type=block.parent_type,
+        raw=block.raw,
+        children=tuple(children),
+    )
+
+
+def _load_page_last_seen_notion_edit_time(db: Database, page_id: str) -> str | None:
+    """Return the last seen Notion edit time for a page (fast sync bookkeeping)."""
+    connection = db.connect()
+    try:
+        row = connection.execute(
+            """
+            SELECT last_seen_notion_edit_time
+            FROM pages
+            WHERE notion_page_id = ?
+            """,
+            (page_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    if row is None:
+        return None
+    value = row["last_seen_notion_edit_time"]
+    return str(value) if isinstance(value, str) and value else None
+
+
+def _set_page_last_seen_notion_edit_time(db: Database, page_id: str, value: str) -> None:
+    """Persist the last seen Notion edit time for a page."""
+    connection = db.connect()
+    try:
+        connection.execute(
+            """
+            UPDATE pages
+            SET last_seen_notion_edit_time = ?
+            WHERE notion_page_id = ?
+            """,
+            (value, page_id),
+        )
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def _as_optional_string(value: Any) -> str | None:
+    """Normalize optional values to strings or None."""
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned if cleaned else None
 
 
 def _collection_from_mw(mw: Any) -> Any | None:
@@ -610,7 +809,7 @@ def _load_existing_cards_for_page(db: Database, page_id: str) -> dict[str, dict[
     try:
         rows = connection.execute(
             """
-            SELECT notion_block_id, anki_note_id, content_hash, excluded
+            SELECT notion_block_id, anki_note_id, content_hash, last_seen_notion_edit_time, excluded
             FROM cards
             WHERE notion_page_id = ?
             """,
@@ -623,6 +822,7 @@ def _load_existing_cards_for_page(db: Database, page_id: str) -> dict[str, dict[
         str(row["notion_block_id"]): {
             "anki_note_id": int(row["anki_note_id"]) if row["anki_note_id"] is not None else None,
             "content_hash": str(row["content_hash"]),
+            "last_seen_notion_edit_time": _as_optional_string(row["last_seen_notion_edit_time"]),
             "excluded": bool(row["excluded"]),
         }
         for row in rows
@@ -731,13 +931,11 @@ def _replace_stats(stats: SyncStats, **changes: int) -> SyncStats:
 def _publish_progress(
     callback: SyncProgressCallback | None,
     label: str,
-    value: int | None,
-    maximum: int | None,
 ) -> None:
-    """Emit sync progress updates when a callback is configured."""
+    """Emit sync progress label updates when a callback is configured."""
     if callback is None:
         return
-    callback(label, value, maximum)
+    callback(label)
 
 
 def _is_sync_cancelled(should_cancel: SyncCancelCheck | None) -> bool:

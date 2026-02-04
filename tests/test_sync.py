@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from anki_notion_integration.db import Database
+from anki_notion_integration.notion_client import NotionBlock
 from anki_notion_integration.parser import ToggleCardPayload
 from anki_notion_integration.sync import (
     SyncResult,
@@ -162,9 +163,49 @@ class _FakeMwWithTaskman(_FakeMw):
 class _FakeNotionClient:
     """Notion client double used to bypass network calls."""
 
-    def get_page_content(self, page_id: str) -> list[object]:
+    def __init__(
+        self,
+        page_last_edited_time: str = "2026-02-04T00:00:00.000Z",
+        toggle_last_edited_time: str = "2026-02-04T00:00:00.000Z",
+    ) -> None:
+        self._page_last_edited_time = page_last_edited_time
+        self._toggle_last_edited_time = toggle_last_edited_time
+
+    def get_page_last_edited_time(self, page_id: str) -> str:
         _ = page_id
+        return self._page_last_edited_time
+
+    def get_page_blocks_shallow(self, page_id: str) -> list[NotionBlock]:
+        return [self._toggle_block(parent_id=page_id)]
+
+    def get_block_children_recursive(self, block_id: str) -> list[NotionBlock]:
+        _ = block_id
         return []
+
+    def get_block(self, block_id: str) -> NotionBlock:
+        _ = block_id
+        return self._toggle_block(parent_id="page-1")
+
+    def _toggle_block(self, parent_id: str) -> NotionBlock:
+        """Return a normalized toggle block with last_edited_time set."""
+        raw = {
+            "object": "block",
+            "id": "block-1",
+            "type": "toggle",
+            "has_children": True,
+            "last_edited_time": self._toggle_last_edited_time,
+            "parent": {"type": "page_id", "page_id": parent_id},
+            "toggle": {"rich_text": [{"type": "text", "plain_text": "title", "text": {"content": "title"}}]},
+        }
+        return NotionBlock(
+            block_id="block-1",
+            block_type="toggle",
+            has_children=True,
+            parent_id=parent_id,
+            parent_type="page_id",
+            raw=raw,
+            children=(),
+        )
 
 
 class SyncTests(unittest.TestCase):
@@ -330,6 +371,64 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(result.stats.pages_scanned, 0)
         self.assertIn("Canceled by user.", result.errors)
 
+    def test_sync_skips_unchanged_page_without_fetching_blocks_or_parsing(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        existing_note = collection.new_note({"name": "Notion Toggle"})
+        collection.add_note(existing_note, deck_id=1)
+
+        # Record that we've already seen this page edit time so the fast path treats it as unchanged.
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                UPDATE pages
+                SET last_seen_notion_edit_time = ?
+                WHERE notion_page_id = ?
+                """,
+                ("2026-02-04T00:00:00.000Z", "page-1"),
+            )
+            connection.execute(
+                """
+                INSERT INTO cards (
+                    notion_block_id,
+                    notion_page_id,
+                    anki_note_id,
+                    card_type,
+                    content_hash,
+                    last_seen_notion_edit_time
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("block-1", "page-1", existing_note.id, "basic", "hash-1", "2026-02-04T00:00:00.000Z"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        fake_client = _FakeNotionClient(page_last_edited_time="2026-02-04T00:00:00.000Z")
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=fake_client,
+        ), patch.object(_SYNC_MODULE, "parse_page_to_cards") as parse_mock:
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        parse_mock.assert_not_called()
+
+        # last_synced_at should remain NULL because nothing was written to Anki.
+        connection = self._db.connect()
+        try:
+            row = connection.execute(
+                "SELECT last_synced_at FROM pages WHERE notion_page_id = ?",
+                ("page-1",),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNotNone(row)
+        self.assertIsNone(row["last_synced_at"])
+
     def test_run_notion_sync_with_progress_uses_progress_dialog_and_callback(self) -> None:
         collection = _FakeCollection()
         mw = _FakeMwWithTaskman(collection)
@@ -352,19 +451,17 @@ class SyncTests(unittest.TestCase):
         self.assertIn("progress_callback", mock_sync.call_args.kwargs)
         self.assertIn("should_cancel", mock_sync.call_args.kwargs)
 
-    def test_run_notion_sync_with_progress_falls_back_when_progress_api_missing(self) -> None:
+    def test_run_notion_sync_with_progress_requires_progress_api(self) -> None:
         collection = _FakeCollection()
         mw = _FakeMw(collection)
         mw.taskman = _FakeTaskManager()
 
-        with patch.object(_SYNC_MODULE, "run_notion_sync_in_background", return_value=True) as fallback:
-            started = run_notion_sync_with_progress(
-                mw=mw,
-                db_path=self._db_path,
-            )
+        started = run_notion_sync_with_progress(
+            mw=mw,
+            db_path=self._db_path,
+        )
 
-        self.assertTrue(started)
-        fallback.assert_called_once()
+        self.assertFalse(started)
 
     def test_trigger_sync_with_anki_button_resets_run_lock_after_completion(self) -> None:
         collection = _FakeCollection()

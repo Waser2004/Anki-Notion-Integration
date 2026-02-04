@@ -36,6 +36,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             page_columns = _column_names(connection, "pages")
             self.assertIn("anki_deck_id", page_columns)
             self.assertIn("content_hash", page_columns)
+            self.assertIn("last_seen_notion_edit_time", page_columns)
         finally:
             connection.close()
 
@@ -72,10 +73,11 @@ class DatabaseMigrationTests(unittest.TestCase):
             page_columns = _column_names(connection, "pages")
             self.assertIn("anki_deck_id", page_columns)
             self.assertIn("content_hash", page_columns)
+            self.assertIn("last_seen_notion_edit_time", page_columns)
 
             latest_version = connection.execute(
                 "SELECT MAX(version) FROM schema_migrations"
             ).fetchone()[0]
-            self.assertEqual(latest_version, 2)
+            self.assertEqual(latest_version, 3)
         finally:
             connection.close()

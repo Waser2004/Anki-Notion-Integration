@@ -171,6 +171,30 @@ class NotionClient:
         """Return the full block tree for a page."""
         return self._fetch_block_children_recursive(page_id)
 
+    def get_page_last_edited_time(self, page_id: str) -> str | None:
+        """Return the page `last_edited_time` used for fast-sync decisions."""
+        payload = self._request_json("GET", f"/pages/{page_id}", None)
+        last_edited_time = payload.get("last_edited_time")
+        if isinstance(last_edited_time, str) and last_edited_time:
+            return last_edited_time
+        return None
+
+    def get_page_blocks_shallow(self, page_id: str) -> list[NotionBlock]:
+        """Return the page's direct child blocks without expanding nested children."""
+        blocks: list[NotionBlock] = []
+        for payload in self._fetch_block_children(page_id):
+            blocks.append(self._normalize_block(payload))
+        return blocks
+
+    def get_block(self, block_id: str) -> NotionBlock:
+        """Return a single Notion block without expanding its children."""
+        payload = self._request_json("GET", f"/blocks/{block_id}", None)
+        return self._normalize_block(payload)
+
+    def get_block_children_recursive(self, block_id: str) -> list[NotionBlock]:
+        """Return the full block tree under the given block id."""
+        return self._fetch_block_children_recursive(block_id)
+
     def update_toggle(self, block_id: str, title: str, body: str) -> None:
         """Update a toggle block title and replace its child blocks."""
         self._update_toggle_title(block_id, title)

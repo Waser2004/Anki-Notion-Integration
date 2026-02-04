@@ -61,6 +61,13 @@ MIGRATIONS: tuple[Migration, ...] = (
             "ALTER TABLE pages ADD COLUMN content_hash TEXT",
         ),
     ),
+    # Add last_seen_notion_edit_time to support fast sync decisions per page.
+    Migration(
+        version=3,
+        statements=(
+            "ALTER TABLE pages ADD COLUMN last_seen_notion_edit_time TEXT",
+        ),
+    ),
 )
 
 
