@@ -194,10 +194,47 @@ class ParserTests(unittest.TestCase):
 
         rendered = render_blocks(blocks)
 
-        self.assertIn('<code class="language-java">if (x &lt; 1) { return &quot;&amp;&quot;; }</code>', rendered)
+        self.assertIn('<code class="language-java">', rendered)
+        self.assertIn('<span class="notion-syn-keyword">if</span>', rendered)
+        self.assertIn('<span class="notion-syn-string">&quot;&amp;&quot;</span>', rendered)
         self.assertIn(r'<div class="notion-block-equation">\[\text{Block Equation}\]</div>', rendered)
         self.assertIn("<blockquote><p>Quoted text</p></blockquote>", rendered)
-        self.assertIn('<span class="notion-callout-icon">📌</span>', rendered)
+        self.assertIn('<p class="notion-callout-icon">📌</p>', rendered)
+
+    def test_render_blocks_code_fallback_for_unknown_language(self) -> None:
+        blocks = [
+            _block(
+                "code-2",
+                "code",
+                {
+                    "language": "unknownlang",
+                    "rich_text": [_text_item('function hello() { return "<ok>"; }')],
+                },
+            )
+        ]
+
+        rendered = render_blocks(blocks)
+
+        self.assertIn('<code class="language-unknownlang">', rendered)
+        self.assertIn("function hello() { return &quot;&lt;ok&gt;&quot;; }", rendered)
+        self.assertNotIn("notion-syn-keyword", rendered)
+
+    def test_render_blocks_normalizes_language_aliases(self) -> None:
+        blocks = [
+            _block(
+                "code-3",
+                "code",
+                {
+                    "language": "c++",
+                    "rich_text": [_text_item("int main() { return 0; }")],
+                },
+            )
+        ]
+
+        rendered = render_blocks(blocks)
+
+        self.assertIn('<code class="language-cpp">', rendered)
+        self.assertIn('<span class="notion-syn-type">int</span>', rendered)
 
 
 if __name__ == "__main__":
