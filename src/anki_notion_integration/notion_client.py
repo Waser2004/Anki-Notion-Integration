@@ -8,7 +8,12 @@ from typing import Any, Callable, Iterable
 from urllib import request, parse
 
 from .db import Database
-from .settings import SettingsStore
+from .notion_oauth import (
+    NotionOAuthError,
+    NotionOAuthSessionStore,
+    ensure_valid_access_token,
+    refresh_access_token,
+)
 
 
 class NotionApiError(RuntimeError):
@@ -79,6 +84,7 @@ class NotionClient:
         base_url: str = "https://api.notion.com/v1",
         timeout_seconds: float = 15.0,
         transport: Transport | None = None,
+        token_refresh: Callable[[], str] | None = None,
     ) -> None:
         if not api_token:
             raise NotionApiError("Notion API token is required.")
@@ -88,6 +94,7 @@ class NotionClient:
         self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
         self._transport = transport or self._default_transport
+        self._token_refresh = token_refresh
 
     @classmethod
     def from_settings(
@@ -99,19 +106,27 @@ class NotionClient:
         timeout_seconds: float = 15.0,
         transport: Transport | None = None,
     ) -> "NotionClient":
-        """Create a client using the stored Notion API token."""
-        store = SettingsStore(db, profile_name=profile_name)
-        api_token = store.get_value("notion_api_key")
+        """Create a client using stored Notion OAuth credentials."""
+        session = NotionOAuthSessionStore(db=db, profile_name=profile_name)
+        try:
+            api_token = ensure_valid_access_token(session)
+        except NotionOAuthError as exc:
+            raise NotionApiError(str(exc)) from exc
 
-        if not api_token:
-            raise NotionApiError("Notion API token is not set in settings.")
-        
+        def refresh_token() -> str:
+            """Refresh and return a new access token when the API rejects the current one."""
+            try:
+                return refresh_access_token(session)
+            except NotionOAuthError as exc:
+                raise NotionApiError(str(exc)) from exc
+
         return cls(
-            api_token=str(api_token),
+            api_token=api_token,
             notion_version=notion_version,
             base_url=base_url,
             timeout_seconds=timeout_seconds,
             transport=transport,
+            token_refresh=refresh_token,
         )
 
     def list_pages(self, include_database_pages: bool = False) -> list[NotionPage]:
@@ -393,7 +408,28 @@ class NotionClient:
         path: str,
         payload: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """Send a JSON request and return the decoded response."""
+        """Send a JSON request and return the decoded response.
+
+        When OAuth is configured, a single automatic token refresh/retry is performed
+        on `401 Unauthorized` responses.
+        """
+        try:
+            return self._request_json_once(method=method, path=path, payload=payload)
+        except NotionApiError as exc:
+            if exc.status != 401 or self._token_refresh is None:
+                raise
+
+            # Refresh once and retry the original request with the new access token.
+            self._api_token = self._token_refresh()
+            return self._request_json_once(method=method, path=path, payload=payload)
+
+    def _request_json_once(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Send one JSON request attempt and parse the response."""
         # build request
         url = f"{self._base_url}{path}"
         headers = {

@@ -1,10 +1,12 @@
 # Settings (`src/anki_notion_integration/settings.py`)
 
 ## Goal
-This project uses a schema-driven settings system:
+This project uses a schema-driven settings system for user-facing options:
 
 - **Metadata** (name/description/type/default/storage) lives in `src/anki_notion_integration/docs/settings.json`.
 - **Values** are stored either in the local SQLite DB (`settings` table) or in the OS keychain via `keyring`.
+
+Notion OAuth credentials are managed by `src/anki_notion_integration/notion_oauth.py` and are not exposed as editable text settings.
 
 This document explains how to read/write settings and how to add new ones.
 
@@ -43,14 +45,11 @@ auto_sync = store.get_value("notion_to_anki_auto_sync")   # bool
 store.set_value("notion_to_anki_auto_sync", False)        # persists to SQLite
 ```
 
-### Secret settings (`storage: "keyring"`)
+### Secret storage
 
-If a setting definition has `storage: "keyring"`, `SettingsStore` reads/writes using `KeyringSecretStore`:
+When a setting definition has `storage: "keyring"`, `SettingsStore` reads/writes using `KeyringSecretStore`.
 
-- `get_value(key)` returns the keychain secret, or the schema default when missing.
-- `set_value(key, "")` (or `None`) deletes the secret.
-
-Secret values are stored per profile name using a `username` formatted as: `<profile_name>:<setting_key>`.
+OAuth code also uses `KeyringSecretStore` directly for access/refresh tokens, with per-profile usernames in the format `<profile_name>:<setting_key>`.
 
 Note: secret storage requires the `keyring` dependency. If it is missing at runtime, `SettingsError` is raised.
 
@@ -71,6 +70,11 @@ The Sync category currently drives Notion → Anki behavior:
 - `sync_with_anki_sync_button`: runs Notion → Anki sync before Anki sync starts and shows Anki's native progress dialog.
 - `sync_notion_now`: runs Notion → Anki sync from the Settings tab button and shows the same native progress dialog.
 - `anki_to_notion_sync`: stored setting only (no active sync implementation yet).
+
+The Notion category provides account actions:
+
+- `notion_login`: launches browser-based public OAuth login.
+- `notion_logout`: revokes OAuth tokens and clears local credentials.
 
 Progress/cancel behavior for the two manual sync triggers above:
 

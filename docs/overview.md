@@ -7,7 +7,7 @@ Provide a straightforward, robust, and easy way to integrate Notion with Anki. E
 ## Core Features
 
 ### Phase 1: MVP
-- **Authentication**: Use Notion API key for initial access; design for OAuth integration in future
+- **Authentication**: Use Notion public OAuth integration with standard Notion login flow
 - **UI Overview**: Simple GUI displaying Notion pages with card generation preview
 - **Card Types**: Support standard front-back cards
 - **Card Sync**: Auto-update mechanism to keep Anki cards in sync with Notion

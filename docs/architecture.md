@@ -15,7 +15,7 @@ This document describes a scalable MVP architecture for the **Anki add-on** vari
 - Actions: Sync now, manage settings, review conflicts/deletions (future).
 
 ### 2) Settings
-- Notion API token (stored via encrypted local storage).
+- Notion OAuth session state (access/refresh tokens in keychain, metadata in local DB).
 - Selected Notion pages to sync.
 - Sync toggles:
   - Notion → Anki auto-sync (startup)

@@ -59,19 +59,13 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(self._db.get_setting("notion_to_anki_auto_sync"), "1")
         self.assertEqual(self._db.get_setting("anki_to_notion_sync"), "0")
         self.assertIsNone(self._db.get_setting("sync_notion_now"))
-        self.assertIsNone(self._db.get_setting("notion_api_key"))
+        self.assertIsNone(self._db.get_setting("notion_login"))
+        self.assertIsNone(self._db.get_setting("notion_logout"))
 
     def test_defaults_do_not_override_existing(self) -> None:
         self._db.set_setting("notion_to_anki_auto_sync", "0")
         create_default_settings(self._db, self._schema)
         self.assertEqual(self._db.get_setting("notion_to_anki_auto_sync"), "0")
-
-    def test_secret_round_trip(self) -> None:
-        store = SettingsStore(self._db, profile_name="test", schema=self._schema)
-        store.set_value("notion_api_key", "secret-value")
-        self.assertEqual(store.get_value("notion_api_key"), "secret-value")
-        store.set_value("notion_api_key", "")
-        self.assertEqual(store.get_value("notion_api_key"), "")
 
     def test_button_settings_are_actions_only(self) -> None:
         store = SettingsStore(self._db, profile_name="test", schema=self._schema)
@@ -81,9 +75,9 @@ class SettingsTests(unittest.TestCase):
 
     def test_keyring_secret_store_operations(self) -> None:
         secret_store = KeyringSecretStore("anki_notion_integration", "profile-a")
-        self.assertIsNone(secret_store.get_secret("notion_api_key"))
-        secret_store.set_secret("notion_api_key", "value-1")
-        self.assertEqual(secret_store.get_secret("notion_api_key"), "value-1")
-        secret_store.delete_secret("notion_api_key")
-        self.assertIsNone(secret_store.get_secret("notion_api_key"))
-        secret_store.delete_secret("notion_api_key")
+        self.assertIsNone(secret_store.get_secret("notion_oauth_access_token"))
+        secret_store.set_secret("notion_oauth_access_token", "value-1")
+        self.assertEqual(secret_store.get_secret("notion_oauth_access_token"), "value-1")
+        secret_store.delete_secret("notion_oauth_access_token")
+        self.assertIsNone(secret_store.get_secret("notion_oauth_access_token"))
+        secret_store.delete_secret("notion_oauth_access_token")

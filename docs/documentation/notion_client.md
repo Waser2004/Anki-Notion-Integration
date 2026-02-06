@@ -11,9 +11,12 @@ This module intentionally uses only the Python standard library (no extra HTTP d
 
 ## How authentication works
 
-`NotionClient.from_settings(db, profile_name=...)` reads the API token from `SettingsStore` using the `notion_api_key` setting (stored in the OS keychain via `keyring`).
+`NotionClient.from_settings(db, profile_name=...)` reads OAuth credentials from the per-profile Notion OAuth session store:
 
-If the token is missing, `NotionApiError` is raised.
+- Access token and refresh token are stored in the OS keychain.
+- Non-secret metadata (for example token expiration and workspace info) is stored in SQLite settings.
+
+If credentials are missing, `NotionApiError` is raised with a user-facing message instructing users to connect their Notion account in Settings.
 
 ## Data model
 
@@ -30,8 +33,11 @@ The original API payload is always retained as `raw` for future feature growth.
 ### `NotionClient`
 
 #### `NotionClient.from_settings(...)`
-- **Use when**: you want a client configured like the add-on (token pulled from settings).
-- **Raises**: `NotionApiError` if the token is empty/unset.
+- **Use when**: you want a client configured like the add-on (token pulled from OAuth session storage).
+- **Behavior**:
+  - Validates token state and refreshes proactively when expiry metadata indicates the token is stale.
+  - On API `401` responses, performs one refresh/retry automatically.
+- **Raises**: `NotionApiError` if credentials are missing/invalid or refresh fails.
 
 #### `list_pages(include_database_pages: bool = False) -> list[NotionPage]`
 - Uses the Notion `/search` endpoint and handles pagination.

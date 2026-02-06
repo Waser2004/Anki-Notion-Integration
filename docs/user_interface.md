@@ -47,6 +47,7 @@ The **Settings** tab is used for configuration and account management.
 
 - All add-on–specific settings are grouped and editable here.
 - Notion authentication is handled in this tab:
-    - Users can log in to or log out of their Notion account.
+    - Users can connect or disconnect their Notion account.
+    - Connecting opens the standard Notion OAuth login flow in the external browser and returns to Anki via a local callback.
     - The current authentication status is clearly indicated.
 - Any settings that affect synchronization behavior, card generation, or page handling are configured here.

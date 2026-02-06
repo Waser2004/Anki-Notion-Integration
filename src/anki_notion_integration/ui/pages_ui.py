@@ -62,6 +62,12 @@ class PagesPage(QWidget):
         groupbox_layout = QVBoxLayout(self._groupbox)
         root_layout.addWidget(self._groupbox)
 
+        # Error details stay inside the group box and are only shown on failure.
+        self._error_label = QLabel("", self._groupbox)
+        self._error_label.setWordWrap(True)
+        self._error_label.hide()
+        groupbox_layout.addWidget(self._error_label)
+
         self._tree = QTreeWidget(self)
         self._tree.setHeaderHidden(True)
         self._tree.setSelectionMode(self._selection_mode_no_selection())
@@ -107,6 +113,8 @@ class PagesPage(QWidget):
             # should be restored exactly and must not auto-select descendants.
             self._cascade_selected_parent_ids = set()
             self._groupbox.setTitle("Loading Notion pages...")
+            self._error_label.clear()
+            self._error_label.hide()
         finally:
             self._suspend_item_events = False
         
@@ -242,9 +250,13 @@ class PagesPage(QWidget):
 
         # Final UI updates.
         if error_message:
-            self._groupbox.setTitle(f"Failed to load pages: {error_message}")
+            self._groupbox.setTitle("Failed to load pages.")
+            self._error_label.setText(error_message)
+            self._error_label.show()
         else:
             self._groupbox.setTitle(f"Loaded {self._page_count} pages.")
+            self._error_label.clear()
+            self._error_label.hide()
             self._tree.expandToDepth(0)
         
         self._persist_selection_state()

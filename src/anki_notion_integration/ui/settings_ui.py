@@ -29,6 +29,12 @@ from aqt.qt import (
 )
 
 from anki_notion_integration.db import Database
+from anki_notion_integration.notion_oauth import (
+    NotionOAuthError,
+    NotionOAuthSessionStore,
+    disconnect_notion,
+    login_via_browser,
+)
 from anki_notion_integration.settings import (
     SettingDefinition,
     SettingsError,
@@ -55,13 +61,15 @@ class SettingsPage(QWidget):
         super().__init__(parent)
         self._context = context
         self._schema: SettingsSchema = load_settings_schema()
+        self._notion_status_label: QLabel | None = None
 
         # The DB is initialized on profile open; keep this lightweight and just bind to it.
-        db = Database(context.db_path)
+        self._db = Database(context.db_path)
 
         # Use the active Anki profile name (if available) to namespace keyring secrets.
-        profile_name = self._resolve_profile_name(context)
-        self._store = SettingsStore(db, profile_name=profile_name, schema=self._schema)
+        self._profile_name = self._resolve_profile_name(context)
+        self._store = SettingsStore(self._db , profile_name=self._profile_name, schema=self._schema)
+        self._oauth_session = NotionOAuthSessionStore(db=self._db, profile_name=self._profile_name)
 
         self._bindings: dict[str, _WidgetBinding] = {}
         self._is_loading = False
@@ -89,6 +97,12 @@ class SettingsPage(QWidget):
         # build a group box for each settings category
         for category in self._schema.categories:
             group, form_layout = self._build_category_group(category.name, category.description)
+
+            # The Notion category includes a dedicated status row above action buttons.
+            if category.key == "notion":
+                self._notion_status_label = QLabel(group)
+                self._notion_status_label.setWordWrap(True)
+                form_layout.addRow("Status", self._notion_status_label)
 
             # build input widgets for each setting in the category
             for setting in category.settings:
@@ -217,6 +231,7 @@ class SettingsPage(QWidget):
                     widget.setCurrentIndex(index if index >= 0 else 0)
                 elif isinstance(widget, QLineEdit):
                     widget.setText("" if value is None else str(value))
+            self._refresh_notion_auth_status()
         finally:
             self._is_loading = False
 
@@ -248,11 +263,66 @@ class SettingsPage(QWidget):
 
     def _trigger_action(self, key: str) -> None:
         """Execute non-persistent action settings that are rendered as buttons."""
+        if key == "notion_login":
+            self._run_notion_login()
+            return
+
+        if key == "notion_logout":
+            self._run_notion_logout()
+            return
+
         if key == "sync_notion_now":
             self._run_manual_notion_sync()
             return
 
         QMessageBox.information(self, "Settings", f"No action is registered for '{key}'.")
+
+    def _run_notion_login(self) -> None:
+        """Start browser-based Notion OAuth login and refresh UI state on success."""
+        binding = self._bindings.get("notion_login")
+        button = binding.widget if binding is not None else None
+        if not isinstance(button, QPushButton):
+            self._show_error("Connect button is not available.")
+            return
+
+        button.setEnabled(False)
+        original_text = button.text()
+        button.setText("Connecting...")
+
+        try:
+            login_via_browser(session=self._oauth_session)
+            self.reload_values()
+            QMessageBox.information(self, "Notion", "Notion account connected.")
+        except NotionOAuthError as exc:
+            self._show_error(f"Notion login failed.\n\n{exc}")
+        
+        finally:
+            button.setEnabled(True)
+            button.setText(original_text)
+
+    def _run_notion_logout(self) -> None:
+        """Revoke active OAuth tokens and remove local Notion credentials."""
+        binding = self._bindings.get("notion_logout")
+        button = binding.widget if binding is not None else None
+        if not isinstance(button, QPushButton):
+            self._show_error("Disconnect button is not available.")
+            return
+
+        button.setEnabled(False)
+        original_text = button.text()
+        button.setText("Disconnecting...")
+        
+        try:
+            disconnect_notion(session=self._oauth_session)
+            self.reload_values()
+            QMessageBox.information(self, "Notion", "Notion account disconnected.")
+        except NotionOAuthError as exc:
+            self.reload_values()
+            self._show_error(f"Notion disconnect finished with warnings.\n\n{exc}")
+        
+        finally:
+            button.setEnabled(True)
+            button.setText(original_text)
 
     def _run_manual_notion_sync(self) -> None:
         """Trigger a manual Notion refresh through the Pages tab when available."""
@@ -290,6 +360,24 @@ class SettingsPage(QWidget):
     def _show_error(self, message: str) -> None:
         """Show an error message box."""
         QMessageBox.critical(self, "Settings error", message)
+
+    def _refresh_notion_auth_status(self) -> None:
+        """Refresh the Notion authentication status row in the settings form."""
+        authenticated = self._oauth_session.is_authenticated()
+
+        if self._notion_status_label is not None:
+            self._notion_status_label.setText(self._oauth_session.auth_status_label())
+
+        # Only show actions relevant to the current auth state:
+        # - Not connected: show "Connect", hide "Disconnect"
+        # - Connected: hide "Connect", show "Disconnect"
+        login_binding = self._bindings.get("notion_login")
+        if login_binding is not None and isinstance(login_binding.widget, QPushButton):
+            login_binding.widget.setVisible(not authenticated)
+
+        logout_binding = self._bindings.get("notion_logout")
+        if logout_binding is not None and isinstance(logout_binding.widget, QPushButton):
+            logout_binding.widget.setVisible(authenticated)
 
     @staticmethod
     def _resolve_profile_name(context: UiContext) -> str | None:
