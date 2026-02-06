@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
+import hashlib
+import html
 from pathlib import Path
+import re
 import sqlite3
 import threading
 from typing import Any, Callable
+from urllib import request
+from urllib.parse import urlsplit
 
 from .cards import MODEL_NAME, ensure_notion_toggle_model
 from .db import Database
@@ -46,6 +52,16 @@ SyncDoneCallback = Callable[[SyncResult], None]
 SyncProgressCallback = Callable[[str], None]
 SyncCancelCheck = Callable[[], bool]
 _sync_is_running = False
+_IMAGE_TAG_RE = re.compile(r'<img(?P<before>[^>]*?)\ssrc="(?P<src>[^"]+)"(?P<after>[^>]*)>', re.IGNORECASE)
+# Match Mermaid placeholders even if attributes or whitespace shift slightly during HTML processing.
+_MERMAID_FIGURE_RE = re.compile(
+    r'<figure(?=[^>]*\bnotion-mermaid\b)[^>]*>\s*'
+    r'<div(?=[^>]*\bnotion-mermaid-source\b)[^>]*\bdata-mermaid="(?P<encoded>[^"]+)"[^>]*>\s*'
+    r'<pre[^>]*>\s*<code[^>]*>(?P<source>.*?)</code>\s*</pre>\s*'
+    r'</div>\s*(?P<caption><figcaption>.*?</figcaption>)?\s*</figure>',
+    re.DOTALL,
+)
+_HTTP_TIMEOUT_SECONDS = 20.0
 
 
 def sync_notion_to_anki(
@@ -513,30 +529,46 @@ def _sync_one_payload(
 
     try:
         if mapping is None:
-            note_id = _create_note(collection, model, deck_id, payload)
-            _upsert_card_mapping(db, payload, note_id, page_id)
+            prepared_payload = _prepare_payload_media(collection, payload)
+            note_id = _create_note(collection, model, deck_id, prepared_payload)
+            _upsert_card_mapping(db, prepared_payload, note_id, page_id)
             return _replace_stats(stats, cards_created=stats.cards_created + 1), [], False
 
         note_id = mapping["anki_note_id"]
         if note_id is None:
-            note_id = _create_note(collection, model, deck_id, payload)
-            _upsert_card_mapping(db, payload, note_id, page_id)
+            prepared_payload = _prepare_payload_media(collection, payload)
+            note_id = _create_note(collection, model, deck_id, prepared_payload)
+            _upsert_card_mapping(db, prepared_payload, note_id, page_id)
             return _replace_stats(stats, cards_created=stats.cards_created + 1), [], False
 
         note = _get_note(collection, note_id)
         if note is None:
             stats = _replace_stats(stats, cards_missing_note=stats.cards_missing_note + 1)
-            note_id = _create_note(collection, model, deck_id, payload)
-            _upsert_card_mapping(db, payload, note_id, page_id)
+            prepared_payload = _prepare_payload_media(collection, payload)
+            note_id = _create_note(collection, model, deck_id, prepared_payload)
+            _upsert_card_mapping(db, prepared_payload, note_id, page_id)
             return _replace_stats(stats, cards_created=stats.cards_created + 1), [], False
 
         _ensure_note_cards_in_deck(collection, note_id, deck_id)
         if mapping["content_hash"] == payload.content_hash:
+            if _note_back_needs_mermaid_theme_upgrade(note):
+                prepared_payload = _prepare_payload_media(collection, payload)
+                _apply_payload_to_note(note, prepared_payload)
+                _update_note(collection, note)
+                _upsert_card_mapping(db, prepared_payload, note_id, page_id)
+                return _replace_stats(stats, cards_updated=stats.cards_updated + 1), [], False
+            # Backfill older notes that still contain sync-time media placeholders.
+            if _note_back_contains_pending_media(note):
+                note["Back"] = _prepare_back_html_media(collection, _safe_note_field(note, "Back"))
+                _update_note(collection, note)
+                _upsert_card_mapping(db, payload, note_id, page_id)
+                return _replace_stats(stats, cards_updated=stats.cards_updated + 1), [], False
             return _replace_stats(stats, cards_unchanged=stats.cards_unchanged + 1), [], False
 
-        _apply_payload_to_note(note, payload)
+        prepared_payload = _prepare_payload_media(collection, payload)
+        _apply_payload_to_note(note, prepared_payload)
         _update_note(collection, note)
-        _upsert_card_mapping(db, payload, note_id, page_id)
+        _upsert_card_mapping(db, prepared_payload, note_id, page_id)
         return _replace_stats(stats, cards_updated=stats.cards_updated + 1), [], False
     except Exception as exc:
         return stats, [f"Block {payload.notion_block_id}: {exc}"], False
@@ -701,6 +733,263 @@ def _apply_payload_to_note(note: Any, payload: ToggleCardPayload) -> None:
     note["Front"] = payload.front_html
     note["Back"] = payload.back_html
     note["Notion Block ID"] = payload.notion_block_id
+
+
+def _note_back_contains_pending_media(note: Any) -> bool:
+    """Return whether a note back still contains remote/media placeholders to localize."""
+    back_html = _safe_note_field(note, "Back")
+    lowered = back_html.lower()
+    return ('data-mermaid="' in lowered) or ("<img" in lowered and 'src="http' in lowered)
+
+
+def _note_back_needs_mermaid_theme_upgrade(note: Any) -> bool:
+    """Return whether a note contains legacy single Mermaid SVG markup."""
+    back_html = _safe_note_field(note, "Back")
+    lowered = back_html.lower()
+    return ('src="notion_mermaid_' in lowered) and ('class="notion-mermaid-dark"' not in lowered)
+
+
+def _safe_note_field(note: Any, field_name: str) -> str:
+    """Read one note field defensively across dict-like note implementations."""
+    try:
+        value = note[field_name]
+    except Exception:
+        return ""
+    return str(value) if value is not None else ""
+
+
+def _prepare_payload_media(collection: Any, payload: ToggleCardPayload) -> ToggleCardPayload:
+    """Download external media and rewrite HTML to local collection media filenames."""
+    return ToggleCardPayload(
+        notion_page_id=payload.notion_page_id,
+        notion_block_id=payload.notion_block_id,
+        front_html=payload.front_html,
+        back_html=_prepare_back_html_media(collection, payload.back_html),
+        content_hash=payload.content_hash,
+        last_edited_time=payload.last_edited_time,
+    )
+
+
+def _prepare_back_html_media(collection: Any, back_html: str) -> str:
+    """Rewrite one Back HTML payload to local media references when possible."""
+    media_dir = _resolve_media_directory(collection)
+    if media_dir is None:
+        return back_html
+    html_with_local_images = _localize_image_sources(back_html, media_dir)
+    return _render_mermaid_sources(html_with_local_images, media_dir)
+
+
+def _resolve_media_directory(collection: Any) -> Path | None:
+    """Return the Anki collection media directory when available."""
+    media = getattr(collection, "media", None)
+    if media is None:
+        return None
+
+    media_dir = getattr(media, "dir", None)
+    if callable(media_dir):
+        try:
+            raw_path = media_dir()
+        except Exception:
+            return None
+    else:
+        raw_path = media_dir
+
+    if not isinstance(raw_path, (str, Path)):
+        return None
+
+    path = Path(raw_path)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _localize_image_sources(source_html: str, media_dir: Path) -> str:
+    """Download remote image sources and rewrite tags to local media files."""
+    if "<img" not in source_html.lower():
+        return source_html
+
+    cache: dict[str, tuple[str, str]] = {}
+
+    def replace(match: re.Match[str]) -> str:
+        encoded_src = match.group("src")
+        remote_src = html.unescape(encoded_src).strip()
+        if remote_src in cache:
+            local_name = cache[remote_src]
+            return f'<img{match.group("before")} src="{html.escape(local_name, quote=True)}"{match.group("after")}>'
+
+        local_name = _download_and_store_image(remote_src, media_dir)
+        if not local_name:
+            return match.group(0)
+
+        cache[remote_src] = local_name
+        return f'<img{match.group("before")} src="{html.escape(local_name, quote=True)}"{match.group("after")}>'
+
+    return _IMAGE_TAG_RE.sub(replace, source_html)
+
+
+def _download_and_store_image(remote_src: str, media_dir: Path) -> str:
+    """Download one remote image URL into collection media and return its filename."""
+    if not _is_http_url(remote_src):
+        return ""
+
+    image_data = _download_bytes(remote_src)
+    if image_data is None:
+        return ""
+
+    filename = _image_media_filename(remote_src)
+    if not filename:
+        return ""
+
+    _write_media_file(media_dir, filename, image_data)
+    return filename
+
+
+def _download_bytes(url: str) -> bytes | None:
+    """Download one HTTP(S) URL and return its raw bytes."""
+    request_obj = request.Request(url, method="GET")
+    try:
+        with request.urlopen(request_obj, timeout=_HTTP_TIMEOUT_SECONDS) as response:
+            return response.read()
+    except Exception:
+        return None
+
+
+def _image_media_filename(remote_src: str) -> str:
+    """Build a stable media filename for an image URL."""
+    digest = hashlib.sha256(remote_src.encode("utf-8")).hexdigest()[:20]
+    extension = _safe_media_extension(remote_src, default=".img")
+    return f"notion_image_{digest}{extension}"
+
+
+def _safe_media_extension(url: str, default: str) -> str:
+    """Extract a conservative file extension from a URL path."""
+    suffix = Path(urlsplit(url).path).suffix.lower()
+    if not suffix:
+        return default
+
+    if len(suffix) > 10:
+        return default
+
+    allowed = set("abcdefghijklmnopqrstuvwxyz0123456789.")
+    if set(suffix) <= allowed and suffix.startswith("."):
+        return suffix
+    return default
+
+
+def _render_mermaid_sources(source_html: str, media_dir: Path) -> str:
+    """Render Mermaid placeholders to local SVG media with code-block fallback."""
+    if "data-mermaid=" not in source_html:
+        return source_html
+
+    cache: dict[str, str] = {}
+
+    def replace(match: re.Match[str]) -> str:
+        encoded_source = match.group("encoded")
+        caption_html = match.group("caption") or ""
+
+        if encoded_source in cache:
+            light_name, dark_name = cache[encoded_source]
+            return _render_mermaid_code_block(light_name, dark_name, caption_html)
+
+        mermaid_source = _decode_mermaid_source(encoded_source)
+        if not mermaid_source:
+            return match.group(0)
+
+        light_svg_payload = _render_mermaid_svg(mermaid_source, theme="light")
+        if light_svg_payload is None:
+            return match.group(0)
+
+        dark_svg_payload = _render_mermaid_svg(mermaid_source, theme="dark") or light_svg_payload
+        light_filename = _mermaid_media_filename(mermaid_source, variant="light")
+        dark_filename = _mermaid_media_filename(mermaid_source, variant="dark")
+        _write_media_file(media_dir, light_filename, light_svg_payload)
+        _write_media_file(media_dir, dark_filename, dark_svg_payload)
+        cache[encoded_source] = (light_filename, dark_filename)
+        return _render_mermaid_code_block(light_filename, dark_filename, caption_html)
+
+    return _MERMAID_FIGURE_RE.sub(replace, source_html)
+
+
+def _decode_mermaid_source(encoded_source: str) -> str:
+    """Decode a URL-safe Base64 Mermaid source payload."""
+    cleaned = encoded_source.strip()
+    if not cleaned:
+        return ""
+
+    padding = "=" * (-len(cleaned) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode((cleaned + padding).encode("ascii"))
+    except Exception:
+        return ""
+    return decoded.decode("utf-8", errors="replace")
+
+
+def _render_mermaid_svg(mermaid_source: str, *, theme: str = "light") -> bytes | None:
+    """Render Mermaid source to SVG bytes using the Kroki HTTP API."""
+    request_source = mermaid_source
+    if theme == "dark":
+        # Ask Mermaid to emit dark-mode-friendly colors.
+        request_source = "%%{init: {'theme': 'dark'}}%%\n" + mermaid_source
+
+    body = request_source.encode("utf-8")
+    request_obj = request.Request(
+        "https://kroki.io/mermaid/svg",
+        data=body,
+        headers={
+            "Content-Type": "text/plain; charset=utf-8",
+            "User-Agent": "anki-notion-integration/1.0 (+https://github.com)",
+        },
+        method="POST",
+    )
+    try:
+        with request.urlopen(request_obj, timeout=_HTTP_TIMEOUT_SECONDS) as response:
+            payload = response.read()
+    except Exception:
+        return None
+
+    if b"<svg" not in payload:
+        return None
+    return payload
+
+
+def _mermaid_media_filename(mermaid_source: str, variant: str = "light") -> str:
+    """Build a stable SVG media filename for Mermaid source text."""
+    digest = hashlib.sha256(mermaid_source.encode("utf-8")).hexdigest()[:20]
+    safe_variant = "dark" if variant == "dark" else "light"
+    return f"notion_mermaid_{safe_variant}_{digest}.svg"
+
+
+def _render_mermaid_code_block(light_filename: str, dark_filename: str, caption_html: str) -> str:
+    """Render Mermaid output as theme-aware SVG images inside a code-style block."""
+    light_src_attr = html.escape(light_filename, quote=True)
+    dark_src_attr = html.escape(dark_filename, quote=True)
+    return (
+        '<figure class="notion-mermaid">'
+        '<pre class="code notion-mermaid-diagram"><code class="language-mermaid">'
+        f'<img class="notion-mermaid-light" src="{light_src_attr}" alt="Mermaid diagram" loading="lazy"/>'
+        f'<img class="notion-mermaid-dark" src="{dark_src_attr}" alt="Mermaid diagram" loading="lazy"/>'
+        "</code></pre>"
+        f"{caption_html}"
+        "</figure>"
+    )
+
+
+def _write_media_file(media_dir: Path, filename: str, payload: bytes) -> None:
+    """Write bytes to a media file only when content differs."""
+    target_path = media_dir / filename
+    if target_path.exists():
+        try:
+            current = target_path.read_bytes()
+            if current == payload:
+                return
+        except Exception:
+            pass
+    target_path.write_bytes(payload)
+
+
+def _is_http_url(value: str) -> bool:
+    """Return whether a URL uses HTTP(S)."""
+    scheme = urlsplit(value).scheme.lower()
+    return scheme in {"http", "https"}
 
 
 def _note_id(note: Any) -> int | None:

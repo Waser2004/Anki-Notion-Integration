@@ -201,6 +201,7 @@ th {
 .notion-back {
 	margin: 0 auto;
 	max-width: 700px;
+	padding-bottom: 1em;
 	background: var(--notion-bg) !important;
 	color: var(--notion-text) !important;
 }
@@ -213,7 +214,7 @@ h1, h2, h3 {
 	letter-spacing: -0.01em;
 	line-height: 1.2;
 	font-weight: 600;
-	margin-bottom: 0;
+	margin-bottom: 1em;
 }
 
 h1 strong,
@@ -385,6 +386,54 @@ th {
 }
 
 /* ============================================================
+   Images and Mermaid
+   ============================================================ */
+
+.notion-image,
+.notion-mermaid {
+	margin: 1em 0;
+}
+
+.notion-image img,
+.notion-mermaid img {
+	display: block;
+	max-width: 100%;
+	height: auto;
+	margin: 0 auto;
+	border-radius: 8px;
+}
+
+.notion-mermaid .notion-mermaid-dark {
+	display: none;
+}
+
+body.nightMode .notion-mermaid .notion-mermaid-light,
+html.nightMode .notion-mermaid .notion-mermaid-light,
+.nightMode body .notion-mermaid .notion-mermaid-light,
+body.night_mode .notion-mermaid .notion-mermaid-light,
+html.night_mode .notion-mermaid .notion-mermaid-light,
+.night_mode body .notion-mermaid .notion-mermaid-light {
+	display: none;
+}
+
+body.nightMode .notion-mermaid .notion-mermaid-dark,
+html.nightMode .notion-mermaid .notion-mermaid-dark,
+.nightMode body .notion-mermaid .notion-mermaid-dark,
+body.night_mode .notion-mermaid .notion-mermaid-dark,
+html.night_mode .notion-mermaid .notion-mermaid-dark,
+.night_mode body .notion-mermaid .notion-mermaid-dark {
+	display: block;
+}
+
+.notion-image figcaption,
+.notion-mermaid figcaption {
+	margin-top: 0.5em;
+	font-size: 0.9em;
+	opacity: 0.85;
+	text-align: center;
+}
+
+/* ============================================================
    Callouts
    ============================================================ */
 
@@ -414,21 +463,39 @@ th {
 }
 
 /* ============================================================
+   Multi-Column Layouts
+   ============================================================ */
+
+.notion-columns {
+	display: flex;
+	align-items: flex-start;
+	gap: 1em;
+}
+
+.notion-column[data-column-ratio] {
+	flex: 0 0 var(--notion-column-width);
+	width: var(--notion-column-width);
+}
+
+/* ============================================================
    Toggles (Nested Cards)
    ============================================================ */
 
 .notion-toggle {
 	margin: 0.6em 0;
 	padding: 0.4em 0.6em;
-	border: 1px solid var(--notion-border) !important;
-	border-radius: 8px;
-	background: var(--notion-surface-2) !important;
+	border: none;
+	background: none;
 }
 
 .notion-toggle > summary {
 	cursor: pointer;
 	font-weight: 600;
 	color: var(--notion-text) !important;
+}
+
+.notion-toggle > :not(summary) {
+	margin-left: 1.25em;
 }
 
 /* ============================================================
@@ -484,4 +551,70 @@ th {
 .highlight-pink_background,
 .highlight-red_background {
 	color: var(--notion-text) !important;
+}
+
+/* Final spacing override so all rendered block objects keep a consistent 1em vertical gap. */
+:where(.notion-back, blockquote, .callout > div, .notion-toggle, li) > :where(
+	p,
+	blockquote,
+	ul,
+	ol,
+	pre,
+	table,
+	figure,
+	hr,
+	.callout,
+	.notion-toggle,
+	.notion-columns,
+	.notion-block-equation
+) {
+	margin-top: 0 !important;
+	margin-bottom: 0 !important;
+}
+
+:where(.notion-back, blockquote, .callout > div, .notion-toggle, li) > :where(
+	p,
+	blockquote,
+	ul,
+	ol,
+	pre,
+	table,
+	figure,
+	hr,
+	.callout,
+	.notion-toggle,
+	.notion-columns,
+	.notion-block-equation
+) + :where(
+	p,
+	blockquote,
+	ul,
+	ol,
+	pre,
+	table,
+	figure,
+	hr,
+	.callout,
+	.notion-toggle,
+	.notion-columns,
+	.notion-block-equation
+) {
+	margin-top: 1em !important;
+}
+
+.notion-toggle > :where(
+	p,
+	blockquote,
+	ul,
+	ol,
+	pre,
+	table,
+	figure,
+	hr,
+	.callout,
+	.notion-toggle,
+	.notion-columns,
+	.notion-block-equation
+):first-of-type {
+	margin-top: 1em !important;
 }

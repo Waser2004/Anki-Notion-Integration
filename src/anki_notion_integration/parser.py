@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 import hashlib
 import html
+import math
 import re
 from typing import Any, Iterable
 from urllib.parse import urlsplit
@@ -254,12 +256,26 @@ def parse_page_to_cards(page_id: str, blocks: Iterable[NotionBlock]) -> list[Tog
 def _render_block(block: NotionBlock) -> str:
     """Render a single block, including required children recursion."""
     block_type = block.block_type
+    if block_type == "heading_1":
+        return _render_heading(block, level=1)
+    if block_type == "heading_2":
+        return _render_heading(block, level=2)
+    if block_type == "heading_3":
+        return _render_heading(block, level=3)
+    if block_type == "column_list":
+        return _render_column_list(block)
+    if block_type == "column":
+        return _render_column(block)
     if block_type == "paragraph":
         return _render_paragraph(block)
+    if block_type == "table":
+        return _render_table(block)
     if block_type == "quote":
         return _render_quote(block)
     if block_type == "callout":
         return _render_callout(block)
+    if block_type == "image":
+        return _render_image(block)
     if block_type == "code":
         return _render_code_block(block)
     if block_type == "equation":
@@ -271,10 +287,50 @@ def _render_block(block: NotionBlock) -> str:
     return ""
 
 
+def _render_column_list(block: NotionBlock) -> str:
+    """Render a Notion multi-column container with width ratios."""
+    column_blocks = [child for child in block.children if child.block_type == "column"]
+    if not column_blocks:
+        return ""
+
+    # Resolve ratios once so rendering is deterministic for any column count.
+    width_ratios = _resolve_column_width_ratios(column_blocks)
+    rendered_columns = [
+        _render_column_with_width(column_block, width_ratio=width_ratio)
+        for column_block, width_ratio in zip(column_blocks, width_ratios)
+    ]
+    return f'<div class="notion-columns">{"".join(rendered_columns)}</div>'
+
+
+def _render_column(block: NotionBlock) -> str:
+    """Render a standalone column block when encountered directly."""
+    return _render_column_with_width(block, width_ratio=None)
+
+
+def _render_column_with_width(block: NotionBlock, *, width_ratio: float | None) -> str:
+    """Render one column block and optionally apply an explicit width ratio."""
+    children_html = render_blocks(block.children)
+    if width_ratio is None:
+        return f'<div class="notion-column">{children_html}</div>'
+
+    width_percent = width_ratio * 100.0
+    style_attr = f' style="--notion-column-width: {width_percent:.6f}%;"'
+    ratio_attr = f' data-column-ratio="{width_ratio:.6f}"'
+    return f'<div class="notion-column"{ratio_attr}{style_attr}>{children_html}</div>'
+
+
 def _render_paragraph(block: NotionBlock) -> str:
     """Render a paragraph block and any nested children."""
     text_html = render_rich_text(_block_rich_text(block))
     body = f"<p>{text_html}</p>"
+    children_html = render_blocks(block.children)
+    return body + children_html
+
+
+def _render_heading(block: NotionBlock, *, level: int) -> str:
+    """Render a heading block (levels 1-3) and any nested children."""
+    text_html = render_rich_text(_block_rich_text(block))
+    body = f"<h{level}>{text_html}</h{level}>"
     children_html = render_blocks(block.children)
     return body + children_html
 
@@ -323,6 +379,9 @@ def _render_code_block(block: NotionBlock) -> str:
     code_rich_text = payload.get("rich_text") if isinstance(payload.get("rich_text"), list) else []
     code_text = _rich_text_to_plain(code_rich_text)
     language = _sanitize_language(payload.get("language"))
+    if language == "mermaid":
+        return _render_mermaid_code_block(code_text, payload)
+
     canonical_language = _canonicalize_language(language)
     class_attr = f' class="language-{language}"' if language else ""
     code_html = _render_highlighted_code(code_text, canonical_language)
@@ -354,6 +413,190 @@ def _render_list_sequence(
         index += 1
 
     return f"<{list_tag}>{''.join(items)}</{list_tag}>", index
+
+
+def _render_table(block: NotionBlock) -> str:
+    """Render a Notion table block and its row children."""
+    payload = _block_payload(block)
+    has_column_header = bool(payload.get("has_column_header"))
+    has_row_header = bool(payload.get("has_row_header"))
+    table_width = _normalize_table_width(payload.get("table_width"))
+
+    row_blocks = [child for child in block.children if child.block_type == "table_row"]
+    rows = [_table_row_cells(row_block, table_width) for row_block in row_blocks]
+    if not rows:
+        return f'<table><tbody></tbody></table>'
+
+    # process header row if present
+    if has_column_header:
+        header_html = f"<thead>{_render_table_row(rows[0], row_index=0, has_column_header=True, has_row_header=False)}</thead>"
+        body_rows = rows[1:]
+    else:
+        header_html = ""
+        body_rows = rows
+
+    body_html = "".join(
+        _render_table_row(
+            row_cells,
+            row_index=index + (1 if has_column_header else 0),
+            has_column_header=has_column_header,
+            has_row_header=has_row_header,
+        )
+        for index, row_cells in enumerate(body_rows)
+    )
+    return f'<table>{header_html}<tbody>{body_html}</tbody></table>'
+
+
+def _resolve_column_width_ratios(column_blocks: list[NotionBlock]) -> list[float]:
+    """Resolve one normalized width ratio per column block."""
+    column_count = len(column_blocks)
+    if column_count == 0:
+        return []
+
+    parsed = [_column_width_ratio(column_block) for column_block in column_blocks]
+    known = [ratio for ratio in parsed if ratio is not None]
+    missing_count = sum(1 for ratio in parsed if ratio is None)
+
+    if missing_count == 0:
+        total = sum(known)
+        if total > 0:
+            return [ratio / total for ratio in known]
+        return [1.0 / column_count] * column_count
+
+    total_known = sum(known)
+    if total_known <= 0:
+        return [1.0 / column_count] * column_count
+
+    if total_known < 1.0:
+        # Notion width ratios are commonly fractional shares summing to 1.
+        inferred = (1.0 - total_known) / missing_count
+        return [ratio if ratio is not None else inferred for ratio in parsed]
+
+    # If known values already exceed 1 with missing columns, use known average as fallback.
+    inferred = total_known / len(known)
+    weights = [ratio if ratio is not None else inferred for ratio in parsed]
+    weight_total = sum(weights)
+    if weight_total <= 0:
+        return [1.0 / column_count] * column_count
+    return [weight / weight_total for weight in weights]
+
+
+def _column_width_ratio(block: NotionBlock) -> float | None:
+    """Extract one safe width_ratio from a `column` block payload."""
+    payload = _block_payload(block)
+    value = payload.get("width_ratio")
+    if not isinstance(value, (int, float)):
+        return None
+
+    ratio = float(value)
+    if not math.isfinite(ratio) or ratio <= 0:
+        return None
+    return ratio
+
+
+def _normalize_table_width(value: Any) -> int | None:
+    """Normalize Notion table width metadata to a positive integer."""
+    if isinstance(value, int) and value > 0:
+        return value
+    return None
+
+
+def _table_row_cells(row_block: NotionBlock, table_width: int | None) -> list[list[dict[str, Any]]]:
+    """Return one table row as a list of rich-text cell payloads."""
+    row_payload = _block_payload(row_block)
+    raw_cells = row_payload.get("cells")
+    if not isinstance(raw_cells, list):
+        return []
+
+    cells: list[list[dict[str, Any]]] = []
+    for raw_cell in raw_cells:
+        if isinstance(raw_cell, list):
+            cells.append([item for item in raw_cell if isinstance(item, dict)])
+        else:
+            cells.append([])
+
+    normalized_width = table_width if table_width is not None else len(cells)
+    if normalized_width < len(cells):
+        return cells[:normalized_width]
+    if normalized_width > len(cells):
+        return cells + ([[]] * (normalized_width - len(cells)))
+    return cells
+
+
+def _render_table_row(
+    row_cells: list[list[dict[str, Any]]],
+    *,
+    row_index: int,
+    has_column_header: bool,
+    has_row_header: bool,
+) -> str:
+    """Render one HTML table row honoring Notion header metadata."""
+    parts: list[str] = []
+    for column_index, cell_rich_text in enumerate(row_cells):
+        cell_html = render_rich_text(cell_rich_text)
+        if has_column_header and row_index == 0:
+            parts.append(f'<th scope="col">{cell_html}</th>')
+            continue
+        if has_row_header and column_index == 0:
+            parts.append(f'<th scope="row">{cell_html}</th>')
+            continue
+        parts.append(f"<td>{cell_html}</td>")
+    return f"<tr>{''.join(parts)}</tr>"
+
+
+def _render_image(block: NotionBlock) -> str:
+    """Render a Notion image block as a figure with optional caption."""
+    payload = _block_payload(block)
+    image_url = _extract_image_url(payload)
+    caption_items = _extract_caption_items(payload.get("caption"))
+    caption_html = render_rich_text(caption_items)
+    caption_plain = _rich_text_to_plain(caption_items)
+    caption_tag = f"<figcaption>{caption_html}</figcaption>" if caption_html else ""
+
+    if not image_url:
+        if caption_tag:
+            return f'<figure class="notion-image">{caption_tag}</figure>'
+        return ""
+
+    alt_text = caption_plain if caption_plain else "Notion image"
+    src_attr = html.escape(image_url, quote=True)
+    alt_attr = html.escape(alt_text, quote=True)
+    return f'<figure class="notion-image"><img src="{src_attr}" alt="{alt_attr}" loading="lazy"/>{caption_tag}</figure>'
+
+
+def _extract_image_url(payload: dict[str, Any]) -> str:
+    """Extract a safe image URL from a Notion image payload."""
+    image_type = payload.get("type")
+    if image_type not in {"external", "file"}:
+        return ""
+
+    source_payload = payload.get(image_type)
+    if not isinstance(source_payload, dict):
+        return ""
+    return _sanitize_media_href(source_payload.get("url"))
+
+
+def _extract_caption_items(value: Any) -> list[dict[str, Any]]:
+    """Return image/code caption rich-text items."""
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _render_mermaid_code_block(code_text: str, payload: dict[str, Any]) -> str:
+    """Render Mermaid code as a sync-time SVG placeholder with source fallback."""
+    encoded_source = base64.urlsafe_b64encode(code_text.encode("utf-8")).decode("ascii")
+    code_html = html.escape(code_text)
+    caption_html = render_rich_text(_extract_caption_items(payload.get("caption")))
+    caption_tag = f"<figcaption>{caption_html}</figcaption>" if caption_html else ""
+    return (
+        '<figure class="notion-mermaid">'
+        f'<div class="notion-mermaid-source" data-mermaid="{encoded_source}">'
+        f'<pre class="code"><code class="language-mermaid">{code_html}</code></pre>'
+        "</div>"
+        f"{caption_tag}"
+        "</figure>"
+    )
 
 
 def _render_rich_text_item(item: dict[str, Any]) -> str:
@@ -610,6 +853,21 @@ def _sanitize_href(value: Any) -> str:
     if scheme in _UNSAFE_LINK_SCHEMES:
         return ""
     return href
+
+
+def _sanitize_media_href(value: Any) -> str:
+    """Return a safe absolute URL suitable for media fetching."""
+    if not isinstance(value, str):
+        return ""
+
+    href = value.strip()
+    if not href:
+        return ""
+
+    scheme = urlsplit(href).scheme.lower()
+    if scheme in {"http", "https"}:
+        return href
+    return ""
 
 
 def _sanitize_color(value: Any) -> str:
