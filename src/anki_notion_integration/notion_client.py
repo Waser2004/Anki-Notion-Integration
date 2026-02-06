@@ -95,6 +95,7 @@ class NotionClient:
         self._timeout_seconds = timeout_seconds
         self._transport = transport or self._default_transport
         self._token_refresh = token_refresh
+        self._block_parent_page_cache: dict[str, str | None] = {}
 
     @classmethod
     def from_settings(
@@ -244,6 +245,15 @@ class NotionClient:
         parent_type = parent.get("type")
         parent_id = parent.get(parent_type) if parent_type else None
 
+        # Notion pages nested inside blocks (for example callouts/toggles) have a
+        # `block_id` parent. Resolve that block ancestry to the owning page so the
+        # UI can render correct page hierarchy instead of promoting them to root.
+        if parent_type == "block_id" and isinstance(parent_id, str) and parent_id:
+            resolved_parent_page_id = self._resolve_parent_page_id_from_block(parent_id)
+            if resolved_parent_page_id:
+                parent_type = "page_id"
+                parent_id = resolved_parent_page_id
+
         # build NotionPage
         return NotionPage(
             page_id     = str(payload.get("id")),
@@ -253,6 +263,50 @@ class NotionClient:
             parent_type = str(parent_type) if parent_type else None,
             raw         = payload,
         )
+
+    def _resolve_parent_page_id_from_block(self, block_id: str) -> str | None:
+        """Resolve a block parent chain to its containing page id when possible."""
+        if block_id in self._block_parent_page_cache:
+            return self._block_parent_page_cache[block_id]
+
+        visited: list[str] = []
+        current_block_id: str | None = block_id
+
+        while current_block_id:
+            cached_parent_page_id = self._block_parent_page_cache.get(current_block_id)
+            if current_block_id in self._block_parent_page_cache:
+                for visited_block_id in visited:
+                    self._block_parent_page_cache[visited_block_id] = cached_parent_page_id
+                return cached_parent_page_id
+
+            visited.append(current_block_id)
+            try:
+                block_payload = self._request_json("GET", f"/blocks/{current_block_id}", None)
+            except (NotionApiError, NotionTransportError):
+                for visited_block_id in visited:
+                    self._block_parent_page_cache[visited_block_id] = None
+                return None
+
+            parent_payload = block_payload.get("parent") or {}
+            parent_type = parent_payload.get("type")
+            if parent_type == "page_id":
+                parent_page_id = parent_payload.get("page_id")
+                resolved_parent_page_id = str(parent_page_id) if parent_page_id else None
+                for visited_block_id in visited:
+                    self._block_parent_page_cache[visited_block_id] = resolved_parent_page_id
+                return resolved_parent_page_id
+
+            if parent_type != "block_id":
+                for visited_block_id in visited:
+                    self._block_parent_page_cache[visited_block_id] = None
+                return None
+
+            next_block_id = parent_payload.get("block_id")
+            current_block_id = str(next_block_id) if next_block_id else None
+
+        for visited_block_id in visited:
+            self._block_parent_page_cache[visited_block_id] = None
+        return None
 
     def _extract_page_title(self, payload: dict[str, Any]) -> str:
         """Return the best-effort page title from Notion properties."""

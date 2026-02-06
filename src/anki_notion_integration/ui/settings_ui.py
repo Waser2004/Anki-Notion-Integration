@@ -102,7 +102,7 @@ class SettingsPage(QWidget):
             if category.key == "notion":
                 self._notion_status_label = QLabel(group)
                 self._notion_status_label.setWordWrap(True)
-                form_layout.addRow("Status", self._notion_status_label)
+                form_layout.addRow(self._notion_status_label)
 
             # build input widgets for each setting in the category
             for setting in category.settings:

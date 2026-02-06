@@ -127,7 +127,7 @@ class NotionOAuthSessionStore:
     def auth_status_label(self) -> str:
         """Return a short user-facing status string for the Settings UI."""
         if not self.is_authenticated():
-            return "Not connected"
+            return "Not connected to Notion"
 
         workspace_name = self.get_workspace_name()
         if workspace_name:
