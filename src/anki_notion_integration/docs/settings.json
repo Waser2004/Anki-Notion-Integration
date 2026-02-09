@@ -6,18 +6,12 @@
       "description": "Notion account and authentication settings.",
       "settings": [
         {
-          "key": "notion_login",
-          "type": "button",
-          "name": "Connect Notion account",
-          "description": "Open the Notion login page in your browser and connect this add-on.",
-          "default": null
-        },
-        {
-          "key": "notion_logout",
-          "type": "button",
-          "name": "Disconnect Notion account",
-          "description": "Revoke the active Notion OAuth session and remove local credentials.",
-          "default": null
+          "key": "notion_api_key",
+          "type": "text",
+          "name": "Notion API key",
+          "description": "API key used to access Notion; stored securely in the OS keychain.",
+          "default": "",
+          "storage": "keyring"
         }
       ]
     },

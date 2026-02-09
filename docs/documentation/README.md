@@ -4,7 +4,6 @@
 - `ui_pages.md`: How to add a new UI tab/page.
 - `database.md`: SQLite schema and migration model.
 - `notion_client.md`: Notion API client behavior and API reference.
-- `notion_oauth.md`: Public OAuth flow, token storage model, and integration points.
 
 Related high-level docs:
 
