@@ -22,6 +22,7 @@ from anki_notion_integration.db import Database
 from anki_notion_integration.notion_client import NotionApiError, NotionClient, NotionPage, NotionTransportError
 from anki_notion_integration.pages import (
     PagesStore,
+    StoredPage,
     apply_selection_rule,
     build_children_map_from_pages,
     build_deck_names_from_pages,
@@ -50,6 +51,9 @@ class PagesPage(QWidget):
         self._is_loading = False
         self._fetch_queue: queue.Queue[tuple[str, int, Any]] = queue.Queue()
         self._suspend_item_events = False
+        self._received_page_ids: set[str] = set()
+        self._expanded_page_ids: set[str] = set()
+        self._has_expansion_snapshot = False
 
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(11, 11, 11, 11)
@@ -99,9 +103,14 @@ class PagesPage(QWidget):
         generation = self._load_generation
         self._is_loading = True
         self._page_count = 0
+        self._received_page_ids = set()
+        self._expanded_page_ids = self._collect_expanded_ids()
+        # Track whether this reload should preserve expansion state, including
+        # the case where the user intentionally collapsed everything.
+        self._has_expansion_snapshot = bool(self._items_by_id)
         self._suspend_item_events = True
 
-        # Clear existing state.
+        # Reset state and render cached pages from the DB before refreshing.
         try:
             self._tree.clear()
             self._items_by_id.clear()
@@ -112,11 +121,17 @@ class PagesPage(QWidget):
             # Cascade tracking is session-local user intent. Persisted DB state
             # should be restored exactly and must not auto-select descendants.
             self._cascade_selected_parent_ids = set()
-            self._groupbox.setTitle("Loading Notion pages...")
             self._error_label.clear()
             self._error_label.hide()
+            self._preload_cached_pages()
         finally:
             self._suspend_item_events = False
+
+        cached_count = len(self._pages_by_id)
+        if cached_count > 0:
+            self._groupbox.setTitle(f"Refreshing pages...")
+        else:
+            self._groupbox.setTitle("Loading Notion pages...")
         
         # Start background fetch.
         self._fetch_timer.start()
@@ -171,6 +186,7 @@ class PagesPage(QWidget):
             # Prevent transient unchecked item states from triggering `itemChanged`
             # while the tree is still being rebuilt during incremental loading.
             self._pages_by_id[page.page_id] = page
+            self._received_page_ids.add(page.page_id)
             self._children_map = build_children_map_from_pages(self._pages_by_id)
             self._deck_names_by_page_id = build_deck_names_from_pages(self._pages_by_id)
             self._sync_tree_items()
@@ -183,12 +199,16 @@ class PagesPage(QWidget):
 
         # Update progress label.
         self._page_count += 1
-        self._groupbox.setTitle(f"Loaded {self._page_count} pages...")
+        self._groupbox.setTitle(f"Refreshing pages... loaded {self._page_count}")
         if self._page_count % self._upsert_batch_size == 0:
             self._persist_selection_state()
 
     def _sync_tree_items(self) -> None:
         """Ensure all known pages have tree items with correct parent and metadata."""
+        stale_item_ids = [page_id for page_id in self._items_by_id if page_id not in self._pages_by_id]
+        for page_id in stale_item_ids:
+            self._remove_tree_item(page_id)
+
         for page_id, page in self._pages_by_id.items():
             item = self._items_by_id.get(page_id)
 
@@ -203,6 +223,24 @@ class PagesPage(QWidget):
             item.setText(0, page.title or "Untitled")
             item.setToolTip(0, self._deck_names_by_page_id.get(page_id, "Notion::Untitled"))
             self._reparent_item(page_id)
+
+        self._apply_expanded_ids()
+
+    def _remove_tree_item(self, page_id: str) -> None:
+        """Detach and remove one tree item by page id."""
+        item = self._items_by_id.pop(page_id, None)
+        if item is None:
+            return
+
+        parent = item.parent()
+        if parent is None:
+            top_level_index = self._tree.indexOfTopLevelItem(item)
+            if top_level_index >= 0:
+                self._tree.takeTopLevelItem(top_level_index)
+        else:
+            child_index = parent.indexOfChild(item)
+            if child_index >= 0:
+                parent.takeChild(child_index)
 
     def _reparent_item(self, page_id: str) -> None:
         """Move one item to the correct parent if parent information changed."""
@@ -254,10 +292,14 @@ class PagesPage(QWidget):
             self._error_label.setText(error_message)
             self._error_label.show()
         else:
+            self._remove_stale_pages_after_successful_refresh()
             self._groupbox.setTitle(f"Loaded {self._page_count} pages.")
             self._error_label.clear()
             self._error_label.hide()
-            self._tree.expandToDepth(0)
+            if not self._has_expansion_snapshot:
+                self._tree.expandToDepth(0)
+            else:
+                self._apply_expanded_ids()
         
         self._persist_selection_state()
 
@@ -272,7 +314,99 @@ class PagesPage(QWidget):
             if page_id in self._deck_names_by_page_id
         }
 
-        self._store.upsert_page_selection(self._deck_names_by_page_id, selected_known_ids)
+        self._store.upsert_page_selection(
+            self._deck_names_by_page_id,
+            selected_known_ids,
+            pages_by_id=self._pages_by_id,
+        )
+
+    def _preload_cached_pages(self) -> None:
+        """Render currently stored pages from the DB before the live refresh starts."""
+        stored_pages = self._store.get_pages()
+        if not stored_pages:
+            return
+
+        self._deck_names_by_page_id = {
+            page_id: page.anki_deck_name
+            for page_id, page in stored_pages.items()
+        }
+        self._pages_by_id = {
+            page_id: self._page_from_stored_row(page_id, stored_page)
+            for page_id, stored_page in stored_pages.items()
+        }
+        self._children_map = build_children_map_from_pages(self._pages_by_id)
+        self._sync_tree_items()
+        self._apply_selected_ids(self._selected_ids)
+
+    def _remove_stale_pages_after_successful_refresh(self) -> None:
+        """Drop cached-only pages that were not returned by the completed refresh."""
+        stale_ids = {
+            page_id
+            for page_id in self._pages_by_id
+            if page_id not in self._received_page_ids
+        }
+        if not stale_ids:
+            self._store.delete_pages_not_in(set(self._pages_by_id))
+            return
+
+        for page_id in stale_ids:
+            self._pages_by_id.pop(page_id, None)
+            self._selected_ids.discard(page_id)
+            self._cascade_selected_parent_ids.discard(page_id)
+
+        self._children_map = build_children_map_from_pages(self._pages_by_id)
+        self._deck_names_by_page_id = build_deck_names_from_pages(self._pages_by_id)
+        self._sync_tree_items()
+        self._apply_selected_ids(self._selected_ids)
+        self._store.delete_pages_not_in(set(self._pages_by_id))
+
+        # Remove stale expansion ids after stale page cleanup.
+        self._expanded_page_ids.intersection_update(self._pages_by_id)
+
+    @staticmethod
+    def _page_from_stored_row(page_id: str, stored_page: StoredPage) -> NotionPage:
+        """Build a lightweight `NotionPage` model from one stored DB row."""
+        title = PagesPage._title_from_deck_name(stored_page.anki_deck_name)
+        parent_type = str(stored_page.parent_type) if stored_page.parent_type else None
+        parent_id = str(stored_page.parent_id) if stored_page.parent_id else None
+        return NotionPage(
+            page_id=page_id,
+            title=title,
+            icon=None,
+            parent_id=parent_id,
+            parent_type=parent_type,
+            raw={},
+        )
+
+    @staticmethod
+    def _title_from_deck_name(deck_name: str) -> str:
+        """Extract a display title from a persisted deck name path."""
+        if not deck_name:
+            return "Untitled"
+
+        segment = str(deck_name).split("::")[-1].strip()
+        if not segment:
+            return "Untitled"
+        return segment.replace("∷", "::")
+
+    def _collect_expanded_ids(self) -> set[str]:
+        """Capture expanded item ids from the current tree state."""
+        expanded_ids: set[str] = set()
+        for page_id, item in self._items_by_id.items():
+            if item.isExpanded():
+                expanded_ids.add(page_id)
+        return expanded_ids
+
+    def _apply_expanded_ids(self) -> None:
+        """Re-apply captured expanded item ids to known tree items."""
+        if not self._expanded_page_ids:
+            return
+
+        valid_ids = self._expanded_page_ids.intersection(self._items_by_id)
+        for page_id in valid_ids:
+            item = self._items_by_id.get(page_id)
+            if item is not None:
+                item.setExpanded(True)
 
     def _apply_cascade_selection(self, selected_ids: set[str]) -> set[str]:
         """Ensure descendants of cascade-selected parents are selected when they appear."""

@@ -19,6 +19,8 @@ class StoredPage:
     anki_deck_id: int | None
     sync_enabled: bool
     last_synced_at: str | None
+    parent_id: str | None
+    parent_type: str | None
 
 
 def flatten_page_tree(roots: list[PageNode]) -> dict[str, PageNode]:
@@ -187,7 +189,14 @@ class PagesStore:
         try:
             rows = connection.execute(
                 """
-                SELECT notion_page_id, anki_deck_name, anki_deck_id, sync_enabled, last_synced_at
+                SELECT
+                    notion_page_id,
+                    anki_deck_name,
+                    anki_deck_id,
+                    sync_enabled,
+                    last_synced_at,
+                    parent_id,
+                    parent_type
                 FROM pages
                 """
             ).fetchall()
@@ -201,6 +210,8 @@ class PagesStore:
                 anki_deck_id=int(row["anki_deck_id"]) if row["anki_deck_id"] is not None else None,
                 sync_enabled=bool(row["sync_enabled"]),
                 last_synced_at=row["last_synced_at"],
+                parent_id=row["parent_id"],
+                parent_type=row["parent_type"],
             )
             for row in rows
         }
@@ -217,21 +228,58 @@ class PagesStore:
         self,
         deck_names_by_page_id: Mapping[str, str],
         selected_page_ids: set[str],
+        pages_by_id: Mapping[str, NotionPage] | None = None,
     ) -> None:
         """Upsert page rows for all known pages and persist `sync_enabled` flags."""
         connection = self._db.connect()
         try:
             cursor = connection.cursor()
             for page_id, deck_name in deck_names_by_page_id.items():
+                page = pages_by_id.get(page_id) if pages_by_id is not None else None
+                parent_id = page.parent_id if page is not None else None
+                parent_type = page.parent_type if page is not None else None
                 cursor.execute(
                     """
-                    INSERT INTO pages (notion_page_id, anki_deck_name, sync_enabled)
-                    VALUES (?, ?, ?)
+                    INSERT INTO pages (
+                        notion_page_id,
+                        anki_deck_name,
+                        sync_enabled,
+                        parent_id,
+                        parent_type
+                    )
+                    VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT(notion_page_id) DO UPDATE SET
                         anki_deck_name = excluded.anki_deck_name,
-                        sync_enabled = excluded.sync_enabled
+                        sync_enabled = excluded.sync_enabled,
+                        parent_id = excluded.parent_id,
+                        parent_type = excluded.parent_type
                     """,
-                    (page_id, deck_name, 1 if page_id in selected_page_ids else 0),
+                    (
+                        page_id,
+                        deck_name,
+                        1 if page_id in selected_page_ids else 0,
+                        parent_id,
+                        parent_type,
+                    ),
+                )
+            connection.commit()
+        except sqlite3.Error:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def delete_pages_not_in(self, page_ids: set[str]) -> None:
+        """Delete page rows whose ids are not in `page_ids`."""
+        connection = self._db.connect()
+        try:
+            if not page_ids:
+                connection.execute("DELETE FROM pages")
+            else:
+                placeholders = ", ".join("?" for _ in page_ids)
+                connection.execute(
+                    f"DELETE FROM pages WHERE notion_page_id NOT IN ({placeholders})",
+                    tuple(page_ids),
                 )
             connection.commit()
         except sqlite3.Error:

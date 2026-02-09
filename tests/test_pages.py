@@ -163,16 +163,25 @@ class PagesStoreTests(unittest.TestCase):
         pages = self._store.get_pages()
         self.assertEqual(pages["page-a"].anki_deck_name, "Notion::New")
         self.assertIsNone(pages["page-a"].anki_deck_id)
+        self.assertIsNone(pages["page-a"].parent_id)
+        self.assertIsNone(pages["page-a"].parent_type)
 
     def test_get_pages_reads_stored_deck_id(self) -> None:
         connection = self._db.connect()
         try:
             connection.execute(
                 """
-                INSERT INTO pages (notion_page_id, anki_deck_name, anki_deck_id, sync_enabled)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO pages (
+                    notion_page_id,
+                    anki_deck_name,
+                    anki_deck_id,
+                    sync_enabled,
+                    parent_id,
+                    parent_type
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                ("page-a", "Notion::Deck", 42, 1),
+                ("page-a", "Notion::Deck", 42, 1, "parent", "page_id"),
             )
             connection.commit()
         finally:
@@ -180,3 +189,33 @@ class PagesStoreTests(unittest.TestCase):
 
         pages = self._store.get_pages()
         self.assertEqual(pages["page-a"].anki_deck_id, 42)
+        self.assertEqual(pages["page-a"].parent_id, "parent")
+        self.assertEqual(pages["page-a"].parent_type, "page_id")
+
+    def test_upsert_page_selection_persists_parent_metadata_from_pages(self) -> None:
+        parent = _page("parent", "Parent")
+        child = _page("child", "Child", parent_id="parent")
+        pages_by_id = {"parent": parent, "child": child}
+        deck_names = {
+            "parent": "Notion::Parent",
+            "child": "Notion::Parent::Child",
+        }
+
+        self._store.upsert_page_selection(deck_names, {"child"}, pages_by_id=pages_by_id)
+        pages = self._store.get_pages()
+        self.assertIsNone(pages["parent"].parent_id)
+        self.assertIsNone(pages["parent"].parent_type)
+        self.assertEqual(pages["child"].parent_id, "parent")
+        self.assertEqual(pages["child"].parent_type, "page_id")
+
+    def test_delete_pages_not_in_removes_stale_rows(self) -> None:
+        deck_names = {
+            "page-a": "Notion::A",
+            "page-b": "Notion::B",
+        }
+        self._store.upsert_page_selection(deck_names, {"page-a"})
+
+        self._store.delete_pages_not_in({"page-b"})
+        pages = self._store.get_pages()
+        self.assertNotIn("page-a", pages)
+        self.assertIn("page-b", pages)

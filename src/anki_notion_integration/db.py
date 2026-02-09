@@ -68,6 +68,14 @@ MIGRATIONS: tuple[Migration, ...] = (
             "ALTER TABLE pages ADD COLUMN last_seen_notion_edit_time TEXT",
         ),
     ),
+    # Store parent metadata so the Pages tab can preload and render hierarchy from DB.
+    Migration(
+        version=4,
+        statements=(
+            "ALTER TABLE pages ADD COLUMN parent_id TEXT",
+            "ALTER TABLE pages ADD COLUMN parent_type TEXT",
+        ),
+    ),
 )
 
 
