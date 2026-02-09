@@ -162,3 +162,21 @@ class PagesStoreTests(unittest.TestCase):
         self._store.upsert_page_selection({"page-a": "Notion::New"}, {"page-a"})
         pages = self._store.get_pages()
         self.assertEqual(pages["page-a"].anki_deck_name, "Notion::New")
+        self.assertIsNone(pages["page-a"].anki_deck_id)
+
+    def test_get_pages_reads_stored_deck_id(self) -> None:
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                INSERT INTO pages (notion_page_id, anki_deck_name, anki_deck_id, sync_enabled)
+                VALUES (?, ?, ?, ?)
+                """,
+                ("page-a", "Notion::Deck", 42, 1),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        pages = self._store.get_pages()
+        self.assertEqual(pages["page-a"].anki_deck_id, 42)

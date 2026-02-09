@@ -41,14 +41,49 @@ class _FakeDecks:
     """Minimal deck API surface used by sync logic."""
 
     def __init__(self) -> None:
-        self._ids: dict[str, int] = {}
+        self._ids_by_name: dict[str, int] = {}
+        self._names_by_id: dict[int, str] = {}
         self._next_id = 1
 
     def id_for_name(self, name: str) -> int:
-        if name not in self._ids:
-            self._ids[name] = self._next_id
+        if name not in self._ids_by_name:
+            self._ids_by_name[name] = self._next_id
+            self._names_by_id[self._next_id] = name
             self._next_id += 1
-        return self._ids[name]
+        return self._ids_by_name[name]
+
+    # Compatibility aliases used by sync helper fallbacks.
+    def id(self, name: str) -> int:
+        return self.id_for_name(name)
+
+    def idForName(self, name: str) -> int:
+        return self.id_for_name(name)
+
+    def name_if_exists(self, deck_id: int) -> str | None:
+        return self._names_by_id.get(deck_id)
+
+    def name(self, deck_id: int) -> str | None:
+        return self._names_by_id.get(deck_id)
+
+    def get(self, deck_id: int) -> dict[str, object] | None:
+        deck_name = self._names_by_id.get(deck_id)
+        if deck_name is None:
+            return None
+        return {"id": deck_id, "name": deck_name}
+
+    def rename(self, deck_id: int, new_name: str) -> None:
+        old_name = self._names_by_id.get(deck_id)
+        if old_name is None:
+            return
+        if old_name in self._ids_by_name:
+            del self._ids_by_name[old_name]
+        self._ids_by_name[new_name] = deck_id
+        self._names_by_id[deck_id] = new_name
+
+    def delete_by_id(self, deck_id: int) -> None:
+        old_name = self._names_by_id.pop(deck_id, None)
+        if old_name is not None:
+            self._ids_by_name.pop(old_name, None)
 
 
 class _FakeNote(dict):
@@ -284,6 +319,171 @@ class SyncTests(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(str(row["notion_block_id"]), "block-1")
         self.assertGreater(int(row["anki_note_id"]), 0)
+
+    def test_sync_backfills_page_deck_id_for_legacy_rows(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[self._payload()],
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        connection = self._db.connect()
+        try:
+            row = connection.execute(
+                "SELECT anki_deck_id, anki_deck_name FROM pages WHERE notion_page_id = ?",
+                ("page-1",),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNotNone(row)
+        self.assertIsNotNone(row["anki_deck_id"])
+        self.assertEqual(str(row["anki_deck_name"]), "Notion::Page 1")
+
+    def test_sync_updates_page_deck_name_when_deck_is_renamed(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        deck_id = collection.decks.id_for_name("Notion::Page 1")
+        collection.decks.rename(deck_id, "Notion::Moved::Page 1")
+
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                UPDATE pages
+                SET anki_deck_id = ?, anki_deck_name = ?
+                WHERE notion_page_id = ?
+                """,
+                (deck_id, "Notion::Page 1", "page-1"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[self._payload()],
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        connection = self._db.connect()
+        try:
+            row = connection.execute(
+                "SELECT anki_deck_id, anki_deck_name FROM pages WHERE notion_page_id = ?",
+                ("page-1",),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(int(row["anki_deck_id"]), deck_id)
+        self.assertEqual(str(row["anki_deck_name"]), "Notion::Moved::Page 1")
+
+    def test_sync_recreates_missing_deck_using_latest_stored_name(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        stale_id = collection.decks.id_for_name("Notion::Removed")
+        collection.decks.delete_by_id(stale_id)
+
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                UPDATE pages
+                SET anki_deck_id = ?, anki_deck_name = ?
+                WHERE notion_page_id = ?
+                """,
+                (stale_id, "Notion::Latest", "page-1"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[self._payload()],
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        connection = self._db.connect()
+        try:
+            row = connection.execute(
+                "SELECT anki_deck_id, anki_deck_name FROM pages WHERE notion_page_id = ?",
+                ("page-1",),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNotNone(row)
+        recreated_id = int(row["anki_deck_id"])
+        self.assertNotEqual(recreated_id, stale_id)
+        self.assertEqual(str(row["anki_deck_name"]), "Notion::Latest")
+        self.assertEqual(collection.decks.name_if_exists(recreated_id), "Notion::Latest")
+
+    def test_sync_ignores_no_deck_placeholder_and_keeps_stored_deck_name(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        stale_id = collection.decks.id_for_name("Notion::Removed")
+        collection.decks.delete_by_id(stale_id)
+
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                UPDATE pages
+                SET anki_deck_id = ?, anki_deck_name = ?
+                WHERE notion_page_id = ?
+                """,
+                (stale_id, "Notion::Parent::Page 1", "page-1"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with patch.object(collection.decks, "name_if_exists", return_value="[no deck]"), patch.object(
+            _SYNC_MODULE, "ensure_notion_toggle_model"
+        ), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[self._payload()],
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        connection = self._db.connect()
+        try:
+            row = connection.execute(
+                "SELECT anki_deck_id, anki_deck_name FROM pages WHERE notion_page_id = ?",
+                ("page-1",),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNotNone(row)
+        recreated_id = int(row["anki_deck_id"])
+        self.assertNotEqual(recreated_id, stale_id)
+        self.assertEqual(str(row["anki_deck_name"]), "Notion::Parent::Page 1")
 
     def test_sync_localizes_images_and_renders_mermaid_to_media(self) -> None:
         collection = _FakeCollection(media_dir=self._media_dir)

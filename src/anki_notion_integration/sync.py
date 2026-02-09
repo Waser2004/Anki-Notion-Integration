@@ -48,6 +48,15 @@ class SyncError(RuntimeError):
     """Raised when sync cannot proceed due to configuration or runtime errors."""
 
 
+@dataclass(frozen=True)
+class EnabledPage:
+    """Represents one sync-enabled Notion page and its stored deck reference."""
+
+    notion_page_id: str
+    anki_deck_name: str
+    anki_deck_id: int | None
+
+
 SyncDoneCallback = Callable[[SyncResult], None]
 SyncProgressCallback = Callable[[str], None]
 SyncCancelCheck = Callable[[], bool]
@@ -102,7 +111,7 @@ def sync_notion_to_anki(
     )
 
     # Iterate over enabled Notion pages and sync their content
-    for page_id, deck_name in enabled_pages:
+    for page in enabled_pages:
         if _is_sync_cancelled(should_cancel):
             return _build_cancelled_result(stats)
 
@@ -113,8 +122,20 @@ def sync_notion_to_anki(
         stats = _replace_stats(stats, pages_scanned=stats.pages_scanned + 1)
 
         try:
+            page_id = page.notion_page_id
             # Check if the page has changed since last sync
-            deck_id = _ensure_deck_id(collection, deck_name)
+            deck_id, resolved_deck_name = _resolve_page_deck(
+                collection=collection,
+                stored_deck_name=page.anki_deck_name,
+                stored_deck_id=page.anki_deck_id,
+            )
+            if page.anki_deck_id != deck_id or page.anki_deck_name != resolved_deck_name:
+                _set_page_deck_reference(
+                    db=db,
+                    page_id=page_id,
+                    deck_id=deck_id,
+                    deck_name=resolved_deck_name,
+                )
             page_last_edited_time = client.get_page_last_edited_time(page_id)
             stored_page_edit_time = _load_page_last_seen_notion_edit_time(db, page_id)
             page_is_unchanged = (
@@ -326,13 +347,13 @@ def trigger_sync_with_anki_button(
         return
 
 
-def _load_enabled_pages(db: Database) -> list[tuple[str, str]]:
-    """Load enabled pages and their deck names from the pages table."""
+def _load_enabled_pages(db: Database) -> list[EnabledPage]:
+    """Load enabled pages and their deck references from the pages table."""
     connection = db.connect()
     try:
         rows = connection.execute(
             """
-            SELECT notion_page_id, anki_deck_name
+            SELECT notion_page_id, anki_deck_name, anki_deck_id
             FROM pages
             WHERE sync_enabled = 1
             ORDER BY notion_page_id
@@ -342,7 +363,11 @@ def _load_enabled_pages(db: Database) -> list[tuple[str, str]]:
         connection.close()
 
     return [
-        (str(row["notion_page_id"]), str(row["anki_deck_name"]))
+        EnabledPage(
+            notion_page_id=str(row["notion_page_id"]),
+            anki_deck_name=str(row["anki_deck_name"]),
+            anki_deck_id=_coerce_deck_id(row["anki_deck_id"]),
+        )
         for row in rows
     ]
 
@@ -651,6 +676,62 @@ def _model_by_name(collection: Any, model_name: str) -> Any | None:
         return models.by_name(model_name)
     if hasattr(models, "byName"):
         return models.byName(model_name)
+    return None
+
+
+def _resolve_page_deck(
+    collection: Any,
+    stored_deck_name: str,
+    stored_deck_id: int | None,
+) -> tuple[int, str]:
+    """Resolve one page deck by id first and return canonical `(deck_id, deck_name)`."""
+    # Keep persisted data stable even when legacy rows contain whitespace-only deck names.
+    normalized_stored_name = stored_deck_name.strip() or "Notion"
+    if stored_deck_id is not None:
+        deck_name_by_id = _deck_name_by_id(collection, stored_deck_id)
+        if deck_name_by_id is not None:
+            return stored_deck_id, deck_name_by_id
+
+    # Fallback path: resolve by name and create when missing.
+    deck_id = _ensure_deck_id(collection, normalized_stored_name)
+    resolved_name = _deck_name_by_id(collection, deck_id) or normalized_stored_name
+    return deck_id, resolved_name
+
+
+def _deck_name_by_id(collection: Any, deck_id: int) -> str | None:
+    """Return current deck name for an id when the deck exists, otherwise `None`."""
+    decks = getattr(collection, "decks", None)
+    if decks is None:
+        return None
+
+    # Try direct name lookup APIs first.
+    for attr_name in ("name_if_exists", "name", "nameForDid"):
+        lookup = getattr(decks, attr_name, None)
+        if not callable(lookup):
+            continue
+        try:
+            resolved = lookup(deck_id)
+        except Exception:
+            continue
+        if isinstance(resolved, str):
+            cleaned = resolved.strip()
+            if cleaned and cleaned.lower() != "[no deck]" and cleaned.lower() != "default":
+                return cleaned
+
+    # Fallback: some APIs expose deck metadata dictionaries.
+    get_fn = getattr(decks, "get", None)
+    if callable(get_fn):
+        try:
+            resolved = get_fn(deck_id)
+        except Exception:
+            resolved = None
+        if isinstance(resolved, dict):
+            name_value = resolved.get("name")
+            if isinstance(name_value, str):
+                cleaned = name_value.strip()
+                if cleaned and cleaned.lower() != "[no deck]" and cleaned.lower() != "default":
+                    return cleaned
+
     return None
 
 
@@ -1156,6 +1237,31 @@ def _upsert_card_mapping(
                 payload.content_hash,
                 payload.last_edited_time,
             ),
+        )
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def _set_page_deck_reference(
+    db: Database,
+    page_id: str,
+    deck_id: int,
+    deck_name: str,
+) -> None:
+    """Persist canonical deck id/name for one page after deck resolution."""
+    connection = db.connect()
+    try:
+        connection.execute(
+            """
+            UPDATE pages
+            SET anki_deck_id = ?, anki_deck_name = ?
+            WHERE notion_page_id = ?
+            """,
+            (deck_id, deck_name, page_id),
         )
         connection.commit()
     except sqlite3.Error:

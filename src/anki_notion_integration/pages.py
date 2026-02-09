@@ -16,6 +16,7 @@ class StoredPage:
 
     notion_page_id: str
     anki_deck_name: str
+    anki_deck_id: int | None
     sync_enabled: bool
     last_synced_at: str | None
 
@@ -186,7 +187,7 @@ class PagesStore:
         try:
             rows = connection.execute(
                 """
-                SELECT notion_page_id, anki_deck_name, sync_enabled, last_synced_at
+                SELECT notion_page_id, anki_deck_name, anki_deck_id, sync_enabled, last_synced_at
                 FROM pages
                 """
             ).fetchall()
@@ -197,6 +198,7 @@ class PagesStore:
             str(row["notion_page_id"]): StoredPage(
                 notion_page_id=str(row["notion_page_id"]),
                 anki_deck_name=str(row["anki_deck_name"]),
+                anki_deck_id=int(row["anki_deck_id"]) if row["anki_deck_id"] is not None else None,
                 sync_enabled=bool(row["sync_enabled"]),
                 last_synced_at=row["last_synced_at"],
             )
