@@ -7,6 +7,12 @@
       "factory": "build_page"
     },
     {
+      "key": "image_occlusion",
+      "name": "Image Occlusion",
+      "module": "anki_notion_integration.ui.image_occlusion_ui",
+      "factory": "build_page"
+    },
+    {
       "key": "settings",
       "name": "Settings",
       "module": "anki_notion_integration.ui.settings_ui",

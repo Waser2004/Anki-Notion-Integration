@@ -29,12 +29,15 @@ class _FakeModels:
     """Minimal models API surface used by sync logic."""
 
     def __init__(self) -> None:
-        self._model = {"name": "Notion Toggle"}
+        self._models = {
+            "Notion Toggle": {"name": "Notion Toggle"},
+            "Notion Toggle (Basic+Reversed)": {"name": "Notion Toggle (Basic+Reversed)"},
+            "Notion Toggle (Input)": {"name": "Notion Toggle (Input)"},
+            "Notion Toggle (Cloze)": {"name": "Notion Toggle (Cloze)"},
+        }
 
     def by_name(self, name: str) -> dict[str, str] | None:
-        if name == "Notion Toggle":
-            return self._model
-        return None
+        return self._models.get(name)
 
 
 class _FakeDecks:
@@ -225,6 +228,9 @@ class _FakeNotionClient:
     def get_page_blocks_shallow(self, page_id: str) -> list[NotionBlock]:
         return [self._toggle_block(parent_id=page_id)]
 
+    def get_page_content(self, page_id: str) -> list[NotionBlock]:
+        return [self._toggle_block(parent_id=page_id)]
+
     def get_block_children_recursive(self, block_id: str) -> list[NotionBlock]:
         _ = block_id
         return []
@@ -319,6 +325,121 @@ class SyncTests(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(str(row["notion_block_id"]), "block-1")
         self.assertGreater(int(row["anki_note_id"]), 0)
+
+    def test_sync_persists_payload_card_type_to_mapping(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        payload = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="block-1",
+            front_html="<p>front</p>",
+            back_html="<p>back</p>",
+            card_type="input",
+            model_name="Notion Toggle (Input)",
+            fields={
+                "Front": "<p>front</p>",
+                "Back": "<p>back</p>",
+                "Expected Answer": "back",
+                "Notion Block ID": "block-1",
+            },
+            content_hash="hash-input",
+            last_edited_time="2026-02-04T00:00:00.000Z",
+        )
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[payload],
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        connection = self._db.connect()
+        try:
+            row = connection.execute(
+                "SELECT card_type FROM cards WHERE notion_block_id = ?",
+                ("block-1",),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(str(row["card_type"]), "input")
+
+    def test_sync_auto_converts_existing_note_when_card_type_changes(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        existing_note = collection.new_note({"name": "Notion Toggle"})
+        collection.add_note(existing_note, deck_id=1)
+
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                INSERT INTO cards (
+                    notion_block_id, notion_page_id, anki_note_id, card_type, content_hash
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("block-1", "page-1", existing_note.id, "basic", "hash-old"),
+            )
+            connection.execute(
+                """
+                UPDATE pages
+                SET default_card_type = ?
+                WHERE notion_page_id = ?
+                """,
+                ("input", "page-1"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        payload = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="block-1",
+            front_html="<p>front</p>",
+            back_html="<p>back</p>",
+            card_type="input",
+            model_name="Notion Toggle (Input)",
+            fields={
+                "Front": "<p>front</p>",
+                "Back": "<p>back</p>",
+                "Expected Answer": "back",
+                "Notion Block ID": "block-1",
+            },
+            content_hash="hash-new",
+            last_edited_time="2026-02-04T00:00:00.000Z",
+        )
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[payload],
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_updated, 1)
+
+        connection = self._db.connect()
+        try:
+            row = connection.execute(
+                "SELECT anki_note_id, card_type FROM cards WHERE notion_block_id = ?",
+                ("block-1",),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(str(row["card_type"]), "input")
+        self.assertNotEqual(int(row["anki_note_id"]), int(existing_note.id))
 
     def test_sync_backfills_page_deck_id_for_legacy_rows(self) -> None:
         collection = _FakeCollection()
@@ -870,6 +991,85 @@ class SyncTests(unittest.TestCase):
             connection.close()
         self.assertIsNotNone(row)
         self.assertIsNone(row["last_synced_at"])
+
+    def test_sync_unchanged_page_reprocesses_toggle_when_default_card_type_changes(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        existing_note = collection.new_note({"name": "Notion Toggle"})
+        collection.add_note(existing_note, deck_id=1)
+
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                UPDATE pages
+                SET last_seen_notion_edit_time = ?, default_card_type = ?
+                WHERE notion_page_id = ?
+                """,
+                ("2026-02-04T00:00:00.000Z", "input", "page-1"),
+            )
+            connection.execute(
+                """
+                INSERT INTO cards (
+                    notion_block_id,
+                    notion_page_id,
+                    anki_note_id,
+                    card_type,
+                    content_hash,
+                    last_seen_notion_edit_time
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("block-1", "page-1", existing_note.id, "basic", "hash-old", "2026-02-04T00:00:00.000Z"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        input_payload = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="block-1",
+            front_html="<p>front</p>",
+            back_html="<p>back</p>",
+            card_type="input",
+            model_name="Notion Toggle (Input)",
+            fields={
+                "Front": "<p>front</p>",
+                "Back": "<p>back</p>",
+                "Expected Answer": "back",
+                "Notion Block ID": "block-1",
+            },
+            content_hash="hash-new",
+            last_edited_time="2026-02-04T00:00:00.000Z",
+        )
+
+        fake_client = _FakeNotionClient(page_last_edited_time="2026-02-04T00:00:00.000Z")
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=fake_client,
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[input_payload],
+        ) as parse_mock:
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_updated, 1)
+        parse_mock.assert_called_once()
+
+        connection = self._db.connect()
+        try:
+            row = connection.execute(
+                "SELECT anki_note_id, card_type FROM cards WHERE notion_block_id = ?",
+                ("block-1",),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(str(row["card_type"]), "input")
+        self.assertNotEqual(int(row["anki_note_id"]), int(existing_note.id))
 
     def test_run_notion_sync_with_progress_uses_progress_dialog_and_callback(self) -> None:
         collection = _FakeCollection()

@@ -2,51 +2,50 @@
 
 ### User Interface Overview
 
-The primary way to interact with the add-on is via a toolbar button labeled **“Notion”**, located in Anki’s top toolbar alongside
+The primary way to interact with the add-on is via a toolbar button labeled **"Notion"**, located in Anki’s top toolbar alongside
 
 `Decks · Add · Browse · Stats · Notion · Sync`.
 
-Clicking the **“Notion”** button opens a **dedicated add-on window**. This window is visually and structurally similar to Anki’s **Preferences** dialog.
+Clicking the **“Notion”** button opens a dedicated add-on window with tabs.
 
-The window consists of:
+The top navigation tabs are:
 
-- A **top navigation bar** for switching between different sections
-- A **main content area** that updates based on the selected section
-
-The top navigation bar contains the following tabs:
+- **Pages**
+- **Image Occlusion**
+- **Settings**
 
 ---
 
 ### Pages
 
-The **Pages** tab provides an overview of the user’s Notion pages.
+The **Pages** tab provides a hierarchical tree of accessible Notion pages.
 
-- Pages are displayed in a **hierarchical tree structure**, analogous to folders and files in a file explorer.
-- Each page entry includes a **checkbox** that allows the user to select whether the page should be included for Anki card generation or synchronization.
-- Parent–child relationships between pages are visually reflected through indentation or expandable/collapsible nodes.
+- Column 0: page checkbox + title (sync selection)
+- Column 1: image button opens the **Image Occlusion** tab preselected for that page
+- Column 2: `...` button opens per-page default card-type override (`basic`, `basic_reversed`, `input`)
 
-**Selection Behavior**
+**Selection behavior** remains asymmetric:
 
-Page selection follows explicit, asymmetric parent–child rules:
+- Selecting a parent selects descendants only when none of its descendants are already selected.
+- Deselecting a parent affects only that parent.
+- Child toggles do not change parent selection.
 
-- Selecting a parent page
-    - If all child pages are currently unselected, selecting the parent will select the parent and all of its child pages recursively.
-    - If at least one child page is currently selected, selecting the parent affects only the parent itself and leaves all children unchanged.
-- Deselecting a parent page affects only the parent. All child pages retain their current selection state.
-- Selecting or deselecting a child page does not affect its parent.
+---
 
-This behavior ensures that parent selection acts as a **convenience shortcut** for bulk selection when needed, without enforcing strict bidirectional coupling between parent and child pages.
+### Image Occlusion
 
-This tab is the primary interface for choosing which Notion content is relevant for Anki.
+The **Image Occlusion** tab lists image candidates from the currently selected synced page.
+
+- Only images outside toggle blocks are listed.
+- Clicking an item opens Image Occlusion Enhanced with that image.
+- If Image Occlusion Enhanced is unavailable, the list stays empty and an install link is shown.
 
 ---
 
 ### Settings
 
-The **Settings** tab is used for configuration and account management.
+The **Settings** tab is schema-driven and includes:
 
-- All add-on–specific settings are grouped and editable here.
-- Notion authentication is handled in this tab:
-    - Users can log in to or log out of their Notion account.
-    - The current authentication status is clearly indicated.
-- Any settings that affect synchronization behavior, card generation, or page handling are configured here.
+- Notion authentication settings
+- Cards settings (`default_card_type`, cloze parsing toggle, image occlusion parsing toggle)
+- Sync settings (startup/manual hooks)

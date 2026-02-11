@@ -4,6 +4,7 @@
 - `ui_pages.md`: How to add a new UI tab/page.
 - `database.md`: SQLite schema and migration model.
 - `notion_client.md`: Notion API client behavior and API reference.
+- `parser.md`: Card payload parsing rules and card-type behavior.
 
 Related high-level docs:
 

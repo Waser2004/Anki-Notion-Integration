@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import html
 import math
@@ -11,6 +11,8 @@ import re
 from typing import Any, Iterable
 from urllib.parse import urlsplit
 
+from .card_types import BASIC, BASIC_REVERSED, CLOZE, INPUT, normalize_default_selectable_card_type
+from .cards import MODEL_NAME_BASIC, MODEL_NAME_BASIC_REVERSED, MODEL_NAME_CLOZE, MODEL_NAME_INPUT
 from .notion_client import NotionBlock
 
 _SAFE_COLOR_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz_")
@@ -20,6 +22,7 @@ _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _NUMBER_RE = re.compile(r"(?:0[xX][0-9A-Fa-f]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)")
 _OPERATOR_CHARS = frozenset("+-*/%=!<>|&^~?:")
 _PUNCTUATION_CHARS = frozenset("()[]{}.,;")
+_CLOZE_EXTRA_PREFIX_RE = re.compile(r"^\s*extra\s*:\s*", re.IGNORECASE)
 
 # Canonical language labels and aliases for common Notion code-block values.
 _LANGUAGE_ALIASES = {
@@ -191,14 +194,27 @@ _LANGUAGE_TYPES: dict[str, frozenset[str]] = {
 
 @dataclass(frozen=True)
 class ToggleCardPayload:
-    """Represents one parsed Notion toggle card."""
+    """Represents one parsed Notion card payload."""
 
     notion_page_id: str
     notion_block_id: str
-    front_html: str
-    back_html: str
-    content_hash: str
-    last_edited_time: str | None
+    front_html: str = ""
+    back_html: str = ""
+    card_type: str = BASIC
+    model_name: str = MODEL_NAME_BASIC
+    fields: dict[str, str] = field(default_factory=dict)
+    content_hash: str = ""
+    last_edited_time: str | None = None
+
+
+@dataclass(frozen=True)
+class ImageOcclusionCandidate:
+    """Represents one image candidate for Image Occlusion workflow."""
+
+    notion_block_id: str
+    image_url: str
+    caption_html: str
+    caption_plain: str
 
 
 def extract_root_toggle_blocks(blocks: Iterable[NotionBlock]) -> list[NotionBlock]:
@@ -234,22 +250,52 @@ def render_blocks(blocks: Iterable[NotionBlock]) -> str:
     return "".join(chunk for chunk in html_chunks if chunk)
 
 
-def parse_page_to_cards(page_id: str, blocks: Iterable[NotionBlock]) -> list[ToggleCardPayload]:
-    """Parse top-level toggles into card payloads."""
+def parse_page_to_cards(
+    page_id: str,
+    blocks: Iterable[NotionBlock],
+    *,
+    default_card_type: str = BASIC,
+    enable_cloze: bool = False,
+) -> list[ToggleCardPayload]:
+    """Parse page blocks into typed card payloads."""
+    resolved_default_card_type = normalize_default_selectable_card_type(default_card_type)
+    top_level_blocks = list(blocks)
     payloads: list[ToggleCardPayload] = []
-    for block in extract_root_toggle_blocks(blocks):
-        front_html = render_rich_text(_block_rich_text(block))
+    for block in extract_root_toggle_blocks(top_level_blocks):
+        front_html = _render_toggle_front(block)
         back_html = render_blocks(block.children)
+        fields = _build_toggle_fields(
+            block_id=block.block_id,
+            front_html=front_html,
+            back_html=back_html,
+            back_blocks=block.children,
+            card_type=resolved_default_card_type,
+        )
+        model_name = _model_name_for_card_type(resolved_default_card_type)
+        content_hash = _compute_payload_content_hash(
+            page_id=page_id,
+            block_id=block.block_id,
+            card_type=resolved_default_card_type,
+            model_name=model_name,
+            fields=fields,
+        )
         payloads.append(
             ToggleCardPayload(
                 notion_page_id=page_id,
                 notion_block_id=block.block_id,
                 front_html=front_html,
                 back_html=back_html,
-                content_hash=_compute_content_hash(page_id, block.block_id, front_html, back_html),
+                card_type=resolved_default_card_type,
+                model_name=model_name,
+                fields=fields,
+                content_hash=content_hash,
                 last_edited_time=_as_optional_string(block.raw.get("last_edited_time")),
             )
         )
+
+    if enable_cloze:
+        payloads.extend(_parse_top_level_cloze_paragraphs(page_id, top_level_blocks))
+
     return payloads
 
 
@@ -668,6 +714,294 @@ def _block_rich_text(block: NotionBlock) -> list[dict[str, Any]]:
     return []
 
 
+def _render_toggle_front(block: NotionBlock) -> str:
+    """Render a toggle title via `render_blocks` for consistent front/back parsing."""
+    front_block = NotionBlock(
+        block_id=block.block_id,
+        block_type="paragraph",
+        has_children=False,
+        parent_id=block.parent_id,
+        parent_type=block.parent_type,
+        raw={
+            "id": block.block_id,
+            "type": "paragraph",
+            "paragraph": {"rich_text": _block_rich_text(block)},
+        },
+        children=(),
+    )
+    return render_blocks([front_block])
+
+
+def _build_toggle_fields(
+    *,
+    block_id: str,
+    front_html: str,
+    back_html: str,
+    back_blocks: Iterable[NotionBlock],
+    card_type: str,
+) -> dict[str, str]:
+    """Build model fields for one parsed toggle block."""
+    if card_type == INPUT:
+        return {
+            "Front": front_html,
+            "Back": back_html,
+            "Expected Answer": _raw_text_from_blocks(back_blocks),
+            "Notion Block ID": block_id,
+        }
+    return {
+        "Front": front_html,
+        "Back": back_html,
+        "Notion Block ID": block_id,
+    }
+
+
+def _model_name_for_card_type(card_type: str) -> str:
+    """Return model name for one canonical card type."""
+    if card_type == BASIC_REVERSED:
+        return MODEL_NAME_BASIC_REVERSED
+    if card_type == INPUT:
+        return MODEL_NAME_INPUT
+    if card_type == CLOZE:
+        return MODEL_NAME_CLOZE
+    return MODEL_NAME_BASIC
+
+
+def _parse_top_level_cloze_paragraphs(
+    page_id: str,
+    blocks: list[NotionBlock],
+) -> list[ToggleCardPayload]:
+    """Parse top-level paragraphs containing cloze markers into cloze payloads."""
+    payloads: list[ToggleCardPayload] = []
+    consumed_indices: set[int] = set()
+
+    for index, block in enumerate(blocks):
+        if index in consumed_indices:
+            continue
+        if block.block_type != "paragraph":
+            continue
+        rich_text = _block_rich_text(block)
+        if not _paragraph_has_cloze_marker(rich_text):
+            continue
+
+        cloze_text = _rich_text_to_cloze_text(rich_text)
+        if not cloze_text.strip():
+            continue
+
+        extra_html = ""
+        next_index = index + 1
+        if next_index < len(blocks):
+            next_block = blocks[next_index]
+            # Keep cloze-extra deterministic: consume exactly one adjacent `Extra:` paragraph.
+            if _is_cloze_extra_paragraph(next_block):
+                extra_html = _render_extra_paragraph_without_prefix(next_block)
+                consumed_indices.add(next_index)
+        model_name = _model_name_for_card_type(CLOZE)
+        fields = {
+            "Text": cloze_text,
+            "Extra": extra_html,
+            "Notion Block ID": block.block_id,
+        }
+        payloads.append(
+            ToggleCardPayload(
+                notion_page_id=page_id,
+                notion_block_id=block.block_id,
+                card_type=CLOZE,
+                model_name=model_name,
+                fields=fields,
+                content_hash=_compute_payload_content_hash(
+                    page_id=page_id,
+                    block_id=block.block_id,
+                    card_type=CLOZE,
+                    model_name=model_name,
+                    fields=fields,
+                ),
+                last_edited_time=_as_optional_string(block.raw.get("last_edited_time")),
+            )
+        )
+    return payloads
+
+
+def _is_cloze_extra_paragraph(block: NotionBlock) -> bool:
+    """Return whether a paragraph starts with the cloze-extra `Extra:` prefix."""
+    if block.block_type != "paragraph":
+        return False
+    plain_text = _rich_text_to_plain(_block_rich_text(block))
+    return _CLOZE_EXTRA_PREFIX_RE.search(plain_text) is not None
+
+
+def _render_extra_paragraph_without_prefix(block: NotionBlock) -> str:
+    """Render one extra paragraph as HTML after stripping a leading `Extra:` prefix."""
+    rich_text = _block_rich_text(block)
+    stripped_rich_text = _strip_extra_prefix_from_rich_text(rich_text)
+    return render_rich_text(stripped_rich_text)
+
+
+def _strip_extra_prefix_from_rich_text(rich_text: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Clone rich text and strip the `Extra:` prefix from the first content segment."""
+    stripped_items: list[dict[str, Any]] = []
+    stripped_prefix = False
+
+    for item in rich_text:
+        item_copy = dict(item)
+        if not stripped_prefix and item_copy.get("type") == "equation":
+            equation_payload = item_copy.get("equation")
+            if isinstance(equation_payload, dict):
+                expression = equation_payload.get("expression")
+                if isinstance(expression, str):
+                    stripped_expression = _CLOZE_EXTRA_PREFIX_RE.sub("", expression, count=1)
+                    if stripped_expression != expression:
+                        equation_copy = dict(equation_payload)
+                        equation_copy["expression"] = stripped_expression
+                        item_copy["equation"] = equation_copy
+                        stripped_prefix = True
+        if not stripped_prefix:
+            text_payload = item_copy.get("text")
+            if isinstance(text_payload, dict):
+                content = text_payload.get("content")
+                if isinstance(content, str):
+                    stripped_content = _CLOZE_EXTRA_PREFIX_RE.sub("", content, count=1)
+                    if stripped_content != content:
+                        text_copy = dict(text_payload)
+                        text_copy["content"] = stripped_content
+                        item_copy["text"] = text_copy
+                        plain_text = item_copy.get("plain_text")
+                        if isinstance(plain_text, str):
+                            item_copy["plain_text"] = _CLOZE_EXTRA_PREFIX_RE.sub(
+                                "",
+                                plain_text,
+                                count=1,
+                            )
+                        stripped_prefix = True
+        stripped_items.append(item_copy)
+
+    return stripped_items
+
+
+def _paragraph_has_cloze_marker(rich_text: Iterable[dict[str, Any]]) -> bool:
+    """Return whether rich text includes a cloze marker annotation."""
+    for item in rich_text:
+        annotations = item.get("annotations") if isinstance(item, dict) else None
+        if not isinstance(annotations, dict):
+            continue
+        color = str(annotations.get("color") or "").strip().lower()
+        background_color = str(annotations.get("background_color") or "").strip().lower()
+        if color == "yellow_background" or background_color == "yellow":
+            return True
+    return False
+
+
+def _rich_text_to_cloze_text(rich_text: Iterable[dict[str, Any]]) -> str:
+    """Build Anki cloze text from Notion rich text using yellow markers."""
+    parts: list[str] = []
+    for item in rich_text:
+        if not isinstance(item, dict):
+            continue
+
+        annotations = item.get("annotations")
+        is_marker = False
+        if isinstance(annotations, dict):
+            color = str(annotations.get("color") or "").strip().lower()
+            background_color = str(annotations.get("background_color") or "").strip().lower()
+            is_marker = color == "yellow_background" or background_color == "yellow"
+
+        raw_text = ""
+        if item.get("type") == "equation":
+            equation = item.get("equation")
+            if isinstance(equation, dict):
+                expression = equation.get("expression")
+                if isinstance(expression, str):
+                    raw_text = expression
+        else:
+            raw_text = _extract_text_content(item)
+        if not raw_text:
+            continue
+
+        safe_text = html.escape(raw_text)
+        parts.append(f"{{{{c1::{safe_text}}}}}" if is_marker else safe_text)
+    return "".join(parts)
+
+
+def normalize_typed_answer(value: str) -> str:
+    """Normalize a text/HTML answer for stable typed-answer matching."""
+    without_tags = re.sub(r"<[^>]+>", " ", value or "")
+    decoded = html.unescape(without_tags).lower()
+    stripped_punct = re.sub(r"[\W_]+", " ", decoded)
+    return " ".join(stripped_punct.split())
+
+
+def _raw_text_from_blocks(blocks: Iterable[NotionBlock]) -> str:
+    """Extract deterministic raw text from blocks while preserving equation syntax."""
+    parts: list[str] = []
+    for block in blocks:
+        own_text = _raw_text_from_single_block(block)
+        if own_text:
+            parts.append(own_text)
+        if block.children:
+            child_text = _raw_text_from_blocks(block.children)
+            if child_text:
+                parts.append(child_text)
+    return "\n".join(parts)
+
+
+def _raw_text_from_single_block(block: NotionBlock) -> str:
+    """Extract the plain-text content directly represented by one block."""
+    if block.block_type == "equation":
+        payload = _block_payload(block)
+        expression = payload.get("expression")
+        if isinstance(expression, str):
+            return expression
+        return ""
+
+    if block.block_type == "table_row":
+        payload = _block_payload(block)
+        cells = payload.get("cells")
+        if not isinstance(cells, list):
+            return ""
+        cell_parts: list[str] = []
+        for cell in cells:
+            if not isinstance(cell, list):
+                continue
+            rich_text_items = [item for item in cell if isinstance(item, dict)]
+            plain = _rich_text_to_plain(rich_text_items)
+            if plain:
+                cell_parts.append(plain)
+        return " | ".join(cell_parts)
+
+    if block.block_type == "image":
+        payload = _block_payload(block)
+        caption_items = _extract_caption_items(payload.get("caption"))
+        return _rich_text_to_plain(caption_items)
+
+    return _rich_text_to_plain(_block_rich_text(block))
+
+
+def collect_image_occlusion_candidates(blocks: Iterable[NotionBlock]) -> list[ImageOcclusionCandidate]:
+    """Collect image blocks outside of toggle trees for image occlusion."""
+    candidates: list[ImageOcclusionCandidate] = []
+
+    def walk(items: Iterable[NotionBlock], *, inside_toggle: bool) -> None:
+        for block in items:
+            next_inside_toggle = inside_toggle or block.block_type == "toggle"
+            if block.block_type == "image" and not next_inside_toggle:
+                payload = _block_payload(block)
+                image_url = _extract_image_url(payload)
+                if image_url:
+                    caption_items = _extract_caption_items(payload.get("caption"))
+                    candidates.append(
+                        ImageOcclusionCandidate(
+                            notion_block_id=block.block_id,
+                            image_url=image_url,
+                            caption_html=render_rich_text(caption_items),
+                            caption_plain=_rich_text_to_plain(caption_items),
+                        )
+                    )
+            if block.children:
+                walk(block.children, inside_toggle=next_inside_toggle)
+
+    walk(list(blocks), inside_toggle=False)
+    return candidates
+
+
 def _rich_text_to_plain(rich_text: Iterable[dict[str, Any]]) -> str:
     """Flatten rich_text items to plain text content."""
     segments: list[str] = []
@@ -932,5 +1266,37 @@ def _compute_content_hash(
     back_html: str,
 ) -> str:
     """Compute a deterministic content hash for sync comparisons."""
-    payload = f"{page_id}\n{block_id}\n{front_html}\n{back_html}".encode("utf-8")
+    return _compute_payload_content_hash(
+        page_id=page_id,
+        block_id=block_id,
+        card_type=BASIC,
+        model_name=MODEL_NAME_BASIC,
+        fields={
+            "Front": front_html,
+            "Back": back_html,
+            "Notion Block ID": block_id,
+        },
+    )
+
+
+def _compute_payload_content_hash(
+    *,
+    page_id: str,
+    block_id: str,
+    card_type: str,
+    model_name: str,
+    fields: dict[str, str],
+) -> str:
+    """Compute a deterministic content hash for any typed payload."""
+    ordered_fields = "\n".join(
+        f"{key}={fields[key]}"
+        for key in sorted(fields)
+    )
+    payload = (
+        f"{page_id}\n"
+        f"{block_id}\n"
+        f"{card_type}\n"
+        f"{model_name}\n"
+        f"{ordered_fields}"
+    ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()

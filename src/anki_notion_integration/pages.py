@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import sqlite3
 from typing import Mapping
 
+from .card_types import normalize_default_selectable_card_type
 from .db import Database
 from .notion_client import NotionPage, PageNode
 
@@ -21,6 +22,7 @@ class StoredPage:
     last_synced_at: str | None
     parent_id: str | None
     parent_type: str | None
+    default_card_type: str | None
 
 
 def flatten_page_tree(roots: list[PageNode]) -> dict[str, PageNode]:
@@ -113,6 +115,36 @@ def apply_selection_rule(
     return updated
 
 
+def apply_default_card_type_rule(
+    page_id: str,
+    card_type: str | None,
+    page_default_card_types: Mapping[str, str | None],
+    children_map: Mapping[str, tuple[str, ...]],
+) -> dict[str, str | None]:
+    """Apply one page card-type change to the page and conditionally to descendants.
+
+    Descendants are updated only when all descendants currently use the inherited
+    default (`None`). This prevents overriding explicit child page overrides.
+    """
+    normalized = None if card_type is None else normalize_default_selectable_card_type(card_type)
+    updated = dict(page_default_card_types)
+    descendant_ids = get_descendant_ids(page_id, children_map)
+
+    # Always update the selected page.
+    updated[page_id] = normalized
+
+    # Cascade to descendants only while no explicit descendant override exists.
+    can_cascade_to_descendants = all(
+        page_default_card_types.get(descendant_id) is None
+        for descendant_id in descendant_ids
+    )
+    if can_cascade_to_descendants:
+        for descendant_id in descendant_ids:
+            updated[descendant_id] = normalized
+
+    return updated
+
+
 def _normalize_deck_segment(title: str) -> str:
     """Normalize one deck-name segment for predictable deck paths."""
     cleaned = " ".join(str(title).split()).strip()
@@ -196,7 +228,8 @@ class PagesStore:
                     sync_enabled,
                     last_synced_at,
                     parent_id,
-                    parent_type
+                    parent_type,
+                    default_card_type
                 FROM pages
                 """
             ).fetchall()
@@ -212,6 +245,7 @@ class PagesStore:
                 last_synced_at=row["last_synced_at"],
                 parent_id=row["parent_id"],
                 parent_type=row["parent_type"],
+                default_card_type=row["default_card_type"],
             )
             for row in rows
         }
@@ -245,9 +279,10 @@ class PagesStore:
                         anki_deck_name,
                         sync_enabled,
                         parent_id,
-                        parent_type
+                        parent_type,
+                        default_card_type
                     )
-                    VALUES (?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(notion_page_id) DO UPDATE SET
                         anki_deck_name = excluded.anki_deck_name,
                         sync_enabled = excluded.sync_enabled,
@@ -260,8 +295,55 @@ class PagesStore:
                         1 if page_id in selected_page_ids else 0,
                         parent_id,
                         parent_type,
+                        None,
                     ),
                 )
+            connection.commit()
+        except sqlite3.Error:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def set_page_default_card_type(self, page_id: str, card_type: str | None) -> None:
+        """Persist an optional per-page default card type override."""
+        normalized = None if card_type is None else normalize_default_selectable_card_type(card_type)
+
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                UPDATE pages
+                SET default_card_type = ?
+                WHERE notion_page_id = ?
+                """,
+                (normalized, page_id),
+            )
+            connection.commit()
+        except sqlite3.Error:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def set_page_default_card_types(self, page_ids: set[str], card_type: str | None) -> None:
+        """Persist one default card type override for multiple pages."""
+        if not page_ids:
+            return
+
+        normalized = None if card_type is None else normalize_default_selectable_card_type(card_type)
+        placeholders = ", ".join("?" for _ in page_ids)
+
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                f"""
+                UPDATE pages
+                SET default_card_type = ?
+                WHERE notion_page_id IN ({placeholders})
+                """,
+                (normalized, *tuple(page_ids)),
+            )
             connection.commit()
         except sqlite3.Error:
             connection.rollback()

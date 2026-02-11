@@ -16,6 +16,39 @@
       ]
     },
     {
+      "key": "cards",
+      "name": "Cards",
+      "description": "Card generation defaults and parser options.",
+      "settings": [
+        {
+          "key": "default_card_type",
+          "type": "dropdown",
+          "name": "Default card type",
+          "description": "Default card type used for synced pages unless overridden per page.",
+          "default": "basic",
+          "options": [
+            "basic",
+            "basic_reversed",
+            "input"
+          ]
+        },
+        {
+          "key": "enable_cloze_parsing",
+          "type": "checkbox",
+          "name": "Enable cloze parsing",
+          "description": "Convert top-level paragraphs with yellow highlight markers to cloze cards.",
+          "default": true
+        },
+        {
+          "key": "enable_image_occlusion_parsing",
+          "type": "checkbox",
+          "name": "Enable image occlusion parsing",
+          "description": "Enable image extraction for the Image Occlusion page.",
+          "default": false
+        }
+      ]
+    },
+    {
       "key": "sync",
       "name": "Sync",
       "description": "Sync behavior between Notion and Anki.",

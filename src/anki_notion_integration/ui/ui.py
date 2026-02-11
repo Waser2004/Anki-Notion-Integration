@@ -156,6 +156,13 @@ def _show_window(schema: UiSchema) -> None:
     _window.activateWindow()
 
 
+def navigate_to_page(page_key: str, payload: dict[str, Any] | None = None) -> None:
+    """Navigate the open Notion window to a page key and optionally pass payload."""
+    if _window is None:
+        return
+    _window.navigate_to_page(page_key, payload=payload)
+
+
 def _build_context() -> UiContext:
     """Build the shared context passed to page factories."""
     profile_folder = Path(mw.pm.profileFolder())
@@ -211,6 +218,26 @@ class NotionWindow(QDialog):
     def _load_initial_tab(self) -> None:
         """Load the current tab after the widget has been laid out."""
         self._on_tab_changed(self._tabs.currentIndex())
+
+    def navigate_to_page(self, page_key: str, payload: dict[str, Any] | None = None) -> None:
+        """Switch to a specific page key and optionally notify the target widget."""
+        page_index = None
+        for index, page in enumerate(self._schema.pages):
+            if page.key == page_key:
+                page_index = index
+                break
+        if page_index is None:
+            return
+
+        self._tabs.setCurrentIndex(page_index)
+        self._on_tab_changed(page_index)
+        widget = self._page_widgets.get(page_key)
+        if widget is None:
+            return
+
+        on_navigation_payload = getattr(widget, "on_navigation_payload", None)
+        if callable(on_navigation_payload):
+            on_navigation_payload(payload or {})
 
     def showEvent(self, event: QShowEvent) -> None:
         """Handle window show events to ensure tabs have focus."""

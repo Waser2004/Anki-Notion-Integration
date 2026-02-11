@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import queue
 import threading
 from typing import Any
 
 from aqt.qt import (
+    QComboBox,
+    QCursor,
     QEvent,
     QGroupBox,
-    QHBoxLayout,
+    QHeaderView,
+    QIcon,
     QLabel,
+    QPushButton,
+    QSize,
+    QSizePolicy,
     QTimer,
     QTreeWidget,
     QTreeWidgetItem,
@@ -18,16 +25,23 @@ from aqt.qt import (
     QWidget,
 )
 
+from anki_notion_integration.card_types import (
+    DEFAULT_SELECTABLE_CARD_TYPES,
+    card_type_label,
+    normalize_default_selectable_card_type,
+)
 from anki_notion_integration.db import Database
 from anki_notion_integration.notion_client import NotionApiError, NotionClient, NotionPage, NotionTransportError
 from anki_notion_integration.pages import (
     PagesStore,
     StoredPage,
+    apply_default_card_type_rule,
     apply_selection_rule,
     build_children_map_from_pages,
     build_deck_names_from_pages,
     get_descendant_ids,
 )
+from anki_notion_integration.ui.ui import navigate_to_page
 from anki_notion_integration.ui.ui import UiContext
 
 
@@ -41,10 +55,13 @@ class PagesPage(QWidget):
         self._store = PagesStore(self._db)
         self._children_map: dict[str, tuple[str, ...]] = {}
         self._deck_names_by_page_id: dict[str, str] = {}
+        self._page_default_card_types: dict[str, str | None] = {}
+        self._ordered_child_ids_by_parent: dict[str, tuple[str, ...]] = {}
         self._items_by_id: dict[str, QTreeWidgetItem] = {}
         self._pages_by_id: dict[str, NotionPage] = {}
         self._selected_ids: set[str] = set()
         self._cascade_selected_parent_ids: set[str] = set()
+        self._cascade_card_type_parent_types: dict[str, str | None] = {}
         self._page_count = 0
         self._upsert_batch_size = 25
         self._load_generation = 0
@@ -54,13 +71,10 @@ class PagesPage(QWidget):
         self._received_page_ids: set[str] = set()
         self._expanded_page_ids: set[str] = set()
         self._has_expansion_snapshot = False
+        self._hovered_page_id: str | None = None
 
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(11, 11, 11, 11)
-
-        self._info_label = QLabel("Select Notion pages to convert to Anki decks.", self)
-        self._info_label.setWordWrap(True)
-        root_layout.addWidget(self._info_label)
 
         self._groupbox = QGroupBox("Loading Notion pages...", self)
         groupbox_layout = QVBoxLayout(self._groupbox)
@@ -73,7 +87,15 @@ class PagesPage(QWidget):
         groupbox_layout.addWidget(self._error_label)
 
         self._tree = QTreeWidget(self)
+        self._tree.setColumnCount(3)
         self._tree.setHeaderHidden(True)
+        header = self._tree.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self._tree.setMouseTracking(True)
+        self._tree.viewport().setMouseTracking(True)
         self._tree.setSelectionMode(self._selection_mode_no_selection())
         self._tree.setFocusPolicy(self._focus_policy_no_focus())
         self._tree.setStyleSheet("""
@@ -83,10 +105,12 @@ class PagesPage(QWidget):
                 selection-background-color: transparent;
             }
             QTreeWidget::item {
-                margin-top: 5px;
-                margin-bottom: 5px;
+                height: 20px;
+                margin-top: 2px;
+                margin-bottom: 3px;
             }
         """)
+        self._tree.installEventFilter(self)
         self._tree.viewport().installEventFilter(self)
         self._tree.itemChanged.connect(self._on_item_changed)
         groupbox_layout.addWidget(self._tree, 1)
@@ -94,6 +118,9 @@ class PagesPage(QWidget):
         self._fetch_timer = QTimer(self)
         self._fetch_timer.setInterval(40)
         self._fetch_timer.timeout.connect(self._drain_fetch_queue)
+        # Cache action icons and refresh them when palette/theme changes.
+        self._image_button_icon = QIcon()
+        self._reload_action_icons()
 
         self.reload()
 
@@ -115,12 +142,16 @@ class PagesPage(QWidget):
             self._tree.clear()
             self._items_by_id.clear()
             self._pages_by_id.clear()
+            self._hovered_page_id = None
             self._children_map = {}
             self._deck_names_by_page_id = {}
+            self._page_default_card_types = {}
+            self._ordered_child_ids_by_parent = {}
             self._selected_ids = self._store.get_selected_page_ids()
             # Cascade tracking is session-local user intent. Persisted DB state
             # should be restored exactly and must not auto-select descendants.
             self._cascade_selected_parent_ids = set()
+            self._cascade_card_type_parent_types = {}
             self._error_label.clear()
             self._error_label.hide()
             self._preload_cached_pages()
@@ -147,8 +178,19 @@ class PagesPage(QWidget):
         profile_name = self._resolve_profile_name(self._context)
         try:
             client = NotionClient.from_settings(self._db, profile_name=profile_name)
+            pages_by_id: dict[str, NotionPage] = {}
             for page in client.iter_pages():
+                pages_by_id[page.page_id] = page
                 self._fetch_queue.put(("page", generation, page))
+
+            ordered_child_ids_by_parent: dict[str, tuple[str, ...]] = {}
+            try:
+                ordered_child_ids_by_parent = client.build_child_page_order_map(pages_by_id)
+            except (NotionApiError, NotionTransportError):
+                # Sibling order is best-effort metadata. Keep loading even if
+                # order lookups fail so page selection remains usable.
+                ordered_child_ids_by_parent = {}
+            self._fetch_queue.put(("order_map", generation, ordered_child_ids_by_parent))
             self._fetch_queue.put(("done", generation, None))
         except NotionApiError as exc:
             self._fetch_queue.put(("error", generation, str(exc)))
@@ -171,12 +213,20 @@ class PagesPage(QWidget):
             if event_type == "page":
                 self._handle_loaded_page(payload)
                 continue
+            if event_type == "order_map":
+                self._handle_loaded_order_map(payload)
+                continue
             if event_type == "error":
                 self._finish_reload(error_message=str(payload))
                 return
             if event_type == "done":
                 self._finish_reload(error_message=None)
                 return
+
+    def _handle_loaded_order_map(self, ordered_child_ids_by_parent: dict[str, tuple[str, ...]]) -> None:
+        """Apply finalized sibling-order hints gathered from Notion block ordering."""
+        self._ordered_child_ids_by_parent = dict(ordered_child_ids_by_parent)
+        self._sync_tree_items()
 
     def _handle_loaded_page(self, page: NotionPage) -> None:
         """Create/update one page item and refresh derived tree metadata."""
@@ -190,6 +240,7 @@ class PagesPage(QWidget):
             self._children_map = build_children_map_from_pages(self._pages_by_id)
             self._deck_names_by_page_id = build_deck_names_from_pages(self._pages_by_id)
             self._sync_tree_items()
+            self._apply_cascade_card_type_to_page(page.page_id)
 
             # Re-apply selection state with cascade rules.
             self._selected_ids = self._apply_cascade_selection(self._selected_ids)
@@ -224,13 +275,198 @@ class PagesPage(QWidget):
             item.setToolTip(0, self._deck_names_by_page_id.get(page_id, "Notion::Untitled"))
             self._reparent_item(page_id)
 
+        self._reorder_tree_items()
         self._apply_expanded_ids()
+        self._sync_hovered_row_actions()
+
+    def _attach_item_actions(self, item: QTreeWidgetItem, page_id: str) -> None:
+        """Attach row actions for image occlusion and inline page card-type selection."""
+        image_button = self._tree.itemWidget(item, 1)
+        if not isinstance(image_button, QPushButton):
+            image_button = QPushButton(self._tree)
+            image_button.clicked.connect(
+                lambda _checked=False, pid=page_id: self._open_image_occlusion_page(pid)
+            )
+            self._tree.setItemWidget(item, 1, image_button)
+        self._configure_action_button(image_button, self._image_button_icon)
+        image_button.setToolTip("Open Image Occlusion page for this Notion page.")
+
+        type_combo = self._tree.itemWidget(item, 2)
+        if not isinstance(type_combo, QComboBox):
+            type_combo = QComboBox(self._tree)
+            type_combo.addItem("Default", None)
+            for card_type in DEFAULT_SELECTABLE_CARD_TYPES:
+                type_combo.addItem(card_type_label(card_type,  abbreviation=True), card_type)
+            type_combo.currentIndexChanged.connect(
+                lambda _index, pid=page_id, combo=type_combo: self._on_card_type_selected(pid, combo)
+            )
+            self._tree.setItemWidget(item, 2, type_combo)
+        self._configure_card_type_combo(type_combo)
+
+        default_card_type = self._page_default_card_types.get(page_id)
+        self._set_card_type_combo_value(type_combo, default_card_type)
+        if default_card_type:
+            type_combo.setToolTip(f"Page card type override: {card_type_label(default_card_type,  abbreviation=False)}")
+        else:
+            type_combo.setToolTip("Use global card type default for this page.")
+
+    def _detach_item_actions(self, item: QTreeWidgetItem) -> None:
+        """Remove row action widgets so only hovered rows render controls."""
+        image_button = self._tree.itemWidget(item, 1)
+        if isinstance(image_button, QPushButton):
+            self._tree.removeItemWidget(item, 1)
+            image_button.hide()
+            image_button.deleteLater()
+
+        type_combo = self._tree.itemWidget(item, 2)
+        if isinstance(type_combo, QComboBox):
+            self._tree.removeItemWidget(item, 2)
+            type_combo.hide()
+            type_combo.deleteLater()
+
+    def _sync_hovered_row_actions(self) -> None:
+        """Ensure only the currently hovered and selected row has action widgets."""
+        if self._hovered_page_id is None:
+            return
+
+        item = self._items_by_id.get(self._hovered_page_id)
+        if item is None:
+            self._hovered_page_id = None
+            return
+
+        if self._is_page_selected(self._hovered_page_id):
+            self._attach_item_actions(item, self._hovered_page_id)
+            return
+
+        self._detach_item_actions(item)
+
+    def _is_page_selected(self, page_id: str) -> bool:
+        """Return whether the page is currently selected in the tree."""
+        item = self._items_by_id.get(page_id)
+        if item is None:
+            return False
+        return item.checkState(0) == self._check_state_checked()
+
+    def _configure_action_button(self, button: QPushButton, icon: QIcon) -> None:
+        """Apply compact 20x20 icon-button styling for one tree action control."""
+        # Force icon-only controls so row action columns remain fixed and minimal.
+        button.setText("")
+        button.setIcon(icon)
+        button.setFixedSize(20, 20)
+        button.setIconSize(QSize(14, 14))
+        button.setStyleSheet("padding: 0px;")
+
+    def _configure_card_type_combo(self, combo: QComboBox) -> None:
+        """Apply compact sizing so per-row combo boxes only use their needed width."""
+        combo.setSizePolicy(self._size_policy_fixed(), self._size_policy_fixed())
+        combo.setSizeAdjustPolicy(self._combo_adjust_to_contents_policy())
+        combo.setMinimumContentsLength(0)
+        combo.setStyleSheet(
+            "QComboBox { padding: 0px 4px; }"
+            "QComboBox:on { padding: 0px; }"
+        )
+        self._configure_card_type_combo_popup(combo)
+
+    def _configure_card_type_combo_popup(self, combo: QComboBox) -> None:
+        """Ensure the expanded popup is wide enough for full card-type labels."""
+        from aqt.qt import Qt
+
+        popup_width = self._card_type_combo_popup_width(combo)
+        popup_view = combo.view()
+        popup_view.setMinimumWidth(popup_width)
+        text_elide_mode = getattr(Qt, "TextElideMode", None)
+        if text_elide_mode is not None and hasattr(text_elide_mode, "ElideNone"):
+            popup_view.setTextElideMode(getattr(text_elide_mode, "ElideNone"))
+        else:
+            popup_view.setTextElideMode(getattr(Qt, "ElideNone"))
+
+    def _card_type_combo_popup_width(self, combo: QComboBox) -> int:
+        """Return popup width needed to show the longest combo entry without clipping."""
+        font_metrics = combo.fontMetrics()
+        longest_label_width = 0
+        for index in range(combo.count()):
+            label_width = int(font_metrics.horizontalAdvance(combo.itemText(index)))
+            if label_width > longest_label_width:
+                longest_label_width = label_width
+
+        # Add room for checkmark, popup padding, and a potential scrollbar.
+        popup_padding_width = 52
+        collapsed_combo_width = int(combo.sizeHint().width())
+        return max(collapsed_combo_width, longest_label_width + popup_padding_width)
+
+    def _set_card_type_combo_value(self, combo: QComboBox, card_type: str | None) -> None:
+        """Set one combo to the stored card type without re-triggering persistence."""
+        previous_block_state = combo.blockSignals(True)
+        try:
+            selected_index = 0
+            if card_type:
+                for index in range(combo.count()):
+                    if combo.itemData(index) == card_type:
+                        selected_index = index
+                        break
+            combo.setCurrentIndex(selected_index)
+        finally:
+            combo.blockSignals(previous_block_state)
+
+    def _on_card_type_selected(self, page_id: str, combo: QComboBox) -> None:
+        """Persist one page's card-type override and cascade it to descendants."""
+        selected = combo.currentData()
+        selected_type = None if selected is None else normalize_default_selectable_card_type(str(selected))
+        updated_card_types = apply_default_card_type_rule(
+            page_id,
+            selected_type,
+            page_default_card_types=self._page_default_card_types,
+            children_map=self._children_map,
+        )
+        affected_page_ids = {
+            affected_page_id
+            for affected_page_id, updated_card_type in updated_card_types.items()
+            if self._page_default_card_types.get(affected_page_id) != updated_card_type
+        }
+        if not affected_page_ids:
+            return
+
+        # Ensure rows exist for known pages before applying per-page overrides.
+        self._persist_selection_state()
+        self._store.set_page_default_card_types(affected_page_ids, selected_type)
+        for affected_page_id in affected_page_ids:
+            self._page_default_card_types[affected_page_id] = selected_type
+
+        # Latest direct user action should define cascade intent for this subtree.
+        descendant_ids = get_descendant_ids(page_id, self._children_map)
+        for descendant_id in descendant_ids:
+            self._cascade_card_type_parent_types.pop(descendant_id, None)
+        self._cascade_card_type_parent_types[page_id] = selected_type
+
+        if selected_type:
+            combo.setToolTip(f"Page card type override: {card_type_label(selected_type, abbreviation=False)}")
+        else:
+            combo.setToolTip("Use global card type default for this page.")
+
+    def _reload_action_icons(self) -> None:
+        """Load light/dark button icons that match the current application palette."""
+        variant = "dark" if self._is_dark_palette() else "light"
+        self._image_button_icon = QIcon(self._docs_icon_path(f"image_{variant}.svg"))
+
+    def _refresh_action_icons_in_tree(self) -> None:
+        """Re-apply action icons for the currently rendered hover-row actions."""
+        self._sync_hovered_row_actions()
+
+    def _open_image_occlusion_page(self, page_id: str) -> None:
+        """Open the Image Occlusion tab and preselect the clicked page."""
+        # Ensure the target page is persisted as sync-enabled before tab navigation.
+        self._persist_selection_state()
+        navigate_to_page("image_occlusion", {"page_id": page_id})
 
     def _remove_tree_item(self, page_id: str) -> None:
         """Detach and remove one tree item by page id."""
         item = self._items_by_id.pop(page_id, None)
         if item is None:
             return
+
+        self._detach_item_actions(item)
+        if self._hovered_page_id == page_id:
+            self._hovered_page_id = None
 
         parent = item.parent()
         if parent is None:
@@ -277,6 +513,105 @@ class PagesPage(QWidget):
             self._tree.addTopLevelItem(item)
             return
         target_parent.addChild(item)
+
+    def _reorder_tree_items(self) -> None:
+        """Reorder roots and siblings to match the current Notion page sequence."""
+        root_page_ids = self._ordered_root_page_ids()
+        self._reorder_child_items(parent_item=None, ordered_page_ids=root_page_ids)
+
+        for parent_page_id in self._pages_by_id:
+            parent_item = self._items_by_id.get(parent_page_id)
+            if parent_item is None:
+                continue
+            child_page_ids = self._ordered_child_page_ids(parent_page_id)
+            self._reorder_child_items(parent_item=parent_item, ordered_page_ids=child_page_ids)
+
+    def _ordered_root_page_ids(self) -> list[str]:
+        """Return root page ids in the current fetch order from Notion."""
+        root_page_ids: list[str] = []
+        for page_id, page in self._pages_by_id.items():
+            parent_id = page.parent_id if page.parent_type == "page_id" else None
+            if parent_id and parent_id in self._pages_by_id:
+                continue
+            root_page_ids.append(page_id)
+        return root_page_ids
+
+    def _ordered_child_page_ids(self, parent_page_id: str) -> list[str]:
+        """Return one parent's child ids in preferred order with stable fallback."""
+        current_child_page_ids = list(self._children_map.get(parent_page_id, ()))
+        if not current_child_page_ids:
+            return []
+
+        ordered_child_page_ids = self._ordered_child_ids_by_parent.get(parent_page_id)
+        if not ordered_child_page_ids:
+            return current_child_page_ids
+
+        known_child_page_ids = set(current_child_page_ids)
+        ordered_known_child_page_ids = [
+            child_page_id
+            for child_page_id in ordered_child_page_ids
+            if child_page_id in known_child_page_ids
+        ]
+
+        ordered_known_child_page_id_set = set(ordered_known_child_page_ids)
+        merged_order = list(ordered_known_child_page_ids)
+        for child_page_id in current_child_page_ids:
+            if child_page_id in ordered_known_child_page_id_set:
+                continue
+            merged_order.append(child_page_id)
+
+        return merged_order
+
+    def _reorder_child_items(self, parent_item: QTreeWidgetItem | None, ordered_page_ids: list[str]) -> None:
+        """Move child items so visible row order follows `ordered_page_ids`."""
+        if parent_item is None:
+            child_count = self._tree.topLevelItemCount()
+            get_child = self._tree.topLevelItem
+            index_of_child = self._tree.indexOfTopLevelItem
+            take_child = self._tree.takeTopLevelItem
+            insert_child = self._tree.insertTopLevelItem
+        else:
+            child_count = parent_item.childCount()
+            get_child = parent_item.child
+            index_of_child = parent_item.indexOfChild
+            take_child = parent_item.takeChild
+            insert_child = parent_item.insertChild
+
+        if child_count <= 1:
+            return
+
+        child_items_by_id: dict[str, QTreeWidgetItem] = {}
+        for index in range(child_count):
+            child_item = get_child(index)
+            child_page_id = child_item.data(0, self._item_role_user())
+            if child_page_id:
+                child_items_by_id[str(child_page_id)] = child_item
+
+        desired_page_ids = [
+            page_id
+            for page_id in ordered_page_ids
+            if page_id in child_items_by_id
+        ]
+        if len(desired_page_ids) <= 1:
+            return
+
+        current_page_ids: list[str] = []
+        for index in range(child_count):
+            child_item = get_child(index)
+            child_page_id = child_item.data(0, self._item_role_user())
+            if child_page_id and str(child_page_id) in child_items_by_id:
+                current_page_ids.append(str(child_page_id))
+        if current_page_ids == desired_page_ids:
+            return
+
+        # Move in reverse and insert at position 0 to preserve desired ordering.
+        for page_id in reversed(desired_page_ids):
+            child_item = child_items_by_id[page_id]
+            current_index = index_of_child(child_item)
+            if current_index < 0:
+                continue
+            take_child(current_index)
+            insert_child(0, child_item)
 
     def _finish_reload(self, error_message: str | None) -> None:
         """Finalize one reload cycle and persist the currently known selection state."""
@@ -330,6 +665,10 @@ class PagesPage(QWidget):
             page_id: page.anki_deck_name
             for page_id, page in stored_pages.items()
         }
+        self._page_default_card_types = {
+            page_id: page.default_card_type
+            for page_id, page in stored_pages.items()
+        }
         self._pages_by_id = {
             page_id: self._page_from_stored_row(page_id, stored_page)
             for page_id, stored_page in stored_pages.items()
@@ -353,6 +692,7 @@ class PagesPage(QWidget):
             self._pages_by_id.pop(page_id, None)
             self._selected_ids.discard(page_id)
             self._cascade_selected_parent_ids.discard(page_id)
+            self._page_default_card_types.pop(page_id, None)
 
         self._children_map = build_children_map_from_pages(self._pages_by_id)
         self._deck_names_by_page_id = build_deck_names_from_pages(self._pages_by_id)
@@ -420,15 +760,110 @@ class PagesPage(QWidget):
 
         return updated
 
+    def _apply_cascade_card_type_to_page(self, page_id: str) -> None:
+        """Apply one pending card-type cascade to a newly loaded page, if needed."""
+        has_cascade_match, cascaded_card_type = self._resolve_cascaded_card_type(page_id)
+        if not has_cascade_match:
+            return
+        if self._page_default_card_types.get(page_id) == cascaded_card_type:
+            return
+
+        # Ensure known rows exist before applying the override update.
+        self._persist_selection_state()
+        self._store.set_page_default_card_type(page_id, cascaded_card_type)
+        self._page_default_card_types[page_id] = cascaded_card_type
+
+    def _resolve_cascaded_card_type(self, page_id: str) -> tuple[bool, str | None]:
+        """Return nearest cascade-intent card type for one page, including explicit `None`."""
+        seen_page_ids: set[str] = set()
+        current_page_id: str | None = page_id
+
+        while current_page_id:
+            if current_page_id in seen_page_ids:
+                break
+            seen_page_ids.add(current_page_id)
+
+            if current_page_id in self._cascade_card_type_parent_types:
+                return True, self._cascade_card_type_parent_types[current_page_id]
+
+            page = self._pages_by_id.get(current_page_id)
+            if page is None or page.parent_type != "page_id" or not page.parent_id:
+                break
+            current_page_id = page.parent_id
+
+        return False, None
+
     def eventFilter(self, watched: Any, event: Any) -> bool:
         """Toggle checkboxes when users click a tree row, and consume the click event."""
+        if watched is self._tree and event is not None:
+            if event.type() == self._event_type_leave():
+                self._hide_actions_if_cursor_outside_tree()
+                return False
+
         if watched is self._tree.viewport() and event is not None:
+            if event.type() == self._event_type_mouse_move():
+                self._update_hovered_actions(event.pos())
+                return False
             if event.type() == self._mouse_button_release_event_type():
                 if self._mouse_button(event) == self._mouse_button_left():
                     if self._toggle_item_from_click(event.pos()):
                         return True
         
         return super().eventFilter(watched, event)
+
+    def _hide_actions_if_cursor_outside_tree(self) -> None:
+        """Hide row actions only when the cursor leaves the tree and combo popup is closed."""
+        if self._is_hovered_combo_popup_open():
+            return
+        if self._is_cursor_inside_tree():
+            return
+        self._update_hovered_actions(None)
+
+    def _is_cursor_inside_tree(self) -> bool:
+        """Return whether the pointer is currently inside the tree viewport."""
+        cursor_pos = QCursor.pos()
+        local_pos = self._tree.viewport().mapFromGlobal(cursor_pos)
+        return self._tree.viewport().rect().contains(local_pos)
+
+    def _is_hovered_combo_popup_open(self) -> bool:
+        """Return whether the currently hovered card-type combo popup is open."""
+        if self._hovered_page_id is None:
+            return False
+
+        item = self._items_by_id.get(self._hovered_page_id)
+        if item is None:
+            return False
+
+        type_combo = self._tree.itemWidget(item, 2)
+        if not isinstance(type_combo, QComboBox):
+            return False
+
+        combo_popup = type_combo.view()
+        return bool(combo_popup and combo_popup.isVisible())
+
+    def _update_hovered_actions(self, mouse_pos: Any | None) -> None:
+        """Show row actions only for the currently hovered and selected item."""
+        hovered_page_id: str | None = None
+        if mouse_pos is not None:
+            hovered_item = self._tree.itemAt(mouse_pos)
+            if hovered_item is not None:
+                hovered_data = hovered_item.data(0, self._item_role_user())
+                hovered_page_id = str(hovered_data) if hovered_data else None
+
+        if hovered_page_id == self._hovered_page_id:
+            return
+
+        previous_hovered_id = self._hovered_page_id
+        self._hovered_page_id = hovered_page_id
+
+        if previous_hovered_id:
+            previous_item = self._items_by_id.get(previous_hovered_id)
+            if previous_item is not None:
+                self._detach_item_actions(previous_item)
+        if hovered_page_id and self._is_page_selected(hovered_page_id):
+            hovered_item = self._items_by_id.get(hovered_page_id)
+            if hovered_item is not None:
+                self._attach_item_actions(hovered_item, hovered_page_id)
 
     def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
         """Apply selection rules on user toggle and persist the resulting selection."""
@@ -465,6 +900,7 @@ class PagesPage(QWidget):
 
         if updated_selected_ids != selected_ids:
             self._apply_selected_ids(updated_selected_ids)
+        self._sync_hovered_row_actions()
 
         self._persist_selection_state()
 
@@ -543,6 +979,18 @@ class PagesPage(QWidget):
         self._fetch_timer.stop()
         super().closeEvent(event)
 
+    def changeEvent(self, event: Any) -> None:
+        """Refresh icon set when Qt notifies this widget about palette changes."""
+        if event is not None:
+            event_type = event.type()
+            if event_type in (
+                self._event_type_palette_change(),
+                self._event_type_application_palette_change(),
+            ):
+                self._reload_action_icons()
+                self._refresh_action_icons_in_tree()
+        super().changeEvent(event)
+
     @staticmethod
     def _resolve_profile_name(context: UiContext) -> str | None:
         """Try to determine the active profile name for keyring namespacing."""
@@ -560,6 +1008,16 @@ class PagesPage(QWidget):
             return name_attr
 
         return None
+
+    @staticmethod
+    def _docs_icon_path(filename: str) -> str:
+        """Return absolute path for one icon file stored in the repository docs folder."""
+        return str(Path(__file__).resolve().parents[1] / "docs" / filename)
+
+    def _is_dark_palette(self) -> bool:
+        """Return whether the active window background is dark enough for light icons."""
+        color = self.palette().window().color()
+        return int(color.lightness()) < 128
 
     @staticmethod
     def _item_role_user() -> int:
@@ -588,6 +1046,38 @@ class PagesPage(QWidget):
         if event_type is not None and hasattr(event_type, "MouseButtonRelease"):
             return getattr(event_type, "MouseButtonRelease")
         return getattr(QEvent, "MouseButtonRelease")
+
+    @staticmethod
+    def _event_type_palette_change() -> Any:
+        """Return the Qt event type value for widget palette changes."""
+        event_type = getattr(QEvent, "Type", None)
+        if event_type is not None and hasattr(event_type, "PaletteChange"):
+            return getattr(event_type, "PaletteChange")
+        return getattr(QEvent, "PaletteChange")
+
+    @staticmethod
+    def _event_type_application_palette_change() -> Any:
+        """Return the Qt event type value for application palette changes."""
+        event_type = getattr(QEvent, "Type", None)
+        if event_type is not None and hasattr(event_type, "ApplicationPaletteChange"):
+            return getattr(event_type, "ApplicationPaletteChange")
+        return getattr(QEvent, "ApplicationPaletteChange")
+
+    @staticmethod
+    def _event_type_mouse_move() -> Any:
+        """Return the Qt event type value for mouse move events."""
+        event_type = getattr(QEvent, "Type", None)
+        if event_type is not None and hasattr(event_type, "MouseMove"):
+            return getattr(event_type, "MouseMove")
+        return getattr(QEvent, "MouseMove")
+
+    @staticmethod
+    def _event_type_leave() -> Any:
+        """Return the Qt event type value for pointer leave events."""
+        event_type = getattr(QEvent, "Type", None)
+        if event_type is not None and hasattr(event_type, "Leave"):
+            return getattr(event_type, "Leave")
+        return getattr(QEvent, "Leave")
 
     @staticmethod
     def _mouse_button(event: Any) -> Any:
@@ -650,6 +1140,22 @@ class PagesPage(QWidget):
         if check_state is not None and hasattr(check_state, "Unchecked"):
             return getattr(check_state, "Unchecked")
         return getattr(Qt, "Unchecked")
+
+    @staticmethod
+    def _combo_adjust_to_contents_policy() -> Any:
+        """Return the QComboBox policy that sizes to the current contents."""
+        adjust_policy = getattr(QComboBox, "SizeAdjustPolicy", None)
+        if adjust_policy is not None and hasattr(adjust_policy, "AdjustToContents"):
+            return getattr(adjust_policy, "AdjustToContents")
+        return getattr(QComboBox, "AdjustToContents")
+
+    @staticmethod
+    def _size_policy_fixed() -> Any:
+        """Return the QSizePolicy fixed policy in a Qt-version-safe way."""
+        size_policy = getattr(QSizePolicy, "Policy", None)
+        if size_policy is not None and hasattr(size_policy, "Fixed"):
+            return getattr(size_policy, "Fixed")
+        return getattr(QSizePolicy, "Fixed")
 
 
 def build_page(parent: QWidget, context: UiContext) -> QWidget:

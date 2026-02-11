@@ -1,75 +1,47 @@
 # Database (`src/anki_notion_integration/db.py`)
 
-## Goal
-The add-on persists state locally in a per-Anki-profile SQLite database.
+The add-on persists per-profile state in SQLite.
 
-- **Schema definition + migrations**: `src/anki_notion_integration/db.py`
-- **DB location (current default)**: `<AnkiProfile>/Anki_Notion_Integration/db/notion_integration.db`
-  - Built in `src/anki_notion_integration/__init__.py` and `src/anki_notion_integration/ui/ui.py`
+## Migrations
 
-## How migrations work
+- Ordered migrations live in `MIGRATIONS`.
+- `Database.initialize()` applies pending migrations and records applied versions in `schema_migrations`.
+- Current latest schema version: **5**.
 
-- Migrations are defined in `MIGRATIONS` as ordered `Migration(version, statements)`.
-- `Database.initialize()` creates a `schema_migrations` table and applies all migrations with `version > current_version`.
-- The latest applied version is tracked via `schema_migrations.version`.
-
-This lets you evolve the schema without deleting user data.
-
-## Tables (migration version 3)
+## Tables
 
 ### `pages`
-Stores which Notion pages are known/selected and how they map to Anki decks.
 
-Columns:
-
-- `notion_page_id` (TEXT, PK): Notion page ID.
-- `anki_deck_name` (TEXT, NOT NULL): Target deck name for that page.
-- `anki_deck_id` (INTEGER, nullable): Target Anki deck id for stable deck references.
-- `sync_enabled` (INTEGER, NOT NULL, default `1`): Whether the page should sync.
-- `content_hash` (TEXT, nullable): Legacy/unused (kept for backwards compatibility).
-- `last_seen_notion_edit_time` (TEXT, nullable): Latest Notion `last_edited_time` observed for this page (fast sync).
-- `last_synced_at` (TEXT, nullable): Bookkeeping timestamp (only updated when Anki content is written).
+- `notion_page_id` (TEXT, PK)
+- `anki_deck_name` (TEXT, NOT NULL)
+- `anki_deck_id` (INTEGER, nullable)
+- `sync_enabled` (INTEGER, NOT NULL)
+- `content_hash` (TEXT, legacy/unused)
+- `last_seen_notion_edit_time` (TEXT, nullable)
+- `last_synced_at` (TEXT, nullable)
+- `parent_id` (TEXT, nullable)
+- `parent_type` (TEXT, nullable)
+- `default_card_type` (TEXT, nullable; page-level override for default toggle card type)
 
 ### `cards`
-Stores the mapping between Notion blocks (toggles) and Anki notes/cards.
 
-Columns:
-
-- `notion_block_id` (TEXT, PK): Notion block ID (stable identity for sync).
-- `notion_page_id` (TEXT, NOT NULL): Parent page ID.
-- `anki_note_id` (INTEGER, UNIQUE, nullable): Corresponding Anki note id.
-- `card_type` (TEXT, NOT NULL): Card type identifier (MVP: basic).
-- `content_hash` (TEXT, NOT NULL): Hash of rendered content/settings for idempotent updates.
-- `last_seen_notion_edit_time` (TEXT, nullable): Bookkeeping from Notion.
-- `last_synced_at` (TEXT, nullable): Bookkeeping timestamp.
-- `excluded` (INTEGER, NOT NULL, default `0`): Whether the block is excluded from sync.
-
-Constraints / indexes:
-
-- Foreign key `cards.notion_page_id -> pages.notion_page_id` with `ON DELETE CASCADE`.
-- Index `idx_cards_page` on `cards(notion_page_id)`.
+- `notion_block_id` (TEXT, PK)
+- `notion_page_id` (TEXT, FK → pages)
+- `anki_note_id` (INTEGER, UNIQUE, nullable)
+- `card_type` (TEXT, NOT NULL)
+- `content_hash` (TEXT, NOT NULL)
+- `last_seen_notion_edit_time` (TEXT, nullable)
+- `last_synced_at` (TEXT, nullable)
+- `excluded` (INTEGER, NOT NULL)
 
 ### `settings`
-Stores non-secret settings values (see `docs/documentation/settings.md`).
 
-Columns:
+- `key` (TEXT, PK)
+- `value` (TEXT, NOT NULL)
+- `updated_at` (TEXT, NOT NULL)
 
-- `key` (TEXT, PK): Setting key (e.g., `notion_to_anki_auto_sync`).
-- `value` (TEXT, NOT NULL): Serialized value (booleans stored as `"1"`/`"0"`).
-- `updated_at` (TEXT, NOT NULL): Defaults to `datetime('now')`.
+## Helpers
 
-## API surface (`Database`)
-
-`Database` is intentionally small:
-
-- `connect()` opens a SQLite connection with:
-  - `PRAGMA foreign_keys = ON`
-  - `row_factory = sqlite3.Row` (dict-like row access)
-- `initialize()` applies migrations.
-- `get_setting(key)` / `set_setting(key, value)` are convenience helpers for the `settings` table.
-
-### Connection lifecycle note (Windows)
-`Database.initialize()`, `Database.get_setting(...)`, and `Database.set_setting(...)` explicitly close their connections to avoid keeping SQLite files locked on Windows (this matters for unit tests that create temporary DB files).
-
-For higher-level settings access (defaults, type coercion, keyring integration), use `SettingsStore` from `src/anki_notion_integration/settings.py`.
-
+- `Database.get_setting()` / `set_setting()` for low-level key/value access.
+- `PagesStore` for page rows and selection/override persistence.
+- `SettingsStore` for typed settings and keyring-backed secrets.

@@ -76,6 +76,13 @@ MIGRATIONS: tuple[Migration, ...] = (
             "ALTER TABLE pages ADD COLUMN parent_type TEXT",
         ),
     ),
+    # Store optional per-page card type override; NULL means use global default.
+    Migration(
+        version=5,
+        statements=(
+            "ALTER TABLE pages ADD COLUMN default_card_type TEXT",
+        ),
+    ),
 )
 
 

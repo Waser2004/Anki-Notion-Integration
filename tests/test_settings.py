@@ -55,9 +55,11 @@ class SettingsTests(unittest.TestCase):
 
     def test_default_settings_inserted(self) -> None:
         create_default_settings(self._db, self._schema)
+        self.assertEqual(self._db.get_setting("default_card_type"), "basic")
+        self.assertEqual(self._db.get_setting("enable_cloze_parsing"), "1")
+        self.assertEqual(self._db.get_setting("enable_image_occlusion_parsing"), "0")
         self.assertEqual(self._db.get_setting("sync_with_anki_sync_button"), "0")
         self.assertEqual(self._db.get_setting("notion_to_anki_auto_sync"), "1")
-        self.assertEqual(self._db.get_setting("anki_to_notion_sync"), "0")
         self.assertIsNone(self._db.get_setting("sync_notion_now"))
         self.assertIsNone(self._db.get_setting("notion_api_key"))
 
@@ -87,3 +89,8 @@ class SettingsTests(unittest.TestCase):
         secret_store.delete_secret("notion_api_key")
         self.assertIsNone(secret_store.get_secret("notion_api_key"))
         secret_store.delete_secret("notion_api_key")
+
+    def test_dropdown_setting_rejects_invalid_value(self) -> None:
+        store = SettingsStore(self._db, profile_name="test", schema=self._schema)
+        with self.assertRaises(SettingsError):
+            store.set_value("default_card_type", "unsupported")

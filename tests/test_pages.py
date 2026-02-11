@@ -13,6 +13,7 @@ from anki_notion_integration.db import Database
 from anki_notion_integration.notion_client import NotionPage, PageNode
 from anki_notion_integration.pages import (
     PagesStore,
+    apply_default_card_type_rule,
     apply_selection_rule,
     build_children_map,
     build_children_map_from_pages,
@@ -90,6 +91,69 @@ class SelectionRuleTests(unittest.TestCase):
         self.assertEqual(selected, {"child", "grandchild"})
 
 
+class DefaultCardTypeRuleTests(unittest.TestCase):
+    """Validate descendant cascade behavior for page default card types."""
+
+    def setUp(self) -> None:
+        grandchild = _node("grandchild", "Grandchild")
+        child = _node("child", "Child", children=(grandchild,))
+        self._roots = [_node("parent", "Parent", children=(child,))]
+        self._children_map = build_children_map(self._roots)
+        self._card_types = {
+            "parent": None,
+            "child": "basic_reversed",
+            "grandchild": "input",
+        }
+
+    def test_setting_parent_card_type_only_updates_parent_when_child_has_override(self) -> None:
+        updated = apply_default_card_type_rule(
+            "parent",
+            "basic",
+            page_default_card_types=self._card_types,
+            children_map=self._children_map,
+        )
+        self.assertEqual(updated["parent"], "basic")
+        self.assertEqual(updated["child"], "basic_reversed")
+        self.assertEqual(updated["grandchild"], "input")
+
+    def test_setting_parent_card_type_updates_descendants_when_all_inherit_default(self) -> None:
+        updated = apply_default_card_type_rule(
+            "parent",
+            "basic",
+            page_default_card_types={
+                "parent": None,
+                "child": None,
+                "grandchild": None,
+            },
+            children_map=self._children_map,
+        )
+        self.assertEqual(updated["parent"], "basic")
+        self.assertEqual(updated["child"], "basic")
+        self.assertEqual(updated["grandchild"], "basic")
+
+    def test_clearing_parent_card_type_only_updates_parent_when_child_has_override(self) -> None:
+        updated = apply_default_card_type_rule(
+            "parent",
+            None,
+            page_default_card_types=self._card_types,
+            children_map=self._children_map,
+        )
+        self.assertIsNone(updated["parent"])
+        self.assertEqual(updated["child"], "basic_reversed")
+        self.assertEqual(updated["grandchild"], "input")
+
+    def test_setting_child_card_type_only_updates_child_subtree(self) -> None:
+        updated = apply_default_card_type_rule(
+            "child",
+            "input",
+            page_default_card_types=self._card_types,
+            children_map=self._children_map,
+        )
+        self.assertIsNone(updated["parent"])
+        self.assertEqual(updated["child"], "input")
+        self.assertEqual(updated["grandchild"], "input")
+
+
 class DeckNameTests(unittest.TestCase):
     """Validate deterministic deck naming from the page tree."""
 
@@ -165,6 +229,7 @@ class PagesStoreTests(unittest.TestCase):
         self.assertIsNone(pages["page-a"].anki_deck_id)
         self.assertIsNone(pages["page-a"].parent_id)
         self.assertIsNone(pages["page-a"].parent_type)
+        self.assertIsNone(pages["page-a"].default_card_type)
 
     def test_get_pages_reads_stored_deck_id(self) -> None:
         connection = self._db.connect()
@@ -191,6 +256,7 @@ class PagesStoreTests(unittest.TestCase):
         self.assertEqual(pages["page-a"].anki_deck_id, 42)
         self.assertEqual(pages["page-a"].parent_id, "parent")
         self.assertEqual(pages["page-a"].parent_type, "page_id")
+        self.assertIsNone(pages["page-a"].default_card_type)
 
     def test_upsert_page_selection_persists_parent_metadata_from_pages(self) -> None:
         parent = _page("parent", "Parent")
@@ -219,3 +285,36 @@ class PagesStoreTests(unittest.TestCase):
         pages = self._store.get_pages()
         self.assertNotIn("page-a", pages)
         self.assertIn("page-b", pages)
+
+    def test_set_page_default_card_type_round_trips_and_survives_upsert(self) -> None:
+        self._store.upsert_page_selection({"page-a": "Notion::A"}, {"page-a"})
+        self._store.set_page_default_card_type("page-a", "input")
+        pages = self._store.get_pages()
+        self.assertEqual(pages["page-a"].default_card_type, "input")
+
+        # Regular upserts should not reset explicit page overrides.
+        self._store.upsert_page_selection({"page-a": "Notion::A"}, {"page-a"})
+        pages = self._store.get_pages()
+        self.assertEqual(pages["page-a"].default_card_type, "input")
+
+    def test_set_page_default_card_type_accepts_null(self) -> None:
+        self._store.upsert_page_selection({"page-a": "Notion::A"}, {"page-a"})
+        self._store.set_page_default_card_type("page-a", None)
+        pages = self._store.get_pages()
+        self.assertIsNone(pages["page-a"].default_card_type)
+
+    def test_set_page_default_card_types_updates_multiple_rows(self) -> None:
+        self._store.upsert_page_selection(
+            {
+                "page-a": "Notion::A",
+                "page-b": "Notion::A::B",
+                "page-c": "Notion::A::C",
+            },
+            {"page-a", "page-b", "page-c"},
+        )
+
+        self._store.set_page_default_card_types({"page-a", "page-c"}, "input")
+        pages = self._store.get_pages()
+        self.assertEqual(pages["page-a"].default_card_type, "input")
+        self.assertIsNone(pages["page-b"].default_card_type)
+        self.assertEqual(pages["page-c"].default_card_type, "input")

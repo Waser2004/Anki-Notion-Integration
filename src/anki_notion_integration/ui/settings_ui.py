@@ -28,6 +28,7 @@ from aqt.qt import (
     QWidget,
 )
 
+from anki_notion_integration.card_types import DEFAULT_SELECTABLE_CARD_TYPES, card_type_label
 from anki_notion_integration.db import Database
 from anki_notion_integration.settings import (
     SettingDefinition,
@@ -152,7 +153,10 @@ class SettingsPage(QWidget):
         if setting.type == "dropdown":
             widget = QComboBox(self)
             widget.setToolTip(setting.description)
-            if setting.options:
+            if setting.key == "default_card_type":
+                for card_type in DEFAULT_SELECTABLE_CARD_TYPES:
+                    widget.addItem(card_type_label(card_type, abbreviation=False), card_type)
+            elif setting.options:
                 widget.addItems(list(setting.options))
 
             return widget
@@ -213,7 +217,13 @@ class SettingsPage(QWidget):
                 elif isinstance(widget, QComboBox):
                     # If the stored value is invalid/missing, fall back to the default option.
                     text = str(value) if value is not None else str(setting.default or "")
-                    index = widget.findText(text)
+                    index = -1
+                    for option_index in range(widget.count()):
+                        if widget.itemData(option_index) is not None:
+                            index = widget.findData(text)
+                            break
+                    if index < 0:
+                        index = widget.findText(text)
                     widget.setCurrentIndex(index if index >= 0 else 0)
                 elif isinstance(widget, QLineEdit):
                     widget.setText("" if value is None else str(value))
@@ -234,7 +244,8 @@ class SettingsPage(QWidget):
         if isinstance(widget, QCheckBox):
             new_value: Any = bool(widget.isChecked())
         elif isinstance(widget, QComboBox):
-            new_value = widget.currentText()
+            selected_data = widget.currentData()
+            new_value = selected_data if selected_data is not None else widget.currentText()
         elif isinstance(widget, QLineEdit):
             new_value = widget.text()
         else:

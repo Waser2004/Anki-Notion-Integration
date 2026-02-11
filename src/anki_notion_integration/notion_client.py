@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 from urllib import request, parse
 
 from .db import Database
@@ -200,6 +200,53 @@ class NotionClient:
         self._update_toggle_title(block_id, title)
         self._replace_block_children(block_id, body)
 
+    def build_child_page_order_map(
+        self,
+        pages_by_id: Mapping[str, NotionPage],
+    ) -> dict[str, tuple[str, ...]]:
+        """Return sibling order hints from parent-page block order for known children."""
+        children_by_parent: dict[str, list[str]] = {}
+        for page_id, page in pages_by_id.items():
+            parent_id = page.parent_id if page.parent_type == "page_id" else None
+            if not parent_id:
+                continue
+            if parent_id not in pages_by_id:
+                continue
+            children_by_parent.setdefault(parent_id, []).append(page_id)
+
+        ordered_children_by_parent: dict[str, tuple[str, ...]] = {}
+        for parent_page_id, current_child_ids in children_by_parent.items():
+            # Single-child parents do not need an extra API call.
+            if len(current_child_ids) <= 1:
+                continue
+
+            ordered_child_page_ids = self._list_direct_child_page_ids(parent_page_id)
+            if not ordered_child_page_ids:
+                continue
+
+            known_child_ids = set(current_child_ids)
+            ordered_known_child_ids = [
+                child_page_id
+                for child_page_id in ordered_child_page_ids
+                if child_page_id in known_child_ids
+            ]
+            if not ordered_known_child_ids:
+                continue
+
+            # Keep all known children; if Notion omits any from `child_page` blocks,
+            # preserve the current relative order by appending those items.
+            ordered_known_child_id_set = set(ordered_known_child_ids)
+            merged_order = list(ordered_known_child_ids)
+            for child_page_id in current_child_ids:
+                if child_page_id in ordered_known_child_id_set:
+                    continue
+                merged_order.append(child_page_id)
+
+            if merged_order != current_child_ids:
+                ordered_children_by_parent[parent_page_id] = tuple(merged_order)
+
+        return ordered_children_by_parent
+
     def _paginate_search(self, payload: dict[str, Any]) -> Iterable[dict[str, Any]]:
         """Yield search results across all pages."""
         next_cursor: str | None = None
@@ -221,6 +268,27 @@ class NotionClient:
             next_cursor = response.get("next_cursor")
             if not next_cursor:
                 return
+
+    def _list_direct_child_page_ids(self, page_id: str) -> tuple[str, ...]:
+        """Return direct child-page ids in their top-to-bottom block order."""
+        child_page_ids: list[str] = []
+        seen_child_page_ids: set[str] = set()
+
+        for block_payload in self._fetch_block_children(page_id):
+            if str(block_payload.get("type")) != "child_page":
+                continue
+
+            child_page_id = block_payload.get("id")
+            if not child_page_id:
+                continue
+
+            child_page_id = str(child_page_id)
+            if child_page_id in seen_child_page_ids:
+                continue
+            seen_child_page_ids.add(child_page_id)
+            child_page_ids.append(child_page_id)
+
+        return tuple(child_page_ids)
 
     def _normalize_page(self, payload: dict[str, Any]) -> NotionPage:
         """Extract normalized page metadata from a raw API payload."""

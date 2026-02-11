@@ -1,21 +1,118 @@
-"""Anki note type registration for Notion toggle cards."""
+"""Anki note type registration for Notion card types."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-MODEL_NAME = "Notion Toggle"
-MODEL_FIELDS = ("Front", "Back", "Notion Block ID")
-TEMPLATE_NAME = "Card 1"
-TEMPLATE_FRONT = '<div class="notion-front">{{Front}}</div>'
-TEMPLATE_BACK = '{{FrontSide}}<hr id="answer"><div class="notion-back">{{Back}}</div>'
-CSS_MANAGED_MARKER = "/* anki-notion-integration: notion-toggle-model */"
+MODEL_NAME = "Notion (Basic)"
+MODEL_NAME_BASIC = MODEL_NAME
+MODEL_NAME_BASIC_REVERSED = "Notion (Basic+Reversed)"
+MODEL_NAME_INPUT = "Notion (Input)"
+MODEL_NAME_CLOZE = "Notion (Cloze)"
+
+BASIC_CARD_NAME = "Notion (Basic)"
+REVERSED_CARD_NAME = "Notion (Reversed)"
+INPUT_CARD_NAME = "Notion (Input)"
+CLOZE_CARD_NAME = "Notion (Cloze)"
+
+CSS_MANAGED_MARKER = "/* Noteck card model css */"
 _PACKAGE_STYLESHEET_PATH = Path(__file__).resolve().parent / "docs" / "Notion_Card_Stylesheet.css"
 
 
+@dataclass(frozen=True)
+class ModelTemplate:
+    """One model template payload."""
+    name: str
+    front: str
+    back: str
+
+
+@dataclass(frozen=True)
+class ModelDefinition:
+    """One model definition used for idempotent model setup."""
+    name: str
+    fields: tuple[str, ...]
+    templates: tuple[ModelTemplate, ...]
+    model_type: int = 0
+
+
+_MODEL_DEFINITIONS: tuple[ModelDefinition, ...] = (
+    # Basic card type
+    ModelDefinition(
+        name=MODEL_NAME_BASIC,
+        fields=("Front", "Back", "Notion Block ID"),
+        templates=(
+            ModelTemplate(
+                name=BASIC_CARD_NAME,
+                front='<div class="notion-front">{{Front}}</div>',
+                back='{{FrontSide}}<hr id="answer"><div class="notion-back">{{Back}}</div>',
+            ),
+        ),
+        model_type=0,
+    ),
+
+    # Basic+Reversed card type
+    ModelDefinition(
+        name=MODEL_NAME_BASIC_REVERSED,
+        fields=("Front", "Back", "Notion Block ID"),
+        templates=(
+            ModelTemplate(
+                name=BASIC_CARD_NAME,
+                front='<div class="notion-front">{{Front}}</div>',
+                back='{{FrontSide}}<hr id="answer"><div class="notion-back">{{Back}}</div>',
+            ),
+            ModelTemplate(
+                name=REVERSED_CARD_NAME,
+                front='<div class="notion-front">{{Back}}</div>',
+                back='{{FrontSide}}<hr id="answer"><div class="notion-back">{{Front}}</div>',
+            ),
+        ),
+        model_type=0,
+    ),
+
+    # Input card type
+    ModelDefinition(
+        name=MODEL_NAME_INPUT,
+        fields=("Front", "Back", "Expected Answer", "Notion Block ID"),
+        templates=(
+            ModelTemplate(
+                name=INPUT_CARD_NAME,
+                front=(
+                    '<div class="notion-front">{{Front}}</div>'
+                    '<div class="notion-input">{{type:Expected Answer}}</div>'
+                ),
+                back=(
+                    '{{FrontSide}}<hr id="answer">'
+                    '<div class="notion-back">{{Back}}</div>'
+                ),
+            ),
+        ),
+        model_type=0,
+    ),
+
+    # Cloze card type
+    ModelDefinition(
+        name=MODEL_NAME_CLOZE,
+        fields=("Text", "Extra", "Notion Block ID"),
+        templates=(
+            ModelTemplate(
+                name=CLOZE_CARD_NAME,
+                front='<div class="notion-front">{{cloze:Text}}</div>',
+                back=(
+                    '<div class="notion-front">{{cloze:Text}}</div>'
+                    '<div class="notion-back" style="font-style: italic">{{Extra}}</div>'
+                ),
+            ),
+        ),
+        model_type=1,
+    ),
+)
+
+
 def ensure_notion_toggle_model(mw: Any) -> None:
-    """Ensure the dedicated Notion Toggle note type exists in the collection."""
+    """Ensure all Notion note types exist in the collection."""
     collection = getattr(mw, "col", None)
     if collection is None:
         return
@@ -24,29 +121,56 @@ def ensure_notion_toggle_model(mw: Any) -> None:
     if models is None:
         return
 
-    model = _model_by_name(models, MODEL_NAME)
+    css = _build_managed_css(_load_model_css())
+    for definition in _MODEL_DEFINITIONS:
+        _ensure_model(models, definition, css)
+
+
+def _ensure_model(models: Any, definition: ModelDefinition, css: str) -> None:
+    """Create or update one model definition idempotently."""
+    model = _model_by_name(models, definition.name)
+
+    # create model if not found.
     created = model is None
     if created:
-        model = _new_model(models, MODEL_NAME)
+        model = _new_model(models, definition.name)
 
     changed = False
-    for field_name in MODEL_FIELDS:
+
+    # Ensure correct model type.
+    if int(model.get("type") or 0) != definition.model_type:
+        model["type"] = definition.model_type
+        changed = True
+
+    # Add any missing fields. (fields are never removed to avoid data loss)
+    for field_name in definition.fields:
         if not _has_field(model, field_name):
             _add_field(models, model, field_name)
             changed = True
 
-    template = _template_by_name(model, TEMPLATE_NAME)
-    if template is None:
-        _add_template(models, model, TEMPLATE_NAME, TEMPLATE_FRONT, TEMPLATE_BACK)
-        changed = True
+    # Update existing templates if front or back format has changed.
+    for template in definition.templates:
+        existing_template = _template_by_name(model, template.name)
+        if existing_template is None:
+            _add_template(models, model, template.name, template.front, template.back)
+            changed = True
+            continue
+        
+        if str(existing_template.get("qfmt") or "") != template.front:
+            existing_template["qfmt"] = template.front
+            changed = True
+        if str(existing_template.get("afmt") or "") != template.back:
+            existing_template["afmt"] = template.back
+            changed = True
 
-    css = _build_managed_css(_load_model_css())
+    # update existing css if it has changed.
     current_css = str(model.get("css") or "")
     if created or not current_css.strip() or _is_managed_css(current_css):
         if current_css != css:
             model["css"] = css
             changed = True
 
+    # apply changes if needed
     if created:
         _add_model(models, model)
         return

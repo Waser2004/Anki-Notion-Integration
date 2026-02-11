@@ -9,7 +9,13 @@ import unittest
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from anki_notion_integration.notion_client import NotionBlock
-from anki_notion_integration.parser import parse_page_to_cards, render_blocks, render_rich_text
+from anki_notion_integration.parser import (
+    collect_image_occlusion_candidates,
+    normalize_typed_answer,
+    parse_page_to_cards,
+    render_blocks,
+    render_rich_text,
+)
 
 
 def _block(
@@ -86,6 +92,7 @@ class ParserTests(unittest.TestCase):
 
         self.assertEqual(len(payloads), 1)
         self.assertEqual(payloads[0].notion_block_id, "root-toggle")
+        self.assertEqual(payloads[0].front_html, "<p>Root toggle</p>")
         self.assertIn("<summary>Nested toggle</summary>", payloads[0].back_html)
         self.assertNotIn("nested-toggle", [payload.notion_block_id for payload in payloads])
         self.assertTrue(payloads[0].content_hash)
@@ -428,6 +435,473 @@ class ParserTests(unittest.TestCase):
         rendered = render_blocks([column_block])
 
         self.assertEqual(rendered, '<div class="notion-column"><p>Direct</p></div>')
+
+    def test_parse_page_to_cards_supports_basic_reversed_default_type(self) -> None:
+        root_toggle = _block(
+            "root-toggle",
+            "toggle",
+            {"rich_text": [_text_item("Root toggle")]},
+            children=(_block("p1", "paragraph", {"rich_text": [_text_item("Parent body")]}),),
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [root_toggle],
+            default_card_type="basic_reversed",
+            enable_cloze=False,
+        )
+
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0].card_type, "basic_reversed")
+        self.assertIn("Front", payloads[0].fields)
+        self.assertIn("Back", payloads[0].fields)
+
+    def test_parse_page_to_cards_supports_input_default_type(self) -> None:
+        root_toggle = _block(
+            "root-toggle",
+            "toggle",
+            {"rich_text": [_text_item("Question")]},
+            children=(_block("p1", "paragraph", {"rich_text": [_text_item("Answer: Blue!")]}),),
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [root_toggle],
+            default_card_type="input",
+            enable_cloze=False,
+        )
+
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0].card_type, "input")
+        self.assertEqual(payloads[0].fields["Expected Answer"], "Answer: Blue!")
+
+    def test_parse_page_to_cards_input_expected_answer_preserves_equations(self) -> None:
+        root_toggle = _block(
+            "root-toggle",
+            "toggle",
+            {"rich_text": [_text_item("Question")]},
+            children=(
+                _block(
+                    "p1",
+                    "paragraph",
+                    {
+                        "rich_text": [
+                            _text_item("Integral: "),
+                            {
+                                "type": "equation",
+                                "equation": {"expression": r"\int_0^1 x^2 dx"},
+                                "annotations": {
+                                    "bold": False,
+                                    "italic": False,
+                                    "strikethrough": False,
+                                    "underline": False,
+                                    "code": False,
+                                    "color": "default",
+                                },
+                            },
+                        ]
+                    },
+                ),
+                _block("eq1", "equation", {"expression": r"\frac{1}{3}"}),
+            ),
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [root_toggle],
+            default_card_type="input",
+            enable_cloze=False,
+        )
+
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(
+            payloads[0].fields["Expected Answer"],
+            r"Integral: \int_0^1 x^2 dx" + "\n" + r"\frac{1}{3}",
+        )
+
+    def test_parse_page_to_cards_extracts_top_level_cloze_paragraphs(self) -> None:
+        cloze_paragraph = _block(
+            "paragraph-cloze",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item("Capital of France is "),
+                    _text_item(
+                        "Paris",
+                        annotations={
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "yellow_background",
+                        },
+                    ),
+                ]
+            },
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [cloze_paragraph],
+            default_card_type="basic",
+            enable_cloze=True,
+        )
+
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0].card_type, "cloze")
+        self.assertIn("{{c1::Paris}}", payloads[0].fields["Text"])
+        self.assertEqual(payloads[0].fields["Extra"], "")
+
+    def test_parse_page_to_cards_cloze_extra_from_immediate_next_extra_paragraph(self) -> None:
+        cloze_paragraph = _block(
+            "paragraph-cloze",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item("Capital of France is "),
+                    _text_item(
+                        "Paris",
+                        annotations={
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "yellow_background",
+                        },
+                    ),
+                ]
+            },
+        )
+        extra_paragraph = _block(
+            "paragraph-extra",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item("Extra: Located in Europe."),
+                ]
+            },
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [cloze_paragraph, extra_paragraph],
+            default_card_type="basic",
+            enable_cloze=True,
+        )
+
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0].fields["Extra"], "Located in Europe.")
+
+    def test_parse_page_to_cards_cloze_extra_is_case_insensitive_prefix(self) -> None:
+        cloze_paragraph = _block(
+            "paragraph-cloze",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item("Capital of France is "),
+                    _text_item(
+                        "Paris",
+                        annotations={
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "yellow_background",
+                        },
+                    ),
+                ]
+            },
+        )
+        extra_paragraph = _block(
+            "paragraph-extra",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item("eXtRa: City of Light"),
+                ]
+            },
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [cloze_paragraph, extra_paragraph],
+            default_card_type="basic",
+            enable_cloze=True,
+        )
+
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0].fields["Extra"], "City of Light")
+
+    def test_parse_page_to_cards_cloze_extra_requires_immediate_next_block(self) -> None:
+        cloze_paragraph = _block(
+            "paragraph-cloze",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item("Capital of France is "),
+                    _text_item(
+                        "Paris",
+                        annotations={
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "yellow_background",
+                        },
+                    ),
+                ]
+            },
+        )
+        blocker = _block("divider-1", "divider", {})
+        extra_paragraph = _block(
+            "paragraph-extra",
+            "paragraph",
+            {"rich_text": [_text_item("Extra: This should not attach")]},
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [cloze_paragraph, blocker, extra_paragraph],
+            default_card_type="basic",
+            enable_cloze=True,
+        )
+
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0].fields["Extra"], "")
+
+    def test_parse_page_to_cards_consumes_extra_paragraph_even_if_highlighted(self) -> None:
+        cloze_paragraph = _block(
+            "paragraph-cloze",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item("Capital of France is "),
+                    _text_item(
+                        "Paris",
+                        annotations={
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "yellow_background",
+                        },
+                    ),
+                ]
+            },
+        )
+        highlighted_extra_paragraph = _block(
+            "paragraph-extra",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item("Extra: "),
+                    _text_item(
+                        "Also highlighted",
+                        annotations={
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "yellow_background",
+                        },
+                    ),
+                ]
+            },
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [cloze_paragraph, highlighted_extra_paragraph],
+            default_card_type="basic",
+            enable_cloze=True,
+        )
+
+        self.assertEqual(len(payloads), 1)
+        self.assertIn("Also highlighted", payloads[0].fields["Extra"])
+        self.assertIn('class="highlight-yellow_background"', payloads[0].fields["Extra"])
+
+    def test_parse_page_to_cards_non_extra_paragraph_still_regular_cloze(self) -> None:
+        cloze_paragraph = _block(
+            "paragraph-cloze",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item("2 + 2 = "),
+                    _text_item(
+                        "4",
+                        annotations={
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "yellow_background",
+                        },
+                    ),
+                ]
+            },
+        )
+        plain_follow_up = _block(
+            "paragraph-follow-up",
+            "paragraph",
+            {"rich_text": [_text_item("No extra prefix here")]},
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [cloze_paragraph, plain_follow_up],
+            default_card_type="basic",
+            enable_cloze=True,
+        )
+
+        self.assertEqual(len(payloads), 1)
+        self.assertIn("{{c1::4}}", payloads[0].fields["Text"])
+        self.assertEqual(payloads[0].fields["Extra"], "")
+
+    def test_parse_page_to_cards_cloze_extra_prefix_removed_but_formatting_preserved(self) -> None:
+        cloze_paragraph = _block(
+            "paragraph-cloze",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item("H2O is "),
+                    _text_item(
+                        "water",
+                        annotations={
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "yellow_background",
+                        },
+                    ),
+                ]
+            },
+        )
+        extra_paragraph = _block(
+            "paragraph-extra",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item("Extra: "),
+                    _text_item(
+                        "Click me",
+                        href="https://example.com",
+                        annotations={
+                            "bold": True,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "default",
+                        },
+                    ),
+                ]
+            },
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [cloze_paragraph, extra_paragraph],
+            default_card_type="basic",
+            enable_cloze=True,
+        )
+
+        self.assertEqual(len(payloads), 1)
+        self.assertNotIn("Extra:", payloads[0].fields["Extra"])
+        self.assertIn('<a href="https://example.com">', payloads[0].fields["Extra"])
+        self.assertIn("<strong>Click me</strong>", payloads[0].fields["Extra"])
+
+    def test_parse_page_to_cards_ignores_nested_cloze_paragraphs_inside_toggle(self) -> None:
+        nested_cloze = _block(
+            "nested-cloze",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item(
+                        "Hidden",
+                        annotations={
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "yellow_background",
+                        },
+                    ),
+                ]
+            },
+        )
+        root_toggle = _block(
+            "root-toggle",
+            "toggle",
+            {"rich_text": [_text_item("Toggle")]},
+            children=(nested_cloze,),
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [root_toggle],
+            default_card_type="basic",
+            enable_cloze=True,
+        )
+
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0].card_type, "basic")
+
+    def test_parse_page_to_cards_ignores_unmarked_paragraphs_for_cloze(self) -> None:
+        paragraph = _block("paragraph-1", "paragraph", {"rich_text": [_text_item("No marker")]})
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [paragraph],
+            default_card_type="basic",
+            enable_cloze=True,
+        )
+
+        self.assertEqual(payloads, [])
+
+    def test_collect_image_occlusion_candidates_ignores_images_inside_toggles(self) -> None:
+        outside = _block(
+            "img-outside",
+            "image",
+            {
+                "type": "external",
+                "external": {"url": "https://example.com/outside.png"},
+                "caption": [_text_item("Outside")],
+            },
+        )
+        inside = _block(
+            "img-inside",
+            "image",
+            {
+                "type": "external",
+                "external": {"url": "https://example.com/inside.png"},
+                "caption": [_text_item("Inside")],
+            },
+        )
+        toggle = _block(
+            "toggle",
+            "toggle",
+            {"rich_text": [_text_item("Toggle")]},
+            children=(inside,),
+        )
+
+        candidates = collect_image_occlusion_candidates([outside, toggle])
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].notion_block_id, "img-outside")
+
+    def test_normalize_typed_answer_strips_html_punctuation_and_case(self) -> None:
+        normalized = normalize_typed_answer("<p>Hello,  WORLD!!</p>")
+        self.assertEqual(normalized, "hello world")
 
 
 if __name__ == "__main__":

@@ -39,6 +39,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("last_seen_notion_edit_time", page_columns)
             self.assertIn("parent_id", page_columns)
             self.assertIn("parent_type", page_columns)
+            self.assertIn("default_card_type", page_columns)
         finally:
             connection.close()
 
@@ -78,10 +79,11 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("last_seen_notion_edit_time", page_columns)
             self.assertIn("parent_id", page_columns)
             self.assertIn("parent_type", page_columns)
+            self.assertIn("default_card_type", page_columns)
 
             latest_version = connection.execute(
                 "SELECT MAX(version) FROM schema_migrations"
             ).fetchone()[0]
-            self.assertEqual(latest_version, 4)
+            self.assertEqual(latest_version, 5)
         finally:
             connection.close()
