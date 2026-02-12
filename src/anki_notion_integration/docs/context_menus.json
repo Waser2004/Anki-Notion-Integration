@@ -1,0 +1,62 @@
+{
+  "pages": {
+    "on_item": [
+      {
+        "type": "action",
+        "key": "toggle_page",
+        "label": "Select Page",
+        "target": "page"
+      },
+      {
+        "type": "action",
+        "key": "toggle_page_and_children",
+        "label": "Select Page and All Children",
+        "target": "page_and_children"
+      },
+      {
+        "type": "card_type_select",
+        "key": "set_page_default_type",
+        "label": "Set Default Card Type for Page",
+        "target": "page"
+      },
+      {
+        "type": "card_type_select",
+        "key": "set_page_and_children_default_type",
+        "label": "Set Default Card Type for Page and All Children",
+        "target": "page_and_children"
+      }
+    ],
+    "on_background": [
+      {
+        "type": "action",
+        "key": "unselect_all_pages",
+        "label": "Unselect All Pages",
+        "target": "all_pages"
+      },
+      {
+        "type": "action",
+        "key": "reset_all_page_default_types",
+        "label": "Reset Card Type to Default for All Pages",
+        "target": "all_pages"
+      }
+    ]
+  },
+  "cards": {
+    "on_item": [
+      {
+        "type": "action",
+        "key": "toggle_card_excluded",
+        "label": "Exclude Card",
+        "target": "card"
+      }
+    ],
+    "on_background": [
+      {
+        "type": "action",
+        "key": "reset_all_toggle_overrides",
+        "label": "Reset Card Type to Default for All Toggles",
+        "target": "all_toggles"
+      }
+    ]
+  }
+}

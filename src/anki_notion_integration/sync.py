@@ -15,6 +15,7 @@ from urllib import request
 from urllib.parse import urlsplit
 
 from .card_types import BASIC, CLOZE, DEFAULT_SELECTABLE_CARD_TYPES, normalize_card_type, normalize_default_selectable_card_type
+from .card_type_overrides import CardTypeOverrideStore
 from .cards import MODEL_NAME_BASIC, ensure_notion_toggle_model
 from .db import Database
 from .notion_client import NotionBlock, NotionClient
@@ -97,6 +98,7 @@ def sync_notion_to_anki(
         return SyncResult(ok=False, message=f"Sync failed: {exc}", errors=(str(exc),))
 
     store = SettingsStore(db, profile_name=profile_name)
+    card_type_override_store = CardTypeOverrideStore(db)
     global_default_card_type = normalize_default_selectable_card_type(store.get_value("default_card_type"))
     enable_cloze = bool(store.get_value("enable_cloze_parsing"))
 
@@ -129,6 +131,7 @@ def sync_notion_to_anki(
                 page.default_card_type,
                 global_default=global_default_card_type,
             )
+            page_card_type_overrides = card_type_override_store.get_card_type_overrides_for_page(page_id)
             # Check if the page has changed since last sync
             deck_id, resolved_deck_name = _resolve_page_deck(
                 collection=collection,
@@ -165,6 +168,7 @@ def sync_notion_to_anki(
                     client=client,
                     stats=stats,
                     default_card_type=page_default_card_type,
+                    card_type_overrides=page_card_type_overrides,
                     enable_cloze=enable_cloze,
                     should_cancel=should_cancel,
                 )
@@ -179,6 +183,7 @@ def sync_notion_to_anki(
                     client=client,
                     stats=stats,
                     default_card_type=page_default_card_type,
+                    card_type_overrides=page_card_type_overrides,
                     enable_cloze=enable_cloze,
                     should_cancel=should_cancel,
                 )
@@ -419,6 +424,7 @@ def _sync_changed_page_fast(
     client: NotionClient,
     stats: SyncStats,
     default_card_type: str,
+    card_type_overrides: dict[str, str],
     enable_cloze: bool,
     should_cancel: SyncCancelCheck | None = None,
 ) -> tuple[SyncStats, list[str], bool]:
@@ -440,9 +446,15 @@ def _sync_changed_page_fast(
 
         mapping = existing_cards.get(toggle.block_id)
         if mapping is not None and mapping["excluded"]:
+            # Excluded cards must be skipped before expansion/parsing.
             stats = _replace_stats(stats, cards_skipped=stats.cards_skipped + 1)
             continue
 
+        effective_card_type = _effective_card_type_for_block(
+            toggle.block_id,
+            default_card_type=default_card_type,
+            card_type_overrides=card_type_overrides,
+        )
         toggle_last_edited_time = _as_optional_string(toggle.raw.get("last_edited_time"))
         can_skip = False
         if mapping is not None:
@@ -451,7 +463,7 @@ def _sync_changed_page_fast(
                 note_id is not None
                 and mapping["last_seen_notion_edit_time"]
                 and mapping["last_seen_notion_edit_time"] == toggle_last_edited_time
-                and mapping["card_type"] == default_card_type
+                and mapping["card_type"] == effective_card_type
             ):
                 # Only skip when the local note still exists. If it is missing, we must
                 # re-fetch content from Notion to recreate it.
@@ -470,6 +482,7 @@ def _sync_changed_page_fast(
                 page_id,
                 [expanded_toggle],
                 default_card_type=default_card_type,
+                card_type_overrides=card_type_overrides,
                 enable_cloze=False,
             )
         )
@@ -493,16 +506,31 @@ def _sync_changed_page_fast(
 
     # sync colze cards
     if enable_cloze:
-        cloze_payloads = [
-            payload
-            for payload in parse_page_to_cards(
-                page_id,
-                blocks,
-                default_card_type=default_card_type,
-                enable_cloze=True,
-            )
-            if payload.card_type == CLOZE
-        ]
+        # Cloze payloads come from top-level paragraphs; exclude toggle parsing here.
+        cloze_candidate_block_ids: set[str] = set()
+        for block in blocks:
+            if block.block_type != "paragraph":
+                continue
+            mapping = existing_cards.get(block.block_id)
+            if mapping is not None and mapping["excluded"]:
+                # Keep excluded cloze cards out of parsing entirely.
+                stats = _replace_stats(stats, cards_skipped=stats.cards_skipped + 1)
+                continue
+            cloze_candidate_block_ids.add(block.block_id)
+        cloze_payloads: list[ToggleCardPayload] = []
+        if cloze_candidate_block_ids:
+            cloze_payloads = [
+                payload
+                for payload in parse_page_to_cards(
+                    page_id,
+                    blocks,
+                    default_card_type=default_card_type,
+                    card_type_overrides=card_type_overrides,
+                    enable_cloze=True,
+                    include_block_ids=cloze_candidate_block_ids,
+                )
+                if payload.card_type == CLOZE
+            ]
         if cloze_payloads:
             for payload in cloze_payloads:
                 if _is_sync_cancelled(should_cancel):
@@ -532,6 +560,7 @@ def _repair_missing_notes_for_unchanged_page(
     client: NotionClient,
     stats: SyncStats,
     default_card_type: str,
+    card_type_overrides: dict[str, str],
     enable_cloze: bool,
     should_cancel: SyncCancelCheck | None = None,
 ) -> tuple[SyncStats, list[str], bool]:
@@ -553,7 +582,12 @@ def _repair_missing_notes_for_unchanged_page(
             continue
 
         # Re-sync toggle notes when page default type changed without a Notion page edit.
-        if _card_type_needs_default_conversion(mapping["card_type"], default_card_type):
+        effective_card_type = _effective_card_type_for_block(
+            block_id,
+            default_card_type=default_card_type,
+            card_type_overrides=card_type_overrides,
+        )
+        if _card_type_needs_default_conversion(mapping["card_type"], effective_card_type):
             blocks_needing_resync.append(block_id)
 
     if not blocks_needing_resync:
@@ -567,7 +601,9 @@ def _repair_missing_notes_for_unchanged_page(
         page_id,
         blocks,
         default_card_type=default_card_type,
+        card_type_overrides=card_type_overrides,
         enable_cloze=enable_cloze,
+        include_block_ids=blocks_needing_resync,
     )
     payloads_by_block_id = {payload.notion_block_id: payload for payload in payloads}
 
@@ -602,6 +638,18 @@ def _card_type_needs_default_conversion(current_card_type: str, default_card_typ
     if normalized_current not in DEFAULT_SELECTABLE_CARD_TYPES:
         return False
     return normalized_current != normalized_default
+
+
+def _effective_card_type_for_block(
+    block_id: str,
+    *,
+    default_card_type: str,
+    card_type_overrides: dict[str, str],
+) -> str:
+    """Resolve the effective selectable card type for one block id."""
+    if block_id in card_type_overrides:
+        return normalize_default_selectable_card_type(card_type_overrides[block_id])
+    return normalize_default_selectable_card_type(default_card_type)
 
 
 def _sync_one_payload(

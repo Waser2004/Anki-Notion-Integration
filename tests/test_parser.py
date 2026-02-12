@@ -97,6 +97,78 @@ class ParserTests(unittest.TestCase):
         self.assertNotIn("nested-toggle", [payload.notion_block_id for payload in payloads])
         self.assertTrue(payloads[0].content_hash)
 
+    def test_parse_page_to_cards_include_block_ids_filters_toggle_payloads(self) -> None:
+        first_toggle = _block(
+            "toggle-1",
+            "toggle",
+            {"rich_text": [_text_item("First")]},
+            children=(_block("p1", "paragraph", {"rich_text": [_text_item("One")]}),),
+        )
+        second_toggle = _block(
+            "toggle-2",
+            "toggle",
+            {"rich_text": [_text_item("Second")]},
+            children=(_block("p2", "paragraph", {"rich_text": [_text_item("Two")]}),),
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [first_toggle, second_toggle],
+            include_block_ids={"toggle-2"},
+        )
+
+        self.assertEqual([payload.notion_block_id for payload in payloads], ["toggle-2"])
+
+    def test_parse_page_to_cards_include_block_ids_filters_cloze_payloads(self) -> None:
+        cloze_a = _block(
+            "cloze-a",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item(
+                        "Alpha",
+                        annotations={
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "yellow_background",
+                        },
+                    )
+                ]
+            },
+        )
+        cloze_b = _block(
+            "cloze-b",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item(
+                        "Beta",
+                        annotations={
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "yellow_background",
+                        },
+                    )
+                ]
+            },
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [cloze_a, cloze_b],
+            enable_cloze=True,
+            include_block_ids={"cloze-b"},
+        )
+
+        self.assertEqual([payload.notion_block_id for payload in payloads], ["cloze-b"])
+        self.assertEqual(payloads[0].card_type, "cloze")
+
     def test_render_rich_text_supports_annotations_links_and_equations(self) -> None:
         rendered = render_rich_text(
             [

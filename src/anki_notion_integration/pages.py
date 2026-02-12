@@ -351,6 +351,68 @@ class PagesStore:
         finally:
             connection.close()
 
+    def set_page_sync_enabled(self, page_id: str, enabled: bool) -> None:
+        """Persist sync-enabled state for one page id."""
+        self.set_pages_sync_enabled({page_id}, enabled=enabled)
+
+    def set_pages_sync_enabled(self, page_ids: set[str], *, enabled: bool) -> None:
+        """Persist sync-enabled state for multiple page ids."""
+        if not page_ids:
+            return
+
+        placeholders = ", ".join("?" for _ in page_ids)
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                f"""
+                UPDATE pages
+                SET sync_enabled = ?
+                WHERE notion_page_id IN ({placeholders})
+                """,
+                (1 if enabled else 0, *tuple(page_ids)),
+            )
+            connection.commit()
+        except sqlite3.Error:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def set_all_pages_sync_enabled(self, enabled: bool) -> None:
+        """Persist one sync-enabled value for every page row."""
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                UPDATE pages
+                SET sync_enabled = ?
+                """,
+                (1 if enabled else 0,),
+            )
+            connection.commit()
+        except sqlite3.Error:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def reset_all_page_default_card_types(self) -> None:
+        """Reset all page default card types back to inherited global default."""
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                UPDATE pages
+                SET default_card_type = NULL
+                """
+            )
+            connection.commit()
+        except sqlite3.Error:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def delete_pages_not_in(self, page_ids: set[str]) -> None:
         """Delete page rows whose ids are not in `page_ids`."""
         connection = self._db.connect()

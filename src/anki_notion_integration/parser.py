@@ -8,7 +8,7 @@ import hashlib
 import html
 import math
 import re
-from typing import Any, Iterable
+from typing import Any, Collection, Iterable, Mapping
 from urllib.parse import urlsplit
 
 from .card_types import BASIC, BASIC_REVERSED, CLOZE, INPUT, normalize_default_selectable_card_type
@@ -255,37 +255,58 @@ def parse_page_to_cards(
     blocks: Iterable[NotionBlock],
     *,
     default_card_type: str = BASIC,
+    card_type_overrides: Mapping[str, str] | None = None,
     enable_cloze: bool = False,
+    include_block_ids: Collection[str] | None = None,
 ) -> list[ToggleCardPayload]:
     """Parse page blocks into typed card payloads."""
     resolved_default_card_type = normalize_default_selectable_card_type(default_card_type)
+    normalized_include_block_ids = {str(block_id) for block_id in include_block_ids} if include_block_ids else None
     top_level_blocks = list(blocks)
     payloads: list[ToggleCardPayload] = []
     for block in extract_root_toggle_blocks(top_level_blocks):
+        # Skip excluded/non-target blocks before rendering payload fields.
+        if normalized_include_block_ids is not None and block.block_id not in normalized_include_block_ids:
+            continue
+        
+        # apply card specific card type override.
+        normalized_overrides: dict[str, str] = {}
+        if card_type_overrides:
+            normalized_overrides = {
+                str(block_id): normalize_default_selectable_card_type(card_type)
+                for block_id, card_type in card_type_overrides.items()
+            }
+        resolved_card_type = normalized_overrides.get(block.block_id, resolved_default_card_type)
+
+        # parse front and bacvk html
         front_html = _render_toggle_front(block)
         back_html = render_blocks(block.children)
+
+        # create card fields and content hash for change detection
         fields = _build_toggle_fields(
             block_id=block.block_id,
             front_html=front_html,
             back_html=back_html,
             back_blocks=block.children,
-            card_type=resolved_default_card_type,
+            card_type=resolved_card_type,
         )
-        model_name = _model_name_for_card_type(resolved_default_card_type)
+        model_name = _model_name_for_card_type(resolved_card_type)
         content_hash = _compute_payload_content_hash(
             page_id=page_id,
             block_id=block.block_id,
-            card_type=resolved_default_card_type,
+            card_type=resolved_card_type,
             model_name=model_name,
             fields=fields,
         )
+
+        # add card to output list
         payloads.append(
             ToggleCardPayload(
                 notion_page_id=page_id,
                 notion_block_id=block.block_id,
                 front_html=front_html,
                 back_html=back_html,
-                card_type=resolved_default_card_type,
+                card_type=resolved_card_type,
                 model_name=model_name,
                 fields=fields,
                 content_hash=content_hash,
@@ -293,8 +314,15 @@ def parse_page_to_cards(
             )
         )
 
+    # parse cloze
     if enable_cloze:
-        payloads.extend(_parse_top_level_cloze_paragraphs(page_id, top_level_blocks))
+        payloads.extend(
+            _parse_top_level_cloze_paragraphs(
+                page_id,
+                top_level_blocks,
+                include_block_ids=normalized_include_block_ids,
+            )
+        )
 
     return payloads
 
@@ -769,6 +797,8 @@ def _model_name_for_card_type(card_type: str) -> str:
 def _parse_top_level_cloze_paragraphs(
     page_id: str,
     blocks: list[NotionBlock],
+    *,
+    include_block_ids: set[str] | None = None,
 ) -> list[ToggleCardPayload]:
     """Parse top-level paragraphs containing cloze markers into cloze payloads."""
     payloads: list[ToggleCardPayload] = []
@@ -778,6 +808,8 @@ def _parse_top_level_cloze_paragraphs(
         if index in consumed_indices:
             continue
         if block.block_type != "paragraph":
+            continue
+        if include_block_ids is not None and block.block_id not in include_block_ids:
             continue
         rich_text = _block_rich_text(block)
         if not _paragraph_has_cloze_marker(rich_text):

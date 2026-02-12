@@ -13,6 +13,7 @@ from aqt.qt import (
     QEvent,
     QGroupBox,
     QHeaderView,
+    QMenu,
     QIcon,
     QLabel,
     QPushButton,
@@ -43,6 +44,7 @@ from anki_notion_integration.pages import (
 )
 from anki_notion_integration.ui.ui import navigate_to_page
 from anki_notion_integration.ui.ui import UiContext
+from anki_notion_integration.ui.context_menu_schema import ContextMenuEntry, load_context_menu_schema
 
 
 class PagesPage(QWidget):
@@ -72,6 +74,7 @@ class PagesPage(QWidget):
         self._expanded_page_ids: set[str] = set()
         self._has_expansion_snapshot = False
         self._hovered_page_id: str | None = None
+        self._context_menu_schema = load_context_menu_schema().pages
 
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(11, 11, 11, 11)
@@ -87,13 +90,14 @@ class PagesPage(QWidget):
         groupbox_layout.addWidget(self._error_label)
 
         self._tree = QTreeWidget(self)
-        self._tree.setColumnCount(3)
+        self._tree.setColumnCount(4)
         self._tree.setHeaderHidden(True)
         header = self._tree.header()
         header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self._tree.setMouseTracking(True)
         self._tree.viewport().setMouseTracking(True)
         self._tree.setSelectionMode(self._selection_mode_no_selection())
@@ -112,6 +116,14 @@ class PagesPage(QWidget):
         """)
         self._tree.installEventFilter(self)
         self._tree.viewport().installEventFilter(self)
+        self._tree.setContextMenuPolicy(self._context_menu_policy_custom())
+        self._tree.viewport().setContextMenuPolicy(self._context_menu_policy_custom())
+        self._tree.customContextMenuRequested.connect(
+            lambda pos: self._show_tree_context_menu(pos, from_viewport=False)
+        )
+        self._tree.viewport().customContextMenuRequested.connect(
+            lambda pos: self._show_tree_context_menu(pos, from_viewport=True)
+        )
         self._tree.itemChanged.connect(self._on_item_changed)
         groupbox_layout.addWidget(self._tree, 1)
 
@@ -120,6 +132,7 @@ class PagesPage(QWidget):
         self._fetch_timer.timeout.connect(self._drain_fetch_queue)
         # Cache action icons and refresh them when palette/theme changes.
         self._image_button_icon = QIcon()
+        self._cards_button_icon = QIcon()
         self._reload_action_icons()
 
         self.reload()
@@ -280,7 +293,7 @@ class PagesPage(QWidget):
         self._sync_hovered_row_actions()
 
     def _attach_item_actions(self, item: QTreeWidgetItem, page_id: str) -> None:
-        """Attach row actions for image occlusion and inline page card-type selection."""
+        """Attach row actions for image/cards navigation and page card-type selection."""
         image_button = self._tree.itemWidget(item, 1)
         if not isinstance(image_button, QPushButton):
             image_button = QPushButton(self._tree)
@@ -291,7 +304,17 @@ class PagesPage(QWidget):
         self._configure_action_button(image_button, self._image_button_icon)
         image_button.setToolTip("Open Image Occlusion page for this Notion page.")
 
-        type_combo = self._tree.itemWidget(item, 2)
+        cards_button = self._tree.itemWidget(item, 2)
+        if not isinstance(cards_button, QPushButton):
+            cards_button = QPushButton(self._tree)
+            cards_button.clicked.connect(
+                lambda _checked=False, pid=page_id: self._open_cards_page(pid)
+            )
+            self._tree.setItemWidget(item, 2, cards_button)
+        self._configure_action_button(cards_button, self._cards_button_icon)
+        cards_button.setToolTip("Open Cards page for this Notion page.")
+
+        type_combo = self._tree.itemWidget(item, 3)
         if not isinstance(type_combo, QComboBox):
             type_combo = QComboBox(self._tree)
             type_combo.addItem("Default", None)
@@ -300,7 +323,7 @@ class PagesPage(QWidget):
             type_combo.currentIndexChanged.connect(
                 lambda _index, pid=page_id, combo=type_combo: self._on_card_type_selected(pid, combo)
             )
-            self._tree.setItemWidget(item, 2, type_combo)
+            self._tree.setItemWidget(item, 3, type_combo)
         self._configure_card_type_combo(type_combo)
 
         default_card_type = self._page_default_card_types.get(page_id)
@@ -318,9 +341,15 @@ class PagesPage(QWidget):
             image_button.hide()
             image_button.deleteLater()
 
-        type_combo = self._tree.itemWidget(item, 2)
-        if isinstance(type_combo, QComboBox):
+        cards_button = self._tree.itemWidget(item, 2)
+        if isinstance(cards_button, QPushButton):
             self._tree.removeItemWidget(item, 2)
+            cards_button.hide()
+            cards_button.deleteLater()
+
+        type_combo = self._tree.itemWidget(item, 3)
+        if isinstance(type_combo, QComboBox):
+            self._tree.removeItemWidget(item, 3)
             type_combo.hide()
             type_combo.deleteLater()
 
@@ -447,6 +476,7 @@ class PagesPage(QWidget):
         """Load light/dark button icons that match the current application palette."""
         variant = "dark" if self._is_dark_palette() else "light"
         self._image_button_icon = QIcon(self._docs_icon_path(f"image_{variant}.svg"))
+        self._cards_button_icon = QIcon(self._docs_icon_path(f"card_{variant}.svg"))
 
     def _refresh_action_icons_in_tree(self) -> None:
         """Re-apply action icons for the currently rendered hover-row actions."""
@@ -457,6 +487,12 @@ class PagesPage(QWidget):
         # Ensure the target page is persisted as sync-enabled before tab navigation.
         self._persist_selection_state()
         navigate_to_page("image_occlusion", {"page_id": page_id})
+
+    def _open_cards_page(self, page_id: str) -> None:
+        """Open the Cards tab and preselect the clicked page."""
+        # Ensure the target page is persisted as sync-enabled before tab navigation.
+        self._persist_selection_state()
+        navigate_to_page("cards", {"page_id": page_id})
 
     def _remove_tree_item(self, page_id: str) -> None:
         """Detach and remove one tree item by page id."""
@@ -834,7 +870,7 @@ class PagesPage(QWidget):
         if item is None:
             return False
 
-        type_combo = self._tree.itemWidget(item, 2)
+        type_combo = self._tree.itemWidget(item, 3)
         if not isinstance(type_combo, QComboBox):
             return False
 
@@ -968,6 +1004,178 @@ class PagesPage(QWidget):
         self._clear_tree_current()
         return True
 
+    def _show_tree_context_menu(self, pos: Any, *, from_viewport: bool) -> None:
+        """Show schema-driven tree context menu for row or background clicks."""
+        viewport_pos = pos if from_viewport else self._tree.viewport().mapFrom(self._tree, pos)
+        item = self._tree.itemAt(viewport_pos)
+        page_id = self._item_page_id(item)
+
+        menu = QMenu(self._tree)
+        if page_id is not None:
+            self._populate_page_item_context_menu(menu, page_id)
+            if self._context_menu_schema.on_background:
+                menu.addSeparator()
+            self._populate_page_background_context_menu(menu)
+        else:
+            self._populate_page_background_context_menu(menu)
+
+        if menu.isEmpty():
+            return
+        global_pos = self._tree.viewport().mapToGlobal(viewport_pos)
+        self._menu_exec(menu, global_pos)
+
+    def _populate_page_item_context_menu(self, menu: QMenu, page_id: str) -> None:
+        """Populate item-specific page actions from schema entries."""
+        for entry in self._context_menu_schema.on_item:
+            if entry.type == "action":
+                action = menu.addAction(self._page_action_label(entry, page_id))
+                action.triggered.connect(
+                    lambda _checked=False, e=entry, pid=page_id: self._run_page_action_entry(e, pid)
+                )
+                continue
+
+            if entry.type == "card_type_select":
+                submenu = menu.addMenu(entry.label)
+                self._populate_page_card_type_submenu(submenu, entry, page_id)
+
+    def _populate_page_background_context_menu(self, menu: QMenu) -> None:
+        """Populate background page actions from schema entries."""
+        for entry in self._context_menu_schema.on_background:
+            if entry.type != "action":
+                continue
+            action = menu.addAction(entry.label)
+            action.triggered.connect(lambda _checked=False, e=entry: self._run_page_action_entry(e, None))
+
+    def _populate_page_card_type_submenu(self, submenu: QMenu, entry: ContextMenuEntry, page_id: str) -> None:
+        """Populate one card-type submenu with default-selectable card type options."""
+        default_action = submenu.addAction("Default")
+        default_action.triggered.connect(
+            lambda _checked=False, e=entry, pid=page_id: self._run_page_card_type_entry(e, pid, None)
+        )
+        submenu.addSeparator()
+        for card_type in DEFAULT_SELECTABLE_CARD_TYPES:
+            label = card_type_label(card_type, abbreviation=False)
+            action = submenu.addAction(label)
+            action.triggered.connect(
+                lambda _checked=False, e=entry, pid=page_id, ct=card_type: self._run_page_card_type_entry(e, pid, ct)
+            )
+
+    def _page_action_label(self, entry: ContextMenuEntry, page_id: str) -> str:
+        """Return one pages action label adjusted to current target selection state."""
+        if entry.key == "toggle_page":
+            return "Unselect Page" if page_id in self._selected_ids else "Select Page"
+
+        if entry.key == "toggle_page_and_children":
+            subtree_page_ids = {page_id, *get_descendant_ids(page_id, self._children_map)}
+            is_subtree_fully_selected = all(
+                child_page_id in self._selected_ids
+                for child_page_id in subtree_page_ids
+            )
+            if is_subtree_fully_selected:
+                return "Unselect Page and All Children"
+            return "Select Page and All Children"
+
+        return entry.label
+
+    def _run_page_action_entry(self, entry: ContextMenuEntry, page_id: str | None) -> None:
+        """Dispatch one schema action entry to the matching page-state operation."""
+        if entry.key == "toggle_page":
+            if page_id is None:
+                return
+            self._toggle_page_only(page_id)
+            return
+        if entry.key == "toggle_page_and_children":
+            if page_id is None:
+                return
+            self._toggle_page_and_children(page_id)
+            return
+        if entry.key == "unselect_all_pages":
+            self._set_selected_ids_and_persist(set())
+            self._cascade_selected_parent_ids.clear()
+            return
+        if entry.key == "reset_all_page_default_types":
+            self._reset_all_page_default_types()
+            return
+
+    def _run_page_card_type_entry(
+        self,
+        entry: ContextMenuEntry,
+        page_id: str,
+        card_type: str | None,
+    ) -> None:
+        """Dispatch one schema card-type selection entry for a page/subtree target."""
+        if entry.key == "set_page_default_type":
+            self._set_page_default_card_type_for_targets({page_id}, card_type)
+            return
+        if entry.key == "set_page_and_children_default_type":
+            target_page_ids = {page_id, *get_descendant_ids(page_id, self._children_map)}
+            self._set_page_default_card_type_for_targets(target_page_ids, card_type)
+            return
+
+    def _toggle_page_only(self, page_id: str) -> None:
+        """Toggle one page selection without affecting descendants."""
+        updated_selected_ids = set(self._selected_ids)
+        if page_id in updated_selected_ids:
+            updated_selected_ids.discard(page_id)
+            self._cascade_selected_parent_ids.discard(page_id)
+            self._cascade_selected_parent_ids.difference_update(self._get_ancestor_ids(page_id))
+        else:
+            updated_selected_ids.add(page_id)
+            self._cascade_selected_parent_ids.discard(page_id)
+        self._set_selected_ids_and_persist(updated_selected_ids)
+
+    def _toggle_page_and_children(self, page_id: str) -> None:
+        """Toggle one page and all descendants as one explicit subtree operation."""
+        subtree_page_ids = {page_id, *get_descendant_ids(page_id, self._children_map)}
+        updated_selected_ids = set(self._selected_ids)
+        is_subtree_fully_selected = all(child_page_id in updated_selected_ids for child_page_id in subtree_page_ids)
+        if is_subtree_fully_selected:
+            updated_selected_ids.difference_update(subtree_page_ids)
+        else:
+            updated_selected_ids.update(subtree_page_ids)
+        self._cascade_selected_parent_ids.difference_update(subtree_page_ids)
+        self._set_selected_ids_and_persist(updated_selected_ids)
+
+    def _set_selected_ids_and_persist(self, selected_ids: set[str]) -> None:
+        """Apply selected ids to tree state and persist result to the pages table."""
+        self._selected_ids = set(selected_ids)
+        self._apply_selected_ids(self._selected_ids)
+        self._sync_hovered_row_actions()
+        self._persist_selection_state()
+
+    def _set_page_default_card_type_for_targets(self, page_ids: set[str], card_type: str | None) -> None:
+        """Persist one card-type value for a target page-id set and refresh UI state."""
+        if not page_ids:
+            return
+
+        normalized_card_type = (
+            None if card_type is None else normalize_default_selectable_card_type(card_type)
+        )
+        self._persist_selection_state()
+        self._store.set_page_default_card_types(page_ids, normalized_card_type)
+        for page_id in page_ids:
+            self._page_default_card_types[page_id] = normalized_card_type
+            self._cascade_card_type_parent_types.pop(page_id, None)
+        self._sync_hovered_row_actions()
+
+    def _reset_all_page_default_types(self) -> None:
+        """Reset every page card type override to inherited global default."""
+        self._persist_selection_state()
+        self._store.reset_all_page_default_card_types()
+        for page_id in self._page_default_card_types:
+            self._page_default_card_types[page_id] = None
+        self._cascade_card_type_parent_types.clear()
+        self._sync_hovered_row_actions()
+
+    def _item_page_id(self, item: QTreeWidgetItem | None) -> str | None:
+        """Return page id for one tree item, or None when unavailable."""
+        if item is None:
+            return None
+        page_id = item.data(0, self._item_role_user())
+        if not page_id:
+            return None
+        return str(page_id)
+
     def _clear_tree_current(self) -> None:
         """Clear the current item index to avoid focus/selection highlight artifacts."""
         self._tree.setCurrentIndex(self._empty_model_index())
@@ -1038,6 +1246,16 @@ class PagesPage(QWidget):
         if selection_mode is not None and hasattr(selection_mode, "NoSelection"):
             return getattr(selection_mode, "NoSelection")
         return getattr(QAbstractItemView, "NoSelection")
+
+    @staticmethod
+    def _context_menu_policy_custom() -> Any:
+        """Return Qt custom-context-menu policy in a version-safe way."""
+        from aqt.qt import Qt
+
+        context_menu_policy = getattr(Qt, "ContextMenuPolicy", None)
+        if context_menu_policy is not None and hasattr(context_menu_policy, "CustomContextMenu"):
+            return getattr(context_menu_policy, "CustomContextMenu")
+        return getattr(Qt, "CustomContextMenu")
 
     @staticmethod
     def _mouse_button_release_event_type() -> Any:
@@ -1156,6 +1374,15 @@ class PagesPage(QWidget):
         if size_policy is not None and hasattr(size_policy, "Fixed"):
             return getattr(size_policy, "Fixed")
         return getattr(QSizePolicy, "Fixed")
+
+    @staticmethod
+    def _menu_exec(menu: QMenu, global_pos: Any) -> None:
+        """Execute a menu in a Qt5/Qt6 compatible way."""
+        exec_method = getattr(menu, "exec", None)
+        if callable(exec_method):
+            exec_method(global_pos)
+            return
+        menu.exec_(global_pos)
 
 
 def build_page(parent: QWidget, context: UiContext) -> QWidget:

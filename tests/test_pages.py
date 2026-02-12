@@ -318,3 +318,46 @@ class PagesStoreTests(unittest.TestCase):
         self.assertEqual(pages["page-a"].default_card_type, "input")
         self.assertIsNone(pages["page-b"].default_card_type)
         self.assertEqual(pages["page-c"].default_card_type, "input")
+
+    def test_set_page_sync_enabled_updates_single_row(self) -> None:
+        self._store.upsert_page_selection(
+            {"page-a": "Notion::A", "page-b": "Notion::B"},
+            {"page-a", "page-b"},
+        )
+        self._store.set_page_sync_enabled("page-a", False)
+        pages = self._store.get_pages()
+        self.assertFalse(pages["page-a"].sync_enabled)
+        self.assertTrue(pages["page-b"].sync_enabled)
+
+    def test_set_pages_sync_enabled_updates_multiple_rows(self) -> None:
+        self._store.upsert_page_selection(
+            {"page-a": "Notion::A", "page-b": "Notion::B", "page-c": "Notion::C"},
+            {"page-a", "page-b", "page-c"},
+        )
+        self._store.set_pages_sync_enabled({"page-a", "page-c"}, enabled=False)
+        pages = self._store.get_pages()
+        self.assertFalse(pages["page-a"].sync_enabled)
+        self.assertTrue(pages["page-b"].sync_enabled)
+        self.assertFalse(pages["page-c"].sync_enabled)
+
+    def test_set_all_pages_sync_enabled_updates_every_row(self) -> None:
+        self._store.upsert_page_selection(
+            {"page-a": "Notion::A", "page-b": "Notion::B"},
+            {"page-a", "page-b"},
+        )
+        self._store.set_all_pages_sync_enabled(False)
+        pages = self._store.get_pages()
+        self.assertFalse(pages["page-a"].sync_enabled)
+        self.assertFalse(pages["page-b"].sync_enabled)
+
+    def test_reset_all_page_default_card_types_clears_all_rows(self) -> None:
+        self._store.upsert_page_selection(
+            {"page-a": "Notion::A", "page-b": "Notion::B"},
+            {"page-a", "page-b"},
+        )
+        self._store.set_page_default_card_type("page-a", "input")
+        self._store.set_page_default_card_type("page-b", "basic_reversed")
+        self._store.reset_all_page_default_card_types()
+        pages = self._store.get_pages()
+        self.assertIsNone(pages["page-a"].default_card_type)
+        self.assertIsNone(pages["page-b"].default_card_type)

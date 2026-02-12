@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-import importlib.util
-import subprocess
-import sys
 
 from .db import Database
 from .sync import trigger_startup_sync, trigger_sync_with_anki_button
 from .cards import ensure_notion_toggle_model
 from .settings import create_default_settings
 from .notion_client import NotionClient
+from .dependency_installer import install_keyring_dependency_with_progress
 
 # This project is primarily an Anki add-on, but we also want the core modules to be
 # importable in plain Python test environments where `aqt` is not available.
@@ -47,9 +45,8 @@ def on_profile_did_open() -> None:
         if callable(initialize_ui):
             initialize_ui()
 
-        # Install keyring dependency if not already installed
-        if importlib.util.find_spec("keyring") is None:
-            subprocess.run([sys.executable, "-m", "pip", "install", "keyring"], check=False)
+        # Install keyring dependency if needed and surface progress in the UI.
+        install_keyring_dependency_with_progress(parent=mw)
 
         trigger_startup_sync(mw=mw, db_path=db_path)
         

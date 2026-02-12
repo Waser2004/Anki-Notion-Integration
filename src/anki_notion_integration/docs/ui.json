@@ -7,6 +7,12 @@
       "factory": "build_page"
     },
     {
+      "key": "cards",
+      "name": "Cards",
+      "module": "anki_notion_integration.ui.cards_ui",
+      "factory": "build_page"
+    },
+    {
       "key": "image_occlusion",
       "name": "Image Occlusion",
       "module": "anki_notion_integration.ui.image_occlusion_ui",

@@ -83,6 +83,24 @@ MIGRATIONS: tuple[Migration, ...] = (
             "ALTER TABLE pages ADD COLUMN default_card_type TEXT",
         ),
     ),
+    # Store optional per-card type overrides keyed by Notion block id.
+    Migration(
+        version=6,
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS card_type_overrides (
+                notion_block_id TEXT PRIMARY KEY,
+                notion_page_id TEXT NOT NULL,
+                card_type TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY(notion_page_id)
+                    REFERENCES pages(notion_page_id)
+                    ON DELETE CASCADE
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_card_type_overrides_page ON card_type_overrides(notion_page_id)",
+        ),
+    ),
 )
 
 
