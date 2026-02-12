@@ -1,4 +1,4 @@
-# Parser (`src/anki_notion_integration/parser.py`)
+# Parser (`src/Noteck/parser.py`)
 
 ## Goal
 Convert Notion page blocks into typed card payloads for sync.

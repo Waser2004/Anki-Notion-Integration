@@ -1,4 +1,4 @@
-"""SQLite persistence layer for the Anki-Notion integration."""
+"""SQLite persistence layer for Noteck."""
 
 from __future__ import annotations
 
@@ -17,6 +17,9 @@ class Migration:
 
 
 MIGRATIONS: tuple[Migration, ...] = (
+    # First public release baseline:
+    # keep one canonical schema migration for new installs.
+    # Compatibility with pre-release schema variants is intentionally unsupported.
     Migration(
         version=1,
         statements=(
@@ -25,7 +28,13 @@ MIGRATIONS: tuple[Migration, ...] = (
                 notion_page_id TEXT PRIMARY KEY,
                 anki_deck_name TEXT NOT NULL,
                 sync_enabled INTEGER NOT NULL DEFAULT 1,
-                last_synced_at TEXT
+                last_synced_at TEXT,
+                anki_deck_id INTEGER,
+                content_hash TEXT,
+                last_seen_notion_edit_time TEXT,
+                parent_id TEXT,
+                parent_type TEXT,
+                default_card_type TEXT
             )
             """,
             """
@@ -50,43 +59,6 @@ MIGRATIONS: tuple[Migration, ...] = (
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
             """,
-            "CREATE INDEX IF NOT EXISTS idx_cards_page ON cards(notion_page_id)",
-        ),
-    ),
-    # Add anki_deck_id for better Anki deck management and content_hash for pages to speed up sync checks.
-    Migration(
-        version=2,
-        statements=(
-            "ALTER TABLE pages ADD COLUMN anki_deck_id INTEGER",
-            "ALTER TABLE pages ADD COLUMN content_hash TEXT",
-        ),
-    ),
-    # Add last_seen_notion_edit_time to support fast sync decisions per page.
-    Migration(
-        version=3,
-        statements=(
-            "ALTER TABLE pages ADD COLUMN last_seen_notion_edit_time TEXT",
-        ),
-    ),
-    # Store parent metadata so the Pages tab can preload and render hierarchy from DB.
-    Migration(
-        version=4,
-        statements=(
-            "ALTER TABLE pages ADD COLUMN parent_id TEXT",
-            "ALTER TABLE pages ADD COLUMN parent_type TEXT",
-        ),
-    ),
-    # Store optional per-page card type override; NULL means use global default.
-    Migration(
-        version=5,
-        statements=(
-            "ALTER TABLE pages ADD COLUMN default_card_type TEXT",
-        ),
-    ),
-    # Store optional per-card type overrides keyed by Notion block id.
-    Migration(
-        version=6,
-        statements=(
             """
             CREATE TABLE IF NOT EXISTS card_type_overrides (
                 notion_block_id TEXT PRIMARY KEY,
@@ -98,6 +70,7 @@ MIGRATIONS: tuple[Migration, ...] = (
                     ON DELETE CASCADE
             )
             """,
+            "CREATE INDEX IF NOT EXISTS idx_cards_page ON cards(notion_page_id)",
             "CREATE INDEX IF NOT EXISTS idx_card_type_overrides_page ON card_type_overrides(notion_page_id)",
         ),
     ),

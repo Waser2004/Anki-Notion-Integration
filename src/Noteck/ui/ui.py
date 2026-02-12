@@ -1,4 +1,4 @@
-"""UI shell for the Anki-Notion integration add-on."""
+"""UI shell for the Noteck add-on."""
 
 from __future__ import annotations
 
@@ -166,7 +166,7 @@ def navigate_to_page(page_key: str, payload: dict[str, Any] | None = None) -> No
 def _build_context() -> UiContext:
     """Build the shared context passed to page factories."""
     profile_folder = Path(mw.pm.profileFolder())
-    db_path = profile_folder / "Anki_Notion_Integration" / "db" / "notion_integration.db"
+    db_path = profile_folder / "Noteck" / "db" / "notion_integration.db"
 
     return UiContext(mw=mw, profile_folder=profile_folder, db_path=db_path)
 
@@ -299,7 +299,10 @@ class NotionWindow(QDialog):
         """Import the page module and build its widget."""
         try:
             # Dynamically import the module and get the factory function.
-            module = importlib.import_module(page.module)
+            if page.module.startswith("."):
+                module = importlib.import_module(page.module, package=__package__)
+            else:
+                module = importlib.import_module(page.module)
             factory = getattr(module, page.factory, None)
             if factory is None:
                 raise UiSchemaError(

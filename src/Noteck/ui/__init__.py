@@ -1,3 +1,3 @@
-"""UI package for the Anki-Notion integration."""
+"""UI package for Noteck."""
 
 # Keep this file to ensure Python treats the ui directory as a package.

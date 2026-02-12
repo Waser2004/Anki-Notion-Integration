@@ -11,10 +11,10 @@ from unittest.mock import Mock, patch
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
-from anki_notion_integration.db import Database
-from anki_notion_integration.notion_client import NotionBlock
-from anki_notion_integration.parser import ToggleCardPayload
-from anki_notion_integration.sync import (
+from Noteck.modules.db import Database
+from Noteck.modules.notion_client import NotionBlock
+from Noteck.modules.parser import ToggleCardPayload
+from Noteck.modules.sync import (
     SyncResult,
     SyncStats,
     run_notion_sync_with_progress,

@@ -8,9 +8,9 @@ import sys
 import tempfile
 import unittest
 
-sys.path.append(str(Path(__file__).resolve().parents[1] / "src" / "anki_notion_integration"))
+sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
-from db import Database
+from Noteck.modules.db import Database
 
 
 def _column_names(connection: sqlite3.Connection, table_name: str) -> set[str]:
@@ -48,36 +48,31 @@ class DatabaseMigrationTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_initialize_upgrades_existing_version_1_database(self) -> None:
-        # Create a version-1 shape database to simulate a real user upgrade.
-        connection = sqlite3.connect(self._db_path)
-        try:
-            connection.executescript(
-                """
-                CREATE TABLE schema_migrations (
-                    version INTEGER PRIMARY KEY,
-                    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-                );
-
-                CREATE TABLE pages (
-                    notion_page_id TEXT PRIMARY KEY,
-                    anki_deck_name TEXT NOT NULL,
-                    sync_enabled INTEGER NOT NULL DEFAULT 1,
-                    last_synced_at TEXT
-                );
-
-                INSERT INTO schema_migrations (version) VALUES (1);
-                """
-            )
-            connection.commit()
-        finally:
-            connection.close()
-
+    def test_initialize_records_schema_version_1(self) -> None:
         db = Database(self._db_path)
         db.initialize()
 
         connection = sqlite3.connect(self._db_path)
         try:
+            latest_version = connection.execute(
+                "SELECT MAX(version) FROM schema_migrations"
+            ).fetchone()[0]
+            self.assertEqual(latest_version, 1)
+        finally:
+            connection.close()
+
+    def test_initialize_is_idempotent_for_single_baseline_migration(self) -> None:
+        db = Database(self._db_path)
+        db.initialize()
+        db.initialize()
+
+        connection = sqlite3.connect(self._db_path)
+        try:
+            versions = connection.execute(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            ).fetchall()
+            self.assertEqual([int(row[0]) for row in versions], [1])
+
             page_columns = _column_names(connection, "pages")
             self.assertIn("anki_deck_id", page_columns)
             self.assertIn("content_hash", page_columns)
@@ -85,10 +80,5 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("parent_id", page_columns)
             self.assertIn("parent_type", page_columns)
             self.assertIn("default_card_type", page_columns)
-
-            latest_version = connection.execute(
-                "SELECT MAX(version) FROM schema_migrations"
-            ).fetchone()[0]
-            self.assertEqual(latest_version, 6)
         finally:
             connection.close()

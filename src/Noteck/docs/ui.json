@@ -3,25 +3,25 @@
     {
       "key": "pages",
       "name": "Pages",
-      "module": "anki_notion_integration.ui.pages_ui",
+      "module": ".pages_ui",
       "factory": "build_page"
     },
     {
       "key": "cards",
       "name": "Cards",
-      "module": "anki_notion_integration.ui.cards_ui",
+      "module": ".cards_ui",
       "factory": "build_page"
     },
     {
       "key": "image_occlusion",
       "name": "Image Occlusion",
-      "module": "anki_notion_integration.ui.image_occlusion_ui",
+      "module": ".image_occlusion_ui",
       "factory": "build_page"
     },
     {
       "key": "settings",
       "name": "Settings",
-      "module": "anki_notion_integration.ui.settings_ui",
+      "module": ".settings_ui",
       "factory": "build_page"
     }
   ]

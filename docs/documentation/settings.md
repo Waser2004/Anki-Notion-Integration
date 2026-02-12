@@ -1,6 +1,6 @@
-# Settings (`src/anki_notion_integration/settings.py`)
+# Settings (`src/Noteck/settings.py`)
 
-Settings are schema-driven from `src/anki_notion_integration/docs/settings.json`.
+Settings are schema-driven from `src/Noteck/docs/settings.json`.
 
 ## Categories
 

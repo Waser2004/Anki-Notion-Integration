@@ -1,4 +1,4 @@
-"""Runtime dependency installation helpers for the Anki add-on."""
+"""Runtime dependency installation helpers for Noteck."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def install_keyring_dependency_with_progress(parent: Any = None) -> None:
         0,
         parent,
     )
-    progress_dialog.setWindowTitle("Anki-Notion Integration")
+    progress_dialog.setWindowTitle("Noteck")
     progress_dialog.setCancelButton(None)
     progress_dialog.setMinimumDuration(0)
     progress_dialog.setAutoClose(False)
@@ -81,7 +81,7 @@ def install_keyring_dependency_with_progress(parent: Any = None) -> None:
     if result.get("returncode", 1) != 0 and QMessageBox is not None:
         QMessageBox.warning(
             parent,
-            "Anki-Notion Integration",
+            "Noteck",
             "Failed to install 'keyring' automatically.\n"
             "Please install it manually in Anki's Python environment.",
         )

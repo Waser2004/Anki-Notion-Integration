@@ -10,7 +10,7 @@ import unittest
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
-from anki_notion_integration.ui.ui import UiSchemaError, load_ui_schema
+from Noteck.ui.ui import UiSchemaError, load_ui_schema
 
 
 class UiSchemaTests(unittest.TestCase):

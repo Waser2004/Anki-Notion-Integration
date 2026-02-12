@@ -11,6 +11,7 @@ Clicking the **“Notion”** button opens a dedicated add-on window with tabs.
 The top navigation tabs are:
 
 - **Pages**
+- **Cards**
 - **Image Occlusion**
 - **Settings**
 
@@ -29,6 +30,16 @@ The **Pages** tab provides a hierarchical tree of accessible Notion pages.
 - Selecting a parent selects descendants only when none of its descendants are already selected.
 - Deselecting a parent affects only that parent.
 - Child toggles do not change parent selection.
+
+---
+
+### Cards
+
+The **Cards** tab provides page-scoped toggle card controls.
+
+- Shows toggle-derived cards for the selected page.
+- Allows per-toggle exclusion from sync.
+- Supports resetting toggle card-type overrides back to default behavior.
 
 ---
 

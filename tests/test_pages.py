@@ -9,9 +9,9 @@ import unittest
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
-from anki_notion_integration.db import Database
-from anki_notion_integration.notion_client import NotionPage, PageNode
-from anki_notion_integration.pages import (
+from Noteck.modules.db import Database
+from Noteck.modules.notion_client import NotionPage, PageNode
+from Noteck.modules.pages import (
     PagesStore,
     apply_default_card_type_rule,
     apply_selection_rule,

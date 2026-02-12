@@ -20,20 +20,20 @@ from aqt.qt import (
     QWidget,
 )
 
-from anki_notion_integration.card_type_overrides import CardTypeOverrideStore
-from anki_notion_integration.card_types import (
+from ..modules.card_type_overrides import CardTypeOverrideStore
+from ..modules.card_types import (
     CLOZE,
     DEFAULT_SELECTABLE_CARD_TYPES,
     card_type_label,
     normalize_card_type,
     normalize_default_selectable_card_type,
 )
-from anki_notion_integration.cards_store import CardsStore
-from anki_notion_integration.db import Database
-from anki_notion_integration.notion_client import NotionClient
-from anki_notion_integration.pages import PagesStore, StoredPage
-from anki_notion_integration.ui.context_menu_schema import ContextMenuEntry, load_context_menu_schema
-from anki_notion_integration.ui.ui import UiContext
+from ..modules.cards_store import CardsStore
+from ..modules.db import Database
+from ..modules.notion_client import NotionClient
+from ..modules.pages import PagesStore, StoredPage
+from .context_menu_schema import ContextMenuEntry, load_context_menu_schema
+from .ui import UiContext
 
 _DB_FRONT_PLACEHOLDER = "Loading front text..."
 

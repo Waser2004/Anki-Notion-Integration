@@ -9,7 +9,7 @@ import unittest
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
-from anki_notion_integration.notion_client import NotionClient, NotionResponse
+from Noteck.modules.notion_client import NotionClient, NotionResponse
 
 
 class NotionClientPageParentResolutionTests(unittest.TestCase):

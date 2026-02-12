@@ -9,8 +9,8 @@ import unittest
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
-from anki_notion_integration.card_type_overrides import CardTypeOverrideStore
-from anki_notion_integration.db import Database
+from Noteck.modules.card_type_overrides import CardTypeOverrideStore
+from Noteck.modules.db import Database
 
 
 class CardTypeOverrideStoreTests(unittest.TestCase):

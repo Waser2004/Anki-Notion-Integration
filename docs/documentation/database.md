@@ -1,12 +1,14 @@
-# Database (`src/anki_notion_integration/db.py`)
+# Database (`src/Noteck/db.py`)
 
 The add-on persists per-profile state in SQLite.
 
 ## Migrations
 
-- Ordered migrations live in `MIGRATIONS`.
+- A single baseline migration lives in `MIGRATIONS`.
 - `Database.initialize()` applies pending migrations and records applied versions in `schema_migrations`.
-- Current latest schema version: **5**.
+- Current latest schema version: **1**.
+- The baseline schema is intentionally squashed for the first public release.
+- Compatibility with pre-release database variants is intentionally unsupported.
 
 ## Tables
 
@@ -38,6 +40,13 @@ The add-on persists per-profile state in SQLite.
 
 - `key` (TEXT, PK)
 - `value` (TEXT, NOT NULL)
+- `updated_at` (TEXT, NOT NULL)
+
+### `card_type_overrides`
+
+- `notion_block_id` (TEXT, PK)
+- `notion_page_id` (TEXT, FK → pages)
+- `card_type` (TEXT, NOT NULL)
 - `updated_at` (TEXT, NOT NULL)
 
 ## Helpers

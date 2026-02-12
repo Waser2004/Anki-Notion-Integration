@@ -2,7 +2,7 @@
 
 import json
 import sys
-from src.anki_notion_integration.notion_client import NotionClient
+from src.Noteck.modules.notion_client import NotionClient
 
 
 def main():

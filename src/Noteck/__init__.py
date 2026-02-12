@@ -1,15 +1,15 @@
-"""Anki-Notion Integration package."""
+"""Noteck package."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from .db import Database
-from .sync import trigger_startup_sync, trigger_sync_with_anki_button
-from .cards import ensure_notion_toggle_model
-from .settings import create_default_settings
-from .notion_client import NotionClient
-from .dependency_installer import install_keyring_dependency_with_progress
+from .modules.db import Database
+from .modules.sync import trigger_startup_sync, trigger_sync_with_anki_button
+from .modules.cards import ensure_notion_toggle_model
+from .modules.settings import create_default_settings
+from .modules.notion_client import NotionClient
+from .modules.dependency_installer import install_keyring_dependency_with_progress
 
 # This project is primarily an Anki add-on, but we also want the core modules to be
 # importable in plain Python test environments where `aqt` is not available.
@@ -33,7 +33,7 @@ def on_profile_did_open() -> None:
         return
 
     profile_folder = mw.pm.profileFolder()
-    db_path = Path(profile_folder) / "Anki_Notion_Integration" / "db" / "notion_integration.db"
+    db_path = Path(profile_folder) / "Noteck" / "db" / "notion_integration.db"
 
     def work() -> None:       
         # initialize the database for the current profile
@@ -58,7 +58,7 @@ def _on_sync_will_start() -> None:
         return
 
     profile_folder = mw.pm.profileFolder()
-    db_path = Path(profile_folder) / "Anki_Notion_Integration" / "db" / "notion_integration.db"
+    db_path = Path(profile_folder) / "Noteck" / "db" / "notion_integration.db"
     trigger_sync_with_anki_button(mw=mw, db_path=db_path)
 
 # Register hooks

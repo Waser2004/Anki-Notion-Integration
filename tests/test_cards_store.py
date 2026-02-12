@@ -9,8 +9,8 @@ import unittest
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
-from anki_notion_integration.cards_store import CardsStore
-from anki_notion_integration.db import Database
+from Noteck.modules.cards_store import CardsStore
+from Noteck.modules.db import Database
 
 
 class CardsStoreTests(unittest.TestCase):

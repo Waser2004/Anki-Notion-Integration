@@ -12,8 +12,8 @@ sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 import keyring
 from keyring.backend import KeyringBackend
 
-from anki_notion_integration.db import Database
-from anki_notion_integration.settings import (
+from Noteck.modules.db import Database
+from Noteck.modules.settings import (
     KeyringSecretStore,
     SettingsError,
     SettingsStore,
@@ -82,7 +82,7 @@ class SettingsTests(unittest.TestCase):
             store.set_value("sync_notion_now", "clicked")
 
     def test_keyring_secret_store_operations(self) -> None:
-        secret_store = KeyringSecretStore("anki_notion_integration", "profile-a")
+        secret_store = KeyringSecretStore("Noteck", "profile-a")
         self.assertIsNone(secret_store.get_secret("notion_api_key"))
         secret_store.set_secret("notion_api_key", "value-1")
         self.assertEqual(secret_store.get_secret("notion_api_key"), "value-1")

@@ -1,4 +1,4 @@
-# Notion Client (`src/anki_notion_integration/notion_client.py`)
+# Notion Client (`src/Noteck/notion_client.py`)
 
 ## Goal
 Provide a small, testable wrapper around the Notion REST API that supports the MVP needs of this add-on:

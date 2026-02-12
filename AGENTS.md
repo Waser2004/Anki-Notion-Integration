@@ -12,7 +12,7 @@ AI agents: follow these repo rules. Keep changes minimal and scoped.
 │  ├─ architecture.md
 │  └─ user_interface.md
 ├─ src/
-│  └─ anki_notion_integration/
+│  └─ Noteck/
 │     ├─ __init__.py
 │     ├─ ...
 │     ├─ ui/
@@ -22,8 +22,8 @@ AI agents: follow these repo rules. Keep changes minimal and scoped.
 Quick notes:
 - `docs/`: product + architecture documentation (start here for context).
 - `docs/documentation`: code documentation.
-- `src/anki_notion_integration/`: main Python package.
-- `src/anki_notion_integration/ui/`: UI code lives here.
+- `src/Noteck/`: main Python package.
+- `src/Noteck/ui/`: UI code lives here.
 - `tests/`: automated tests live here.
 
 ## Guardrails

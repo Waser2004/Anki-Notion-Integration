@@ -18,7 +18,8 @@ INPUT_CARD_NAME = "Notion (Input)"
 CLOZE_CARD_NAME = "Notion (Cloze)"
 
 CSS_MANAGED_MARKER = "/* Noteck card model css */"
-_PACKAGE_STYLESHEET_PATH = Path(__file__).resolve().parent / "docs" / "Notion_Card_Stylesheet.css"
+# Module files live in Noteck/modules while shared resources stay in Noteck/docs.
+_PACKAGE_STYLESHEET_PATH = Path(__file__).resolve().parents[1] / "docs" / "Notion_Card_Stylesheet.css"
 
 
 @dataclass(frozen=True)

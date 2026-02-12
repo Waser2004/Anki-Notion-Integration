@@ -10,7 +10,7 @@ import unittest
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
-from anki_notion_integration.ui.context_menu_schema import ContextMenuSchemaError, load_context_menu_schema
+from Noteck.ui.context_menu_schema import ContextMenuSchemaError, load_context_menu_schema
 
 
 class ContextMenuSchemaTests(unittest.TestCase):

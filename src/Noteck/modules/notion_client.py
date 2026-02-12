@@ -1,4 +1,4 @@
-"""Notion API client helpers for the Anki-Notion integration."""
+"""Notion API client helpers for Noteck."""
 
 from __future__ import annotations
 

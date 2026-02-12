@@ -1,10 +1,10 @@
-"""Settings page UI for the Anki-Notion integration add-on.
+"""Settings page UI for the Noteck add-on.
 
-This module is lazy-loaded by the UI shell (`anki_notion_integration.ui.ui.NotionWindow`)
+This module is lazy-loaded by the UI shell (`ui.ui.NotionWindow`)
 when the user selects the "Settings" tab.
 
 The UI is schema-driven: setting metadata (type/labels/defaults/storage) comes from
-`src/anki_notion_integration/docs/settings.json` via `load_settings_schema()`.
+`src/Noteck/docs/settings.json` via `load_settings_schema()`.
 Values are persisted via `SettingsStore` (SQLite + optional keyring for secrets).
 """
 
@@ -28,17 +28,17 @@ from aqt.qt import (
     QWidget,
 )
 
-from anki_notion_integration.card_types import DEFAULT_SELECTABLE_CARD_TYPES, card_type_label
-from anki_notion_integration.db import Database
-from anki_notion_integration.settings import (
+from ..modules.card_types import DEFAULT_SELECTABLE_CARD_TYPES, card_type_label
+from ..modules.db import Database
+from ..modules.settings import (
     SettingDefinition,
     SettingsError,
     SettingsSchema,
     SettingsStore,
     load_settings_schema,
 )
-from anki_notion_integration.sync import run_notion_sync_with_progress, sync_notion_to_anki
-from anki_notion_integration.ui.ui import UiContext
+from ..modules.sync import run_notion_sync_with_progress, sync_notion_to_anki
+from .ui import UiContext
 
 
 @dataclass(frozen=True)

@@ -8,8 +8,8 @@ import unittest
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
-from anki_notion_integration.notion_client import NotionBlock
-from anki_notion_integration.parser import (
+from Noteck.modules.notion_client import NotionBlock
+from Noteck.modules.parser import (
     collect_image_occlusion_candidates,
     normalize_typed_answer,
     parse_page_to_cards,

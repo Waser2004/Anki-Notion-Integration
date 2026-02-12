@@ -1,4 +1,4 @@
-"""Settings access layer for the Anki-Notion integration."""
+"""Settings access layer for Noteck."""
 
 from __future__ import annotations
 
@@ -63,8 +63,9 @@ class SettingsSchema:
 
 
 _SUPPORTED_TYPES = {"text", "checkbox", "boolean", "dropdown", "button"}
-_DEFAULT_SETTINGS_PATH = Path(__file__).resolve().parent / "docs" / "settings.json"
-_DEFAULT_SERVICE_NAME = "anki_notion_integration"
+# Module files live in Noteck/modules while shared resources stay in Noteck/docs.
+_DEFAULT_SETTINGS_PATH = Path(__file__).resolve().parents[1] / "docs" / "settings.json"
+_DEFAULT_SERVICE_NAME = "Noteck"
 _DEFAULT_PROFILE_NAME = "default"
 
 

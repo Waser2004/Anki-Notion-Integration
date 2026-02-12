@@ -24,13 +24,13 @@ from aqt.qt import (
     QWidget,
 )
 
-from anki_notion_integration.db import Database
-from anki_notion_integration.notion_client import NotionClient
-from anki_notion_integration.pages import PagesStore
-from anki_notion_integration.parser import ImageOcclusionCandidate, collect_image_occlusion_candidates
-from anki_notion_integration.settings import SettingsStore
-from anki_notion_integration.sync import _download_and_store_image, _ensure_deck_id, _resolve_media_directory
-from anki_notion_integration.ui.ui import UiContext
+from ..modules.db import Database
+from ..modules.notion_client import NotionClient
+from ..modules.pages import PagesStore
+from ..modules.parser import ImageOcclusionCandidate, collect_image_occlusion_candidates
+from ..modules.settings import SettingsStore
+from ..modules.sync import _download_and_store_image, _ensure_deck_id, _resolve_media_directory
+from .ui import UiContext
 
 _IOE_URL = "https://ankiweb.net/shared/info/1374772155"
 
@@ -506,7 +506,7 @@ class ImageOcclusionPage(QWidget):
         """Download bounded image bytes for thumbnail rendering."""
         request = Request(
             image_url,
-            headers={"User-Agent": "Mozilla/5.0 (Anki-Notion-Integration)"},
+            headers={"User-Agent": "Mozilla/5.0 (Noteck)"},
         )
         try:
             with urlopen(request, timeout=10.0) as response:

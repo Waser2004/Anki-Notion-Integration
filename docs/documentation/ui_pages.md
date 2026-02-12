@@ -1,12 +1,13 @@
-# UI pages (`src/anki_notion_integration/ui/`)
+# UI pages (`src/Noteck/ui/`)
 
-Top-level tabs are configured in `src/anki_notion_integration/docs/ui.json` and lazy-loaded by `src/anki_notion_integration/ui/ui.py`.
+Top-level tabs are configured in `src/Noteck/docs/ui.json` and lazy-loaded by `src/Noteck/ui/ui.py`.
 
 Current tabs:
 
-- `pages` → `anki_notion_integration.ui.pages_ui`
-- `image_occlusion` → `anki_notion_integration.ui.image_occlusion_ui`
-- `settings` → `anki_notion_integration.ui.settings_ui`
+- `pages` → `Noteck.ui.pages_ui`
+- `cards` → `Noteck.ui.cards_ui`
+- `image_occlusion` → `Noteck.ui.image_occlusion_ui`
+- `settings` → `Noteck.ui.settings_ui`
 
 ## Navigation support
 

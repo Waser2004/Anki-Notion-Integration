@@ -26,14 +26,14 @@ from aqt.qt import (
     QWidget,
 )
 
-from anki_notion_integration.card_types import (
+from ..modules.card_types import (
     DEFAULT_SELECTABLE_CARD_TYPES,
     card_type_label,
     normalize_default_selectable_card_type,
 )
-from anki_notion_integration.db import Database
-from anki_notion_integration.notion_client import NotionApiError, NotionClient, NotionPage, NotionTransportError
-from anki_notion_integration.pages import (
+from ..modules.db import Database
+from ..modules.notion_client import NotionApiError, NotionClient, NotionPage, NotionTransportError
+from ..modules.pages import (
     PagesStore,
     StoredPage,
     apply_default_card_type_rule,
@@ -42,9 +42,9 @@ from anki_notion_integration.pages import (
     build_deck_names_from_pages,
     get_descendant_ids,
 )
-from anki_notion_integration.ui.ui import navigate_to_page
-from anki_notion_integration.ui.ui import UiContext
-from anki_notion_integration.ui.context_menu_schema import ContextMenuEntry, load_context_menu_schema
+from .ui import navigate_to_page
+from .ui import UiContext
+from .context_menu_schema import ContextMenuEntry, load_context_menu_schema
 
 
 class PagesPage(QWidget):
