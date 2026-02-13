@@ -4,7 +4,8 @@ This service hosts the external API for AI features used by the Noteck Anki add-
 
 Current milestone status:
 - Auth endpoints are fully implemented.
-- Non-auth AI endpoints are scaffolded shells returning `NOT_IMPLEMENTED`.
+- `generate-question-variants` is implemented with OpenAI (HTTP).
+- Remaining non-auth AI endpoints are scaffolded shells returning `NOT_IMPLEMENTED`.
 - Environment is local/dev focused and uses SQLite by default.
 
 ## Endpoint status matrix
@@ -15,7 +16,7 @@ Current milestone status:
 | `POST /v1/auth/token` | Implemented |
 | `POST /v1/auth/refresh` | Implemented |
 | `GET /v1/auth/me` | Implemented |
-| `POST /v1/static/generate-question-variants` | Shell (`501 NOT_IMPLEMENTED`) |
+| `POST /v1/static/generate-question-variants` | Implemented |
 | `POST /v1/static/text-to-speech` | Shell (`501 NOT_IMPLEMENTED`) |
 | `POST /v1/active/evaluate-answer` | Shell (`501 NOT_IMPLEMENTED`) |
 
@@ -38,6 +39,10 @@ AI_API_JWT_SECRET=dev-change-me
 AI_API_ENABLE_STARTUP_ADMIN_SEED=false
 AI_API_STARTUP_ADMIN_EMAIL=
 AI_API_STARTUP_ADMIN_PASSWORD=
+AI_API_OPENAI_API_KEY=
+AI_API_OPENAI_MODEL=gpt-5-mini-2025-08-07
+AI_API_OPENAI_TIMEOUT_SECONDS=20
+AI_API_OPENAI_BASE_URL=https://api.openai.com/v1
 ```
 
 ## Run the API locally
@@ -117,7 +122,7 @@ make prod-down
 
 ## Notes
 
-- This milestone intentionally does not call external AI providers.
+- `POST /v1/static/generate-question-variants` calls OpenAI over HTTP and returns `502` for upstream provider errors.
 - The error envelope is stable across routes:
 
 ```json

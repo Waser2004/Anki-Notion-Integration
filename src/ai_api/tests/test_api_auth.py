@@ -33,6 +33,10 @@ class AuthApiTests(unittest.TestCase):
             enable_startup_admin_seed=False,
             startup_admin_email="",
             startup_admin_password="",
+            openai_api_key="test-key",
+            openai_model="gpt-5-mini-2025-08-07",
+            openai_timeout_seconds=20.0,
+            openai_base_url="https://api.openai.com/v1",
         )
         app = create_app(settings)
         self._client_ctx = TestClient(app)
