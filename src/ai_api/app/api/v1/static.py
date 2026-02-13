@@ -4,18 +4,18 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, Field
 
 from app.core.config import Settings
 from app.core.dependencies import get_current_user, get_settings
-from app.core.errors import NotImplementedFeatureError
 from app.db.models import UserRecord
 from app.services.question_variants import (
     QuestionVariantConstraints as ServiceQuestionVariantConstraints,
     QuestionVariantGenerationInput,
     generate_question_variants,
 )
+from app.services.text_to_speech import TextToSpeechInput, synthesize_text_to_speech
 
 
 router = APIRouter(prefix="/static", tags=["static"])
@@ -113,9 +113,23 @@ def generate_question_variants_endpoint(
 
 
 @router.post("/text-to-speech")
-def text_to_speech_shell(
-    _: TextToSpeechRequest,
+def text_to_speech(
+    request: TextToSpeechRequest,
     __: UserRecord = Depends(get_current_user),
-) -> None:
-    """Shell endpoint returning a stable NOT_IMPLEMENTED contract."""
-    raise NotImplementedFeatureError(feature="text-to-speech", target_phase="ai-provider integration")
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    """Convert text into speech audio and return the binary media response."""
+    service_result = synthesize_text_to_speech(
+        TextToSpeechInput(
+            text=request.text,
+            voice=request.voice,
+            format=request.format,
+            speed=request.speed,
+        ),
+        settings,
+    )
+    return Response(
+        content=service_result.audio_bytes,
+        media_type=service_result.content_type,
+        headers={"Content-Disposition": f"inline; filename=tts.{request.format}"},
+    )

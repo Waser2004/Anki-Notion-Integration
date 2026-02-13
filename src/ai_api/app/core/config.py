@@ -49,6 +49,7 @@ class Settings:
     startup_admin_password: str
     openai_api_key: str
     openai_model: str
+    openai_tts_model: str
     openai_timeout_seconds: float
     openai_base_url: str
 
@@ -73,6 +74,7 @@ class Settings:
             startup_admin_password=os.getenv("AI_API_STARTUP_ADMIN_PASSWORD", ""),
             openai_api_key=os.getenv("AI_API_OPENAI_API_KEY", ""),
             openai_model=os.getenv("AI_API_OPENAI_MODEL", "gpt-5-mini-2025-08-07"),
+            openai_tts_model=os.getenv("AI_API_OPENAI_TTS_MODEL", "gpt-4o-mini-tts"),
             openai_timeout_seconds=float(os.getenv("AI_API_OPENAI_TIMEOUT_SECONDS", "20")),
             openai_base_url=os.getenv("AI_API_OPENAI_BASE_URL", "https://api.openai.com/v1"),
         )

@@ -15,6 +15,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from app.core.config import Settings
 from app.core.errors import ApiError
 from app.main import create_app
+from app.services.text_to_speech import TextToSpeechResult
 
 
 class ShellApiTests(unittest.TestCase):
@@ -37,6 +38,7 @@ class ShellApiTests(unittest.TestCase):
             startup_admin_password="",
             openai_api_key="test-key",
             openai_model="gpt-5-mini-2025-08-07",
+            openai_tts_model="gpt-4o-mini-tts",
             openai_timeout_seconds=20.0,
             openai_base_url="https://api.openai.com/v1",
         )
@@ -78,6 +80,13 @@ class ShellApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json()["error"]["code"], "UNAUTHORIZED")
+
+        tts_response = self.client.post(
+            "/v1/static/text-to-speech",
+            json={"text": "Define a group.", "voice": "alloy", "format": "mp3", "speed": 1.0},
+        )
+        self.assertEqual(tts_response.status_code, 401)
+        self.assertEqual(tts_response.json()["error"]["code"], "UNAUTHORIZED")
 
     def test_generate_question_variants_success_contract(self) -> None:
         mocked_provider_response = {
@@ -154,6 +163,7 @@ class ShellApiTests(unittest.TestCase):
             startup_admin_password="",
             openai_api_key="",
             openai_model="gpt-5-mini-2025-08-07",
+            openai_tts_model="gpt-4o-mini-tts",
             openai_timeout_seconds=20.0,
             openai_base_url="https://api.openai.com/v1",
         )
@@ -165,15 +175,72 @@ class ShellApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "AI_PROVIDER_NOT_CONFIGURED")
 
-    def test_remaining_shell_endpoints_return_not_implemented_contract(self) -> None:
-        tts_response = self.client.post(
+    def test_text_to_speech_success_contract(self) -> None:
+        with patch(
+            "app.api.v1.static.synthesize_text_to_speech",
+            return_value=TextToSpeechResult(
+                audio_bytes=b"FAKE_MP3_BYTES",
+                content_type="audio/mpeg",
+                model="gpt-4o-mini-tts",
+                voice="alloy",
+                format="mp3",
+            ),
+        ):
+            tts_response = self.client.post(
+                "/v1/static/text-to-speech",
+                headers=self._auth_headers(),
+                json={"text": "Define a group.", "voice": "alloy", "format": "mp3", "speed": 1.0},
+            )
+
+        self.assertEqual(tts_response.status_code, 200)
+        self.assertEqual(tts_response.content, b"FAKE_MP3_BYTES")
+        self.assertEqual(tts_response.headers["content-type"], "audio/mpeg")
+        self.assertIn("X-Request-Id", tts_response.headers)
+
+    def test_text_to_speech_provider_error_contract(self) -> None:
+        with patch(
+            "app.api.v1.static.synthesize_text_to_speech",
+            side_effect=ApiError(
+                status_code=502,
+                code="UPSTREAM_AI_ERROR",
+                message="OpenAI returned an error response",
+            ),
+        ):
+            response = self.client.post(
+                "/v1/static/text-to-speech",
+                headers=self._auth_headers(),
+                json={"text": "Define a group.", "voice": "alloy", "format": "mp3", "speed": 1.0},
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["error"]["code"], "UPSTREAM_AI_ERROR")
+
+    def test_text_to_speech_missing_api_key_contract(self) -> None:
+        self.client.app.state.settings = Settings(
+            app_name="Noteck AI API Test",
+            environment="test",
+            database_url=self.client.app.state.settings.database_url,
+            jwt_secret="test-secret",
+            access_token_ttl_seconds=3600,
+            refresh_token_ttl_seconds=7200,
+            enable_startup_admin_seed=False,
+            startup_admin_email="",
+            startup_admin_password="",
+            openai_api_key="",
+            openai_model="gpt-5-mini-2025-08-07",
+            openai_tts_model="gpt-4o-mini-tts",
+            openai_timeout_seconds=20.0,
+            openai_base_url="https://api.openai.com/v1",
+        )
+        response = self.client.post(
             "/v1/static/text-to-speech",
             headers=self._auth_headers(),
             json={"text": "Define a group.", "voice": "alloy", "format": "mp3", "speed": 1.0},
         )
-        self.assertEqual(tts_response.status_code, 501)
-        self.assertEqual(tts_response.json()["error"]["code"], "NOT_IMPLEMENTED")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "AI_PROVIDER_NOT_CONFIGURED")
 
+    def test_remaining_shell_endpoints_return_not_implemented_contract(self) -> None:
         eval_response = self.client.post(
             "/v1/active/evaluate-answer",
             headers=self._auth_headers(),
@@ -189,13 +256,29 @@ class ShellApiTests(unittest.TestCase):
         self.assertEqual(eval_response.json()["error"]["code"], "NOT_IMPLEMENTED")
 
     def test_shell_endpoints_validate_request_payloads(self) -> None:
-        response = self.client.post(
+        empty_text_response = self.client.post(
             "/v1/static/text-to-speech",
             headers=self._auth_headers(),
             json={"text": "", "voice": "alloy", "format": "mp3", "speed": 1.0},
         )
-        self.assertEqual(response.status_code, 422)
-        self.assertEqual(response.json()["error"]["code"], "INVALID_REQUEST")
+        self.assertEqual(empty_text_response.status_code, 422)
+        self.assertEqual(empty_text_response.json()["error"]["code"], "INVALID_REQUEST")
+
+        speed_response = self.client.post(
+            "/v1/static/text-to-speech",
+            headers=self._auth_headers(),
+            json={"text": "Define a group.", "voice": "alloy", "format": "mp3", "speed": 2.5},
+        )
+        self.assertEqual(speed_response.status_code, 422)
+        self.assertEqual(speed_response.json()["error"]["code"], "INVALID_REQUEST")
+
+        format_response = self.client.post(
+            "/v1/static/text-to-speech",
+            headers=self._auth_headers(),
+            json={"text": "Define a group.", "voice": "alloy", "format": "ogg", "speed": 1.0},
+        )
+        self.assertEqual(format_response.status_code, 422)
+        self.assertEqual(format_response.json()["error"]["code"], "INVALID_REQUEST")
 
     def test_openapi_contains_all_v1_routes(self) -> None:
         response = self.client.get("/openapi.json")

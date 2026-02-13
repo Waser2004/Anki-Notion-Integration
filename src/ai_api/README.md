@@ -5,7 +5,8 @@ This service hosts the external API for AI features used by the Noteck Anki add-
 Current milestone status:
 - Auth endpoints are fully implemented.
 - `generate-question-variants` is implemented with OpenAI (HTTP).
-- Remaining non-auth AI endpoints are scaffolded shells returning `NOT_IMPLEMENTED`.
+- `text-to-speech` is implemented with OpenAI audio synthesis.
+- `evaluate-answer` remains a scaffolded shell returning `NOT_IMPLEMENTED`.
 - Environment is local/dev focused and uses SQLite by default.
 
 ## Endpoint status matrix
@@ -17,7 +18,7 @@ Current milestone status:
 | `POST /v1/auth/refresh` | Implemented |
 | `GET /v1/auth/me` | Implemented |
 | `POST /v1/static/generate-question-variants` | Implemented |
-| `POST /v1/static/text-to-speech` | Shell (`501 NOT_IMPLEMENTED`) |
+| `POST /v1/static/text-to-speech` | Implemented |
 | `POST /v1/active/evaluate-answer` | Shell (`501 NOT_IMPLEMENTED`) |
 
 ## Local setup
@@ -41,6 +42,7 @@ AI_API_STARTUP_ADMIN_EMAIL=
 AI_API_STARTUP_ADMIN_PASSWORD=
 AI_API_OPENAI_API_KEY=
 AI_API_OPENAI_MODEL=gpt-5-mini-2025-08-07
+AI_API_OPENAI_TTS_MODEL=gpt-4o-mini-tts
 AI_API_OPENAI_TIMEOUT_SECONDS=20
 AI_API_OPENAI_BASE_URL=https://api.openai.com/v1
 ```
@@ -58,6 +60,24 @@ OpenAPI docs:
 
 ```bash
 python -m unittest discover -s src/ai_api/tests
+```
+
+## Text-to-speech usage
+
+Example request against the running API:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/v1/static/text-to-speech" \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"What is photosynthesis?","voice":"alloy","format":"mp3","speed":1.0}' \
+  --output tts_sample.mp3
+```
+
+Generate sample audio and auto-play it locally:
+
+```bash
+python scripts/request_text_to_speech.py --base-url http://127.0.0.1:8000
 ```
 
 ## Run with Docker

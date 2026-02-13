@@ -35,6 +35,7 @@ class AuthApiTests(unittest.TestCase):
             startup_admin_password="",
             openai_api_key="test-key",
             openai_model="gpt-5-mini-2025-08-07",
+            openai_tts_model="gpt-4o-mini-tts",
             openai_timeout_seconds=20.0,
             openai_base_url="https://api.openai.com/v1",
         )
