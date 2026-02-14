@@ -1,0 +1,29 @@
+services:
+  ai_api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    container_name: noteck_ai_api_dev
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env.dev
+    volumes:
+      # Mount source code for hot reload in development.
+      - ./app:/app/app
+      - ./tests:/app/tests
+      # Persist local SQLite data between restarts.
+      - ai_api_dev_data:/app/data
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+    restart: unless-stopped
+
+volumes:
+  ai_api_dev_data:
