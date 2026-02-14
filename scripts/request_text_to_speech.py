@@ -98,7 +98,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--password", default=AI_API_STARTUP_ADMIN_PASSWORD, help="Admin login password.")
     parser.add_argument(
         "--text",
-        default="What is photosynthesis?",
+        default="What is the capital of France and what is their current president?",
         help="Text to synthesize into speech.",
     )
     parser.add_argument("--voice", default="alloy", help="OpenAI voice name.")

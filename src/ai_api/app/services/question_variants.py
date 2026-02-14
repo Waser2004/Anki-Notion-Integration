@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +11,7 @@ from pydantic import BaseModel
 
 from app.core.config import Settings
 from app.core.errors import ApiError
+from app.services.utils import TokenUsage, _extract_usage, _load_system_prompt
 
 
 PROMPT_VERSION = "varq_v3"
@@ -45,14 +45,6 @@ class QuestionVariantItem:
 
     question: str
     type: str = "open"
-
-
-@dataclass(frozen=True)
-class TokenUsage:
-    """Token accounting data returned by the upstream AI provider."""
-
-    input_tokens: int
-    output_tokens: int
 
 
 @dataclass(frozen=True)
@@ -109,7 +101,11 @@ def _build_openai_request(payload: QuestionVariantGenerationInput) -> dict[str, 
         constraints.append("Keep each variant roughly similar in length to the source question")
 
     constraints_text = "; ".join(constraints) if constraints else "No extra constraints"
-    system_prompt = _load_system_prompt()
+    system_prompt = _load_system_prompt(
+        SYSTEM_PROMPT_FILE,
+        load_error_message="Failed to load question variant system prompt",
+        empty_error_message="Question variant system prompt file is empty",
+    )
     user_prompt = (
         f"Original question: {payload.question}\n"
         f"Reference answer: {payload.answer}\n"
@@ -128,29 +124,6 @@ def _build_openai_request(payload: QuestionVariantGenerationInput) -> dict[str, 
         ],
         "text_format": _StructuredVariantOutput,
     }
-
-
-@lru_cache(maxsize=1)
-def _load_system_prompt() -> str:
-    """Load and cache the versioned system prompt text from disk."""
-    try:
-        prompt = SYSTEM_PROMPT_FILE.read_text(encoding="utf-8").strip()
-    except OSError as exc:
-        raise ApiError(
-            status_code=500,
-            code="PROMPT_LOAD_ERROR",
-            message="Failed to load question variant system prompt",
-            details={"error_type": exc.__class__.__name__},
-        ) from exc
-
-    if not prompt:
-        raise ApiError(
-            status_code=500,
-            code="PROMPT_LOAD_ERROR",
-            message="Question variant system prompt file is empty",
-        )
-
-    return prompt
 
 
 def _call_openai_responses_parse(body: dict[str, Any], settings: Settings, api_key: str) -> dict[str, Any]:
@@ -300,20 +273,3 @@ def _build_fallback_questions(payload: QuestionVariantGenerationInput, count: in
     ]
 
     return [templates[index % len(templates)] for index in range(count)]
-
-
-def _extract_usage(response_json: dict[str, Any]) -> TokenUsage:
-    """Read token usage fields from normalized structured output."""
-    usage_payload = response_json.get("usage")
-    if not isinstance(usage_payload, dict):
-        return TokenUsage(input_tokens=0, output_tokens=0)
-
-    input_tokens = usage_payload.get("input_tokens")
-    output_tokens = usage_payload.get("output_tokens")
-
-    if not isinstance(input_tokens, int) or input_tokens < 0:
-        input_tokens = 0
-    if not isinstance(output_tokens, int) or output_tokens < 0:
-        output_tokens = 0
-
-    return TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens)

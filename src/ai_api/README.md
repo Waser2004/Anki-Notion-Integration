@@ -6,7 +6,7 @@ Current milestone status:
 - Auth endpoints are fully implemented.
 - `generate-question-variants` is implemented with OpenAI (HTTP).
 - `text-to-speech` is implemented with OpenAI audio synthesis.
-- `evaluate-answer` remains a scaffolded shell returning `NOT_IMPLEMENTED`.
+- `evaluate-answer` is implemented with OpenAI answer evaluation.
 - Environment is local/dev focused and uses SQLite by default.
 
 ## Endpoint status matrix
@@ -19,7 +19,7 @@ Current milestone status:
 | `GET /v1/auth/me` | Implemented |
 | `POST /v1/static/generate-question-variants` | Implemented |
 | `POST /v1/static/text-to-speech` | Implemented |
-| `POST /v1/active/evaluate-answer` | Shell (`501 NOT_IMPLEMENTED`) |
+| `POST /v1/active/evaluate-answer` | Implemented |
 
 ## Local setup
 
@@ -78,6 +78,23 @@ Generate sample audio and auto-play it locally:
 
 ```bash
 python scripts/request_text_to_speech.py --base-url http://127.0.0.1:8000
+```
+
+## Evaluate-answer usage
+
+Example request against the running API:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/v1/active/evaluate-answer" \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"What is a group?","expected_answer":"A set with a binary operation that is associative, has identity and inverses.","user_answer":"A set with an operation, identity, and inverses.","grading":{"strictness":"medium","allow_paraphrase":true},"output_format":"short"}'
+```
+
+Run the local helper script:
+
+```bash
+python scripts/request_evaluate_answer.py --base-url http://127.0.0.1:8000
 ```
 
 ## Run with Docker

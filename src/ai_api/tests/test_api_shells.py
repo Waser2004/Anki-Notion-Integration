@@ -88,6 +88,19 @@ class ShellApiTests(unittest.TestCase):
         self.assertEqual(tts_response.status_code, 401)
         self.assertEqual(tts_response.json()["error"]["code"], "UNAUTHORIZED")
 
+        eval_response = self.client.post(
+            "/v1/active/evaluate-answer",
+            json={
+                "question": "What is a group?",
+                "expected_answer": "A set with operation, identity, inverses, and associativity.",
+                "user_answer": "A set with operation and identity.",
+                "grading": {"strictness": "medium", "allow_paraphrase": True},
+                "output_format": "short",
+            },
+        )
+        self.assertEqual(eval_response.status_code, 401)
+        self.assertEqual(eval_response.json()["error"]["code"], "UNAUTHORIZED")
+
     def test_generate_question_variants_success_contract(self) -> None:
         mocked_provider_response = {
             "items": [
@@ -240,8 +253,85 @@ class ShellApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "AI_PROVIDER_NOT_CONFIGURED")
 
-    def test_remaining_shell_endpoints_return_not_implemented_contract(self) -> None:
-        eval_response = self.client.post(
+    def test_evaluate_answer_success_contract(self) -> None:
+        mocked_provider_response = {
+            "verdict": "partial",
+            "score": 0.7,
+            "feedback": "Good, but you missed associativity.",
+            "missing_points": ["associativity"],
+            "usage": {"input_tokens": 98, "output_tokens": 120},
+            "model": "gpt-5-mini-2025-08-07",
+        }
+        with patch(
+            "app.services.evaluate_answer._call_openai_responses_parse",
+            return_value=mocked_provider_response,
+        ):
+            eval_response = self.client.post(
+                "/v1/active/evaluate-answer",
+                headers=self._auth_headers(),
+                json={
+                    "question": "What is a group?",
+                    "expected_answer": "A set with operation, identity, inverses, and associativity.",
+                    "user_answer": "A set with operation and identity.",
+                    "grading": {"strictness": "medium", "allow_paraphrase": True},
+                    "output_format": "short",
+                },
+            )
+
+        self.assertEqual(eval_response.status_code, 200)
+        payload = eval_response.json()
+        self.assertEqual(payload["verdict"], "partial")
+        self.assertEqual(payload["score"], 0.7)
+        self.assertEqual(payload["feedback"], "Good, but you missed associativity.")
+        self.assertEqual(payload["missing_points"], ["associativity"])
+        self.assertEqual(payload["meta"]["prompt_version"], "eval_v2")
+        self.assertEqual(payload["meta"]["model"], "gpt-5-mini-2025-08-07")
+        self.assertEqual(payload["meta"]["usage"]["input_tokens"], 98)
+        self.assertEqual(payload["meta"]["usage"]["output_tokens"], 120)
+        self.assertIn("X-Request-Id", eval_response.headers)
+
+    def test_evaluate_answer_provider_error_contract(self) -> None:
+        with patch(
+            "app.services.evaluate_answer._call_openai_responses_parse",
+            side_effect=ApiError(
+                status_code=502,
+                code="UPSTREAM_AI_ERROR",
+                message="OpenAI returned an error response",
+            ),
+        ):
+            response = self.client.post(
+                "/v1/active/evaluate-answer",
+                headers=self._auth_headers(),
+                json={
+                    "question": "What is a group?",
+                    "expected_answer": "A set with operation, identity, inverses, and associativity.",
+                    "user_answer": "A set with operation and identity.",
+                    "grading": {"strictness": "medium", "allow_paraphrase": True},
+                    "output_format": "short",
+                },
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["error"]["code"], "UPSTREAM_AI_ERROR")
+
+    def test_evaluate_answer_missing_api_key_contract(self) -> None:
+        self.client.app.state.settings = Settings(
+            app_name="Noteck AI API Test",
+            environment="test",
+            database_url=self.client.app.state.settings.database_url,
+            jwt_secret="test-secret",
+            access_token_ttl_seconds=3600,
+            refresh_token_ttl_seconds=7200,
+            enable_startup_admin_seed=False,
+            startup_admin_email="",
+            startup_admin_password="",
+            openai_api_key="",
+            openai_model="gpt-5-mini-2025-08-07",
+            openai_tts_model="gpt-4o-mini-tts",
+            openai_timeout_seconds=20.0,
+            openai_base_url="https://api.openai.com/v1",
+        )
+        response = self.client.post(
             "/v1/active/evaluate-answer",
             headers=self._auth_headers(),
             json={
@@ -252,8 +342,8 @@ class ShellApiTests(unittest.TestCase):
                 "output_format": "short",
             },
         )
-        self.assertEqual(eval_response.status_code, 501)
-        self.assertEqual(eval_response.json()["error"]["code"], "NOT_IMPLEMENTED")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "AI_PROVIDER_NOT_CONFIGURED")
 
     def test_shell_endpoints_validate_request_payloads(self) -> None:
         empty_text_response = self.client.post(
@@ -279,6 +369,20 @@ class ShellApiTests(unittest.TestCase):
         )
         self.assertEqual(format_response.status_code, 422)
         self.assertEqual(format_response.json()["error"]["code"], "INVALID_REQUEST")
+
+        invalid_eval_response = self.client.post(
+            "/v1/active/evaluate-answer",
+            headers=self._auth_headers(),
+            json={
+                "question": "",
+                "expected_answer": "A set with operation, identity, inverses, and associativity.",
+                "user_answer": "A set with operation and identity.",
+                "grading": {"strictness": "strict", "allow_paraphrase": True},
+                "output_format": "brief",
+            },
+        )
+        self.assertEqual(invalid_eval_response.status_code, 422)
+        self.assertEqual(invalid_eval_response.json()["error"]["code"], "INVALID_REQUEST")
 
     def test_openapi_contains_all_v1_routes(self) -> None:
         response = self.client.get("/openapi.json")
