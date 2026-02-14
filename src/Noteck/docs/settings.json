@@ -8,7 +8,7 @@
         {
           "key": "notion_api_key",
           "type": "text",
-          "name": "Notion API key",
+          "name": "Notion Integration key",
           "description": "API key used to access Notion; stored securely in the OS keychain.",
           "default": "",
           "storage": "keyring"

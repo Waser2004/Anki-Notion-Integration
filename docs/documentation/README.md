@@ -5,6 +5,7 @@
 - `database.md`: SQLite schema and migration model.
 - `notion_client.md`: Notion API client behavior and API reference.
 - `parser.md`: Card payload parsing rules and card-type behavior.
+- `notion_blocks_and_highlighting.md`: Supported Notion block types and rich-text highlight handling.
 
 Related high-level docs:
 
