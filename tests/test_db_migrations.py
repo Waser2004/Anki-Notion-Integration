@@ -45,10 +45,18 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("notion_page_id", override_columns)
             self.assertIn("card_type", override_columns)
             self.assertIn("updated_at", override_columns)
+            ai_asset_columns = _column_names(connection, "card_ai_assets")
+            self.assertIn("notion_block_id", ai_asset_columns)
+            self.assertIn("direction", ai_asset_columns)
+            self.assertIn("source_hash", ai_asset_columns)
+            self.assertIn("variant_settings_hash", ai_asset_columns)
+            self.assertIn("tts_settings_hash", ai_asset_columns)
+            self.assertIn("variants_json", ai_asset_columns)
+            self.assertIn("audio_files_json", ai_asset_columns)
         finally:
             connection.close()
 
-    def test_initialize_records_schema_version_1(self) -> None:
+    def test_initialize_records_schema_version_2(self) -> None:
         db = Database(self._db_path)
         db.initialize()
 
@@ -57,7 +65,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             latest_version = connection.execute(
                 "SELECT MAX(version) FROM schema_migrations"
             ).fetchone()[0]
-            self.assertEqual(latest_version, 1)
+            self.assertEqual(latest_version, 2)
         finally:
             connection.close()
 
@@ -71,7 +79,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             versions = connection.execute(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
-            self.assertEqual([int(row[0]) for row in versions], [1])
+            self.assertEqual([int(row[0]) for row in versions], [1, 2])
 
             page_columns = _column_names(connection, "pages")
             self.assertIn("anki_deck_id", page_columns)

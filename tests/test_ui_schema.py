@@ -29,7 +29,7 @@ class UiSchemaTests(unittest.TestCase):
         self.assertGreaterEqual(len(schema.pages), 1)
         self.assertEqual(schema.pages[0].factory, "build_page")
         page_keys = [page.key for page in schema.pages]
-        self.assertEqual(page_keys[:4], ["pages", "cards", "image_occlusion", "settings"])
+        self.assertEqual(page_keys[:5], ["pages", "cards", "image_occlusion", "ai", "settings"])
 
     def test_missing_pages_key(self) -> None:
         path = self._write_schema({})

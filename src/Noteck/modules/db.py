@@ -74,6 +74,25 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX IF NOT EXISTS idx_card_type_overrides_page ON card_type_overrides(notion_page_id)",
         ),
     ),
+    Migration(
+        version=2,
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS card_ai_assets (
+                notion_block_id TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                source_hash TEXT NOT NULL,
+                variant_settings_hash TEXT NOT NULL,
+                tts_settings_hash TEXT NOT NULL,
+                variants_json TEXT NOT NULL DEFAULT '[]',
+                audio_files_json TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (notion_block_id, direction)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_card_ai_assets_block ON card_ai_assets(notion_block_id)",
+        ),
+    ),
 )
 
 

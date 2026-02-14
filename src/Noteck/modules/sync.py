@@ -6,6 +6,7 @@ import base64
 from dataclasses import dataclass, field
 import hashlib
 import html
+import json
 from pathlib import Path
 import re
 import sqlite3
@@ -14,9 +15,27 @@ from typing import Any, Callable
 from urllib import request
 from urllib.parse import urlsplit
 
-from .card_types import BASIC, CLOZE, DEFAULT_SELECTABLE_CARD_TYPES, normalize_card_type, normalize_default_selectable_card_type
+from .ai_api_client import AiApiClient
+from .ai_assets_store import CardAiAssetsStore
+from .ai_settings import AiSettings, AiSettingsStore
+from .card_types import (
+    BASIC,
+    BASIC_REVERSED,
+    CLOZE,
+    DEFAULT_SELECTABLE_CARD_TYPES,
+    INPUT,
+    normalize_card_type,
+    normalize_default_selectable_card_type,
+)
 from .card_type_overrides import CardTypeOverrideStore
-from .cards import MODEL_NAME_BASIC, ensure_notion_toggle_model
+from .cards import (
+    AI_FORWARD_AUDIO_FIELD,
+    AI_FORWARD_VARIANTS_FIELD,
+    AI_REVERSE_AUDIO_FIELD,
+    AI_REVERSE_VARIANTS_FIELD,
+    MODEL_NAME_BASIC,
+    ensure_notion_toggle_model,
+)
 from .db import Database
 from .notion_client import NotionBlock, NotionClient
 from .parser import ToggleCardPayload, parse_page_to_cards
@@ -60,6 +79,15 @@ class EnabledPage:
     default_card_type: str | None
 
 
+@dataclass(frozen=True)
+class AiSyncRuntime:
+    """Shared AI runtime dependencies and resolved settings for one sync run."""
+
+    settings: AiSettings
+    client: AiApiClient
+    assets_store: CardAiAssetsStore
+
+
 SyncDoneCallback = Callable[[SyncResult], None]
 SyncProgressCallback = Callable[[str], None]
 SyncCancelCheck = Callable[[], bool]
@@ -99,6 +127,7 @@ def sync_notion_to_anki(
 
     store = SettingsStore(db, profile_name=profile_name)
     card_type_override_store = CardTypeOverrideStore(db)
+    ai_runtime = _build_ai_sync_runtime(db, profile_name=profile_name)
     global_default_card_type = normalize_default_selectable_card_type(store.get_value("default_card_type"))
     enable_cloze = bool(store.get_value("enable_cloze_parsing"))
 
@@ -166,6 +195,7 @@ def sync_notion_to_anki(
                     page_id=page_id,
                     deck_id=deck_id,
                     client=client,
+                    ai_runtime=ai_runtime,
                     stats=stats,
                     default_card_type=page_default_card_type,
                     card_type_overrides=page_card_type_overrides,
@@ -181,6 +211,7 @@ def sync_notion_to_anki(
                     page_id=page_id,
                     deck_id=deck_id,
                     client=client,
+                    ai_runtime=ai_runtime,
                     stats=stats,
                     default_card_type=page_default_card_type,
                     card_type_overrides=page_card_type_overrides,
@@ -422,6 +453,7 @@ def _sync_changed_page_fast(
     page_id: str,
     deck_id: int,
     client: NotionClient,
+    ai_runtime: AiSyncRuntime,
     stats: SyncStats,
     default_card_type: str,
     card_type_overrides: dict[str, str],
@@ -497,6 +529,7 @@ def _sync_changed_page_fast(
             page_id=page_id,
             deck_id=deck_id,
             payload=payload,
+            ai_runtime=ai_runtime,
             stats=stats,
             should_cancel=should_cancel,
         )
@@ -542,6 +575,7 @@ def _sync_changed_page_fast(
                     page_id=page_id,
                     deck_id=deck_id,
                     payload=payload,
+                    ai_runtime=ai_runtime,
                     stats=stats,
                     should_cancel=should_cancel,
                 )
@@ -558,6 +592,7 @@ def _repair_missing_notes_for_unchanged_page(
     page_id: str,
     deck_id: int,
     client: NotionClient,
+    ai_runtime: AiSyncRuntime,
     stats: SyncStats,
     default_card_type: str,
     card_type_overrides: dict[str, str],
@@ -621,6 +656,7 @@ def _repair_missing_notes_for_unchanged_page(
             page_id=page_id,
             deck_id=deck_id,
             payload=payload,
+            ai_runtime=ai_runtime,
             stats=stats,
             should_cancel=should_cancel,
         )
@@ -658,6 +694,7 @@ def _sync_one_payload(
     page_id: str,
     deck_id: int,
     payload: ToggleCardPayload,
+    ai_runtime: AiSyncRuntime,
     stats: SyncStats,
     should_cancel: SyncCancelCheck | None = None,
 ) -> tuple[SyncStats, list[str], bool]:
@@ -671,62 +708,376 @@ def _sync_one_payload(
         return _replace_stats(stats, cards_skipped=stats.cards_skipped + 1), [], False
 
     try:
-        model_name = payload.model_name or MODEL_NAME_BASIC
+        ai_warnings: list[str] = []
+        enriched_payload, ai_warnings = _enrich_payload_with_ai(
+            payload=payload,
+            collection=collection,
+            ai_runtime=ai_runtime,
+        )
+        model_name = enriched_payload.model_name or MODEL_NAME_BASIC
         model = _model_by_name(collection, model_name)
         if model is None:
             raise SyncError(f"Anki note type '{model_name}' is not available.")
 
         if mapping is None:
-            prepared_payload = _prepare_payload_media(collection, payload)
+            prepared_payload = _prepare_payload_media(collection, enriched_payload)
             note_id = _create_note(collection, model, deck_id, prepared_payload)
             _upsert_card_mapping(db, prepared_payload, note_id, page_id)
-            return _replace_stats(stats, cards_created=stats.cards_created + 1), [], False
+            return _replace_stats(stats, cards_created=stats.cards_created + 1), ai_warnings, False
 
         note_id = mapping["anki_note_id"]
         if note_id is None:
-            prepared_payload = _prepare_payload_media(collection, payload)
+            prepared_payload = _prepare_payload_media(collection, enriched_payload)
             note_id = _create_note(collection, model, deck_id, prepared_payload)
             _upsert_card_mapping(db, prepared_payload, note_id, page_id)
-            return _replace_stats(stats, cards_created=stats.cards_created + 1), [], False
+            return _replace_stats(stats, cards_created=stats.cards_created + 1), ai_warnings, False
 
         note = _get_note(collection, note_id)
         if note is None:
             stats = _replace_stats(stats, cards_missing_note=stats.cards_missing_note + 1)
-            prepared_payload = _prepare_payload_media(collection, payload)
+            prepared_payload = _prepare_payload_media(collection, enriched_payload)
             note_id = _create_note(collection, model, deck_id, prepared_payload)
             _upsert_card_mapping(db, prepared_payload, note_id, page_id)
-            return _replace_stats(stats, cards_created=stats.cards_created + 1), [], False
+            return _replace_stats(stats, cards_created=stats.cards_created + 1), ai_warnings, False
 
-        if mapping["card_type"] != payload.card_type:
+        if mapping["card_type"] != enriched_payload.card_type:
             _delete_note(collection, note_id)
-            prepared_payload = _prepare_payload_media(collection, payload)
+            prepared_payload = _prepare_payload_media(collection, enriched_payload)
             recreated_note_id = _create_note(collection, model, deck_id, prepared_payload)
             _upsert_card_mapping(db, prepared_payload, recreated_note_id, page_id)
-            return _replace_stats(stats, cards_updated=stats.cards_updated + 1), [], False
+            return _replace_stats(stats, cards_updated=stats.cards_updated + 1), ai_warnings, False
 
         _ensure_note_cards_in_deck(collection, note_id, deck_id)
-        if mapping["content_hash"] == payload.content_hash:
+        if mapping["content_hash"] == enriched_payload.content_hash:
             if _note_back_needs_mermaid_theme_upgrade(note):
-                prepared_payload = _prepare_payload_media(collection, payload)
+                prepared_payload = _prepare_payload_media(collection, enriched_payload)
                 _apply_payload_to_note(note, prepared_payload)
                 _update_note(collection, note)
                 _upsert_card_mapping(db, prepared_payload, note_id, page_id)
-                return _replace_stats(stats, cards_updated=stats.cards_updated + 1), [], False
+                return _replace_stats(stats, cards_updated=stats.cards_updated + 1), ai_warnings, False
             # Backfill older notes that still contain sync-time media placeholders.
             if _note_back_contains_pending_media(note):
                 note["Back"] = _prepare_back_html_media(collection, _safe_note_field(note, "Back"))
                 _update_note(collection, note)
-                _upsert_card_mapping(db, payload, note_id, page_id)
-                return _replace_stats(stats, cards_updated=stats.cards_updated + 1), [], False
-            return _replace_stats(stats, cards_unchanged=stats.cards_unchanged + 1), [], False
+                _upsert_card_mapping(db, enriched_payload, note_id, page_id)
+                return _replace_stats(stats, cards_updated=stats.cards_updated + 1), ai_warnings, False
+            return _replace_stats(stats, cards_unchanged=stats.cards_unchanged + 1), ai_warnings, False
 
-        prepared_payload = _prepare_payload_media(collection, payload)
+        prepared_payload = _prepare_payload_media(collection, enriched_payload)
         _apply_payload_to_note(note, prepared_payload)
         _update_note(collection, note)
         _upsert_card_mapping(db, prepared_payload, note_id, page_id)
-        return _replace_stats(stats, cards_updated=stats.cards_updated + 1), [], False
+        return _replace_stats(stats, cards_updated=stats.cards_updated + 1), ai_warnings, False
     except Exception as exc:
         return stats, [f"Block {payload.notion_block_id}: {exc}"], False
+
+
+def _build_ai_sync_runtime(db: Database, profile_name: str | None) -> AiSyncRuntime:
+    """Build AI runtime helpers once per sync run."""
+    settings_store = AiSettingsStore(db, profile_name=profile_name)
+    return AiSyncRuntime(
+        settings=settings_store.get_settings(),
+        client=AiApiClient(settings_store),
+        assets_store=CardAiAssetsStore(db),
+    )
+
+
+def _enrich_payload_with_ai(
+    *,
+    payload: ToggleCardPayload,
+    collection: Any,
+    ai_runtime: AiSyncRuntime,
+) -> tuple[ToggleCardPayload, list[str]]:
+    """Inject AI variants/audio fields into eligible payloads before sync mapping checks."""
+    if payload.card_type not in {BASIC, INPUT, BASIC_REVERSED}:
+        return payload, []
+
+    # AI features not enabled return
+    settings = ai_runtime.settings
+    if not settings.generate_variants_enabled and not settings.tts_enabled:
+        return payload, []
+
+    fields = dict(payload.fields) if payload.fields else {
+        "Front": payload.front_html,
+        "Back": payload.back_html,
+        "Notion Block ID": payload.notion_block_id,
+    }
+    block_id = payload.notion_block_id
+    warnings: list[str] = []
+    media_dir = _resolve_media_directory(collection)
+
+    # Always initialize AI fields so disabling a feature clears stale note values.
+    fields[AI_FORWARD_VARIANTS_FIELD] = ""
+    fields[AI_FORWARD_AUDIO_FIELD] = ""
+    if payload.card_type == BASIC_REVERSED:
+        fields[AI_REVERSE_VARIANTS_FIELD] = ""
+        fields[AI_REVERSE_AUDIO_FIELD] = ""
+
+    for direction, question_text, answer_text, variants_field, audio_field in _ai_direction_payloads(payload, fields):
+        # Compute card hashes to determine when changes have occurred that require regeneration.
+        source_hash = _sha256_text(f"{question_text}\n---\n{answer_text}")
+        variants_settings_hash = _sha256_json(
+            {
+                "enabled": settings.generate_variants_enabled,
+                "number": settings.generate_number_variations,
+                "style": settings.generate_style,
+                "difficulty": settings.generate_difficulty,
+                "no_trick_questions": settings.generate_no_trick_questions,
+                "keep_length_similar": settings.generate_keep_length_similar,
+            }
+        )
+        tts_settings_hash = _sha256_json(
+            {
+                "enabled": settings.tts_enabled,
+                "voice": settings.tts_voice,
+                "speed": settings.tts_speed,
+            }
+        )
+        cached = ai_runtime.assets_store.get_asset(block_id, direction)
+
+        # validate cached question variants
+        variants: list[str] = []
+        if settings.generate_variants_enabled:
+            # No changes accured since last generation, reuse cached generations.
+            if _is_cached_variants_valid(cached, source_hash, variants_settings_hash):
+                variants = list(cached.variants)
+
+            # Changes detected or no cache, generate new variants.
+            else:
+                try:
+                    variants = ai_runtime.client.generate_question_variants(
+                        base_url=settings.api_base_url,
+                        question=question_text,
+                        answer=answer_text,
+                        number_variations=settings.generate_number_variations,
+                        style=settings.generate_style,
+                        difficulty=settings.generate_difficulty,
+                        no_trick_questions=settings.generate_no_trick_questions,
+                        keep_length_similar=settings.generate_keep_length_similar,
+                    )
+                except Exception as exc:
+                    warnings.append(f"Block {block_id} [{direction}] variants failed: {exc}")
+                    variants = [question_text]
+        else:
+            variants = [question_text]
+
+        # validate cached question audio generations
+        audio_files: list[str] = []
+        if settings.tts_enabled and variants:
+            # No changes accured since last generation, reuse cached generations.
+            if _is_cached_audio_valid(
+                cached=cached,
+                source_hash=source_hash,
+                variants_settings_hash=variants_settings_hash,
+                tts_settings_hash=tts_settings_hash,
+                expected_count=len(variants),
+                media_dir=media_dir,
+            ):
+                audio_files = list(cached.audio_files)
+
+            # Changes detected or no cache, generate new variants.
+            else:
+                audio_files = _generate_tts_audio_files(
+                    collection=collection,
+                    base_url=settings.api_base_url,
+                    ai_client=ai_runtime.client,
+                    block_id=block_id,
+                    direction=direction,
+                    voice=settings.tts_voice,
+                    speed=settings.tts_speed,
+                    variants=variants,
+                    warnings=warnings,
+                )
+
+        # Persist the new generations in the assets store for future sync.
+        ai_runtime.assets_store.upsert_asset(
+            notion_block_id=block_id,
+            direction=direction,
+            source_hash=source_hash,
+            variant_settings_hash=variants_settings_hash,
+            tts_settings_hash=tts_settings_hash,
+            variants=variants,
+            audio_files=audio_files,
+        )
+
+        # update hash fields
+        fields[variants_field] = _encode_json_b64(variants)
+        fields[audio_field] = _encode_json_b64(audio_files)
+
+    # Return an enriched payload with AI-generated fields for mapping and syncing.
+    enriched_payload = ToggleCardPayload(
+        notion_page_id=payload.notion_page_id,
+        notion_block_id=payload.notion_block_id,
+        front_html=payload.front_html,
+        back_html=payload.back_html,
+        card_type=payload.card_type,
+        model_name=payload.model_name,
+        fields=fields,
+        content_hash=_compute_sync_payload_content_hash(payload, fields),
+        last_edited_time=payload.last_edited_time,
+    )
+    return enriched_payload, warnings
+
+
+def _ai_direction_payloads(
+    payload: ToggleCardPayload,
+    fields: dict[str, str],
+) -> list[tuple[str, str, str, str, str]]:
+    """Return normalized AI prompt/audio targets for one payload by card direction."""
+    front_text = _html_to_plain(fields.get("Front", payload.front_html))
+    back_text = _html_to_plain(fields.get("Back", payload.back_html))
+    expected_answer = _html_to_plain(fields.get("Expected Answer", "")) or back_text
+
+    if payload.card_type == BASIC_REVERSED:
+        return [
+            ("forward", front_text, back_text, AI_FORWARD_VARIANTS_FIELD, AI_FORWARD_AUDIO_FIELD),
+            ("reverse", back_text, front_text, AI_REVERSE_VARIANTS_FIELD, AI_REVERSE_AUDIO_FIELD),
+        ]
+    if payload.card_type == INPUT:
+        return [("forward", front_text, expected_answer, AI_FORWARD_VARIANTS_FIELD, AI_FORWARD_AUDIO_FIELD)]
+    return [("forward", front_text, back_text, AI_FORWARD_VARIANTS_FIELD, AI_FORWARD_AUDIO_FIELD)]
+
+
+def _generate_tts_audio_files(
+    *,
+    collection: Any,
+    base_url: str,
+    ai_client: AiApiClient,
+    block_id: str,
+    direction: str,
+    voice: str,
+    speed: float,
+    variants: list[str],
+    warnings: list[str],
+) -> list[str]:
+    """Generate audio files for all provided variants and return media filenames."""
+    media_dir = _resolve_media_directory(collection)
+    if media_dir is None:
+        warnings.append(f"Block {block_id} [{direction}] TTS skipped: Anki media directory is unavailable.")
+        return []
+
+    generated_files: list[str] = []
+    for index, variant in enumerate(variants):
+        try:
+            audio_bytes = ai_client.text_to_speech(
+                base_url=base_url,
+                text=variant,
+                voice=voice,
+                speed=speed,
+                output_format="mp3",
+            )
+        except Exception as exc:
+            warnings.append(f"Block {block_id} [{direction}] TTS failed on variant {index + 1}: {exc}")
+            return []
+
+        filename = _tts_media_filename(
+            block_id=block_id,
+            direction=direction,
+            index=index,
+            variant=variant,
+            voice=voice,
+            speed=speed,
+        )
+        _write_media_file(media_dir, filename, audio_bytes)
+        generated_files.append(filename)
+
+    return generated_files
+
+
+def _tts_media_filename(
+    *,
+    block_id: str,
+    direction: str,
+    index: int,
+    variant: str,
+    voice: str,
+    speed: float,
+) -> str:
+    """Build deterministic media filename for generated TTS output."""
+    digest = _sha256_text(f"{block_id}|{direction}|{index}|{voice}|{speed:.2f}|{variant}")[:20]
+    return f"noteck_ai_tts_{digest}.mp3"
+
+
+def _is_cached_variants_valid(
+    cached: Any,
+    source_hash: str,
+    variants_settings_hash: str,
+) -> bool:
+    """Return whether cached variants can be reused for current input/settings."""
+    if cached is None:
+        return False
+    if cached.source_hash != source_hash:
+        return False
+    if cached.variant_settings_hash != variants_settings_hash:
+        return False
+    return bool(cached.variants)
+
+
+def _is_cached_audio_valid(
+    *,
+    cached: Any,
+    source_hash: str,
+    variants_settings_hash: str,
+    tts_settings_hash: str,
+    expected_count: int,
+    media_dir: Path | None,
+) -> bool:
+    """Return whether cached audio references are reusable for the active configuration."""
+    if cached is None:
+        return False
+    if cached.source_hash != source_hash:
+        return False
+    if cached.variant_settings_hash != variants_settings_hash:
+        return False
+    if cached.tts_settings_hash != tts_settings_hash:
+        return False
+    if len(cached.audio_files) != expected_count:
+        return False
+    if media_dir is None:
+        return False
+    for filename in cached.audio_files:
+        if not (media_dir / filename).exists():
+            return False
+    return True
+
+
+def _encode_json_b64(values: list[str]) -> str:
+    """Encode list payload into compact URL-safe base64 JSON."""
+    serialized = json.dumps(values, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(serialized).decode("ascii").rstrip("=")
+
+
+def _compute_sync_payload_content_hash(payload: ToggleCardPayload, fields: dict[str, str]) -> str:
+    """Compute deterministic hash for sync payload including AI-injected fields."""
+    model_name = payload.model_name or MODEL_NAME_BASIC
+    normalized_pairs = [f"{key}\x1f{fields[key]}" for key in sorted(fields.keys())]
+    joined = "\x1e".join(normalized_pairs)
+    raw = (
+        f"{payload.notion_page_id}\x1d"
+        f"{payload.notion_block_id}\x1d"
+        f"{payload.card_type}\x1d"
+        f"{model_name}\x1d"
+        f"{joined}"
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _html_to_plain(value: str) -> str:
+    """Convert one HTML fragment to plain text for prompt construction."""
+    without_tags = re.sub(r"<[^>]+>", " ", value or "")
+    decoded = html.unescape(without_tags)
+    return " ".join(decoded.split())
+
+
+def _sha256_text(value: str) -> str:
+    """Return sha256 hex digest for one text input."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _sha256_json(value: dict[str, Any]) -> str:
+    """Return deterministic sha256 digest for one JSON-serializable payload."""
+    serialized = json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return _sha256_text(serialized)
 
 
 def _with_children(block: NotionBlock, children: list[NotionBlock]) -> NotionBlock:

@@ -19,6 +19,12 @@
       "factory": "build_page"
     },
     {
+      "key": "ai",
+      "name": "AI",
+      "module": ".ai_ui",
+      "factory": "build_page"
+    },
+    {
       "key": "settings",
       "name": "Settings",
       "module": ".settings_ui",

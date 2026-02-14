@@ -10,6 +10,7 @@ from .modules.cards import ensure_notion_toggle_model
 from .modules.settings import create_default_settings
 from .modules.notion_client import NotionClient
 from .modules.dependency_installer import install_keyring_dependency_with_progress
+from .modules.review_ai import initialize_review_ai_hooks
 
 # This project is primarily an Anki add-on, but we also want the core modules to be
 # importable in plain Python test environments where `aqt` is not available.
@@ -24,6 +25,7 @@ except ModuleNotFoundError:
     QTimer = None
     initialize_ui = None
     mirror_checkbox_indicator_to_tree_indicators = None
+    initialize_review_ai_hooks = None
 
 __all__ = ["Database", "NotionClient", "create_default_settings"]
 
@@ -44,6 +46,8 @@ def on_profile_did_open() -> None:
         ensure_notion_toggle_model(mw)
         if callable(initialize_ui):
             initialize_ui()
+        if callable(initialize_review_ai_hooks):
+            initialize_review_ai_hooks(mw=mw, db_path=db_path, gui_hooks=gui_hooks)
 
         # Install keyring dependency if needed and surface progress in the UI.
         install_keyring_dependency_with_progress(parent=mw)

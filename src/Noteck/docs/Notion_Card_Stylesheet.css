@@ -240,6 +240,47 @@ th {
 	outline: none;
 }
 
+.noteck-ai-question {
+	display: inline-block;
+	width: 100%;
+}
+
+.noteck-ai-eval {
+	margin: 0.9em auto 0;
+	max-width: 700px;
+	padding: 0.7em 0.9em;
+	border: 1px solid var(--notion-border);
+	border-radius: 8px;
+	background: var(--notion-code-bg);
+}
+
+.noteck-ai-eval-status,
+.noteck-ai-eval-verdict,
+.noteck-ai-eval-feedback {
+	margin-top: 0.3em;
+}
+
+.noteck-ai-eval-progress {
+	margin-top: 0.35em;
+	width: 100%;
+	height: 8px;
+	border-radius: 999px;
+	background: var(--notion-border);
+	overflow: hidden;
+}
+
+#noteck-ai-eval-progress-fill {
+	height: 100%;
+	width: 0%;
+	background: var(--hl-green);
+	transition: width 140ms ease-in-out;
+}
+
+.noteck-ai-eval-missing {
+	margin-top: 0.45em;
+	padding-left: 1.2em;
+}
+
 /* ============================================================
    Typography
    ============================================================ */

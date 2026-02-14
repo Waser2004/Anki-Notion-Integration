@@ -21,6 +21,11 @@ CSS_MANAGED_MARKER = "/* Noteck card model css */"
 # Module files live in Noteck/modules while shared resources stay in Noteck/docs.
 _PACKAGE_STYLESHEET_PATH = Path(__file__).resolve().parents[1] / "docs" / "Notion_Card_Stylesheet.css"
 
+AI_FORWARD_VARIANTS_FIELD = "AI Forward Variants B64"
+AI_FORWARD_AUDIO_FIELD = "AI Forward Audio B64"
+AI_REVERSE_VARIANTS_FIELD = "AI Reverse Variants B64"
+AI_REVERSE_AUDIO_FIELD = "AI Reverse Audio B64"
+
 
 @dataclass(frozen=True)
 class ModelTemplate:
@@ -39,16 +44,144 @@ class ModelDefinition:
     model_type: int = 0
 
 
+def _front_template(
+    *,
+    question_field: str,
+    variants_field: str,
+    audio_field: str,
+    direction: str,
+    include_typed_input: bool = False,
+) -> str:
+    """Build a front template that applies variant cycling and optional audio autoplay."""
+    typed_input_html = '<div class="notion-input">{{type:Expected Answer}}</div>' if include_typed_input else ""
+    return (
+        f'<div class="notion-front"><span class="noteck-ai-question">{{{{{question_field}}}}}</span></div>'
+        f"{typed_input_html}"
+        f'<div class="noteck-ai-meta" data-block-id="{{{{Notion Block ID}}}}" data-direction="{direction}" '
+        f'data-variants="{{{{{variants_field}}}}}" data-audio="{{{{{audio_field}}}}}"></div>'
+        "<script>"
+        "(function(){"
+        "function decodeList(value){"
+        "if(!value){return [];}"
+        "var normalized=String(value).trim().replace(/-/g,'+').replace(/_/g,'/');"
+        "if(!normalized){return [];}"
+        "while(normalized.length%4){normalized+='=';}"
+        "try{var decoded=atob(normalized);var parsed=JSON.parse(decoded);"
+        "if(Array.isArray(parsed)){return parsed.filter(function(x){return typeof x==='string';});}}"
+        "catch(_err){return [];}"
+        "return [];"
+        "}"
+        "var meta=document.querySelector('.noteck-ai-meta');"
+        "var questionNode=document.querySelector('.noteck-ai-question');"
+        "if(!meta||!questionNode){return;}"
+        "var blockId=String(meta.getAttribute('data-block-id')||'');"
+        "var direction=String(meta.getAttribute('data-direction')||'forward');"
+        "var variants=decodeList(meta.getAttribute('data-variants'));"
+        "var audioFiles=decodeList(meta.getAttribute('data-audio'));"
+        "var isBack=window.noteckIsBack===true;"
+        "if(!variants.length){if(isBack){window.noteckIsBack=false;}return;}"
+        "var storageKey='noteck:variant:'+blockId+':'+direction;"
+        "var sessionKey=storageKey+':current';"
+        "var rawIndex=isBack?sessionStorage.getItem(sessionKey):localStorage.getItem(storageKey);"
+        "var idx=parseInt(rawIndex||'0',10);"
+        "if(!Number.isFinite(idx)||idx<0){idx=0;}"
+        "idx=idx%variants.length;"
+        "questionNode.textContent=variants[idx];"
+        "if(isBack){window.noteckIsBack=false;return;}"
+        "sessionStorage.setItem(sessionKey,String(idx));"
+        "if(variants.length>1){localStorage.setItem(storageKey,String((idx+1)%variants.length));}"
+        "if(idx<audioFiles.length&&audioFiles[idx]){"
+        "try{var audio=new Audio(audioFiles[idx]);audio.play();}catch(_audioErr){}}"
+        "})();"
+        "</script>"
+    )
+
+
+def _basic_back_template(answer_field: str) -> str:
+    """Build a back template that preserves the variant chosen on front."""
+    return (
+        "<script>window.noteckIsBack=true;</script>"
+        "{{FrontSide}}<hr id=\"answer\">"
+        f"<div class=\"notion-back\">{{{{{answer_field}}}}}</div>"
+    )
+
+
+def _input_back_template() -> str:
+    """Build an Input back template with placeholders for AI evaluation output."""
+    return (
+        "<script>window.noteckIsBack=true;</script>"
+        "{{FrontSide}}<hr id=\"answer\">"
+        "<div class=\"notion-back\">{{Back}}</div>"
+        "<div id=\"noteck-ai-eval\" class=\"noteck-ai-eval\">"
+        "<div id=\"noteck-ai-eval-status\" class=\"noteck-ai-eval-status\">Waiting for AI evaluation...</div>"
+        "<div class=\"noteck-ai-eval-progress\"><div id=\"noteck-ai-eval-progress-fill\"></div></div>"
+        "<div id=\"noteck-ai-eval-verdict\" class=\"noteck-ai-eval-verdict\"></div>"
+        "<div id=\"noteck-ai-eval-feedback\" class=\"noteck-ai-eval-feedback\"></div>"
+        "<ul id=\"noteck-ai-eval-missing\" class=\"noteck-ai-eval-missing\"></ul>"
+        "</div>"
+        "<script>"
+        "(function(){"
+        "function byId(id){return document.getElementById(id);}"
+        "function clearChildren(el){if(!el){return;}while(el.firstChild){el.removeChild(el.firstChild);}}"
+        "window.NoteckAiEvalRenderLoading=function(){"
+        "var status=byId('noteck-ai-eval-status');"
+        "var fill=byId('noteck-ai-eval-progress-fill');"
+        "var verdict=byId('noteck-ai-eval-verdict');"
+        "var feedback=byId('noteck-ai-eval-feedback');"
+        "var missing=byId('noteck-ai-eval-missing');"
+        "if(status){status.textContent='Evaluating answer...';}"
+        "if(fill){fill.style.width='0%';}"
+        "if(verdict){verdict.textContent='';}"
+        "if(feedback){feedback.textContent='';}"
+        "clearChildren(missing);"
+        "};"
+        "window.NoteckAiEvalRenderError=function(message){"
+        "var status=byId('noteck-ai-eval-status');"
+        "if(status){status.textContent=String(message||'AI evaluation failed.');}"
+        "};"
+        "window.NoteckAiEvalRender=function(payload){"
+        "if(!payload||typeof payload!=='object'){window.NoteckAiEvalRenderError('Invalid AI response.');return;}"
+        "var score=Number(payload.score||0);if(!Number.isFinite(score)){score=0;}score=Math.max(0,Math.min(1,score));"
+        "var verdictText=String(payload.verdict||'incorrect');"
+        "var feedbackText=String(payload.feedback||'');"
+        "var status=byId('noteck-ai-eval-status');"
+        "var fill=byId('noteck-ai-eval-progress-fill');"
+        "var verdict=byId('noteck-ai-eval-verdict');"
+        "var feedback=byId('noteck-ai-eval-feedback');"
+        "var missing=byId('noteck-ai-eval-missing');"
+        "if(status){status.textContent='AI evaluation completed.';}"
+        "if(fill){fill.style.width=String(Math.round(score*100))+'%';}"
+        "if(verdict){verdict.textContent='Verdict: '+verdictText+' ('+String(Math.round(score*100))+'%)';}"
+        "if(feedback){feedback.textContent=feedbackText;}"
+        "clearChildren(missing);"
+        "if(missing&&Array.isArray(payload.missing_points)){"
+        "payload.missing_points.forEach(function(item){"
+        "if(typeof item!=='string'||!item.trim()){return;}"
+        "var li=document.createElement('li');li.textContent=item;missing.appendChild(li);"
+        "});"
+        "}"
+        "};"
+        "window.NoteckAiEvalRenderLoading();"
+        "})();"
+        "</script>"
+    )
+
+
 _MODEL_DEFINITIONS: tuple[ModelDefinition, ...] = (
     # Basic card type
     ModelDefinition(
         name=MODEL_NAME_BASIC,
-        fields=("Front", "Back", "Notion Block ID"),
+        fields=("Front", "Back", "Notion Block ID", AI_FORWARD_VARIANTS_FIELD, AI_FORWARD_AUDIO_FIELD),
         templates=(
             ModelTemplate(
                 name=BASIC_CARD_NAME,
-                front='<div class="notion-front">{{Front}}</div>',
-                back='{{FrontSide}}<hr id="answer"><div class="notion-back">{{Back}}</div>',
+                front=_front_template(
+                    question_field="Front",
+                    variants_field=AI_FORWARD_VARIANTS_FIELD,
+                    audio_field=AI_FORWARD_AUDIO_FIELD,
+                    direction="forward",
+                ),
+                back=_basic_back_template("Back"),
             ),
         ),
         model_type=0,
@@ -57,17 +190,35 @@ _MODEL_DEFINITIONS: tuple[ModelDefinition, ...] = (
     # Basic+Reversed card type
     ModelDefinition(
         name=MODEL_NAME_BASIC_REVERSED,
-        fields=("Front", "Back", "Notion Block ID"),
+        fields=(
+            "Front",
+            "Back",
+            "Notion Block ID",
+            AI_FORWARD_VARIANTS_FIELD,
+            AI_FORWARD_AUDIO_FIELD,
+            AI_REVERSE_VARIANTS_FIELD,
+            AI_REVERSE_AUDIO_FIELD,
+        ),
         templates=(
             ModelTemplate(
                 name=BASIC_CARD_NAME,
-                front='<div class="notion-front">{{Front}}</div>',
-                back='{{FrontSide}}<hr id="answer"><div class="notion-back">{{Back}}</div>',
+                front=_front_template(
+                    question_field="Front",
+                    variants_field=AI_FORWARD_VARIANTS_FIELD,
+                    audio_field=AI_FORWARD_AUDIO_FIELD,
+                    direction="forward",
+                ),
+                back=_basic_back_template("Back"),
             ),
             ModelTemplate(
                 name=REVERSED_CARD_NAME,
-                front='<div class="notion-front">{{Back}}</div>',
-                back='{{FrontSide}}<hr id="answer"><div class="notion-back">{{Front}}</div>',
+                front=_front_template(
+                    question_field="Back",
+                    variants_field=AI_REVERSE_VARIANTS_FIELD,
+                    audio_field=AI_REVERSE_AUDIO_FIELD,
+                    direction="reverse",
+                ),
+                back=_basic_back_template("Front"),
             ),
         ),
         model_type=0,
@@ -76,18 +227,18 @@ _MODEL_DEFINITIONS: tuple[ModelDefinition, ...] = (
     # Input card type
     ModelDefinition(
         name=MODEL_NAME_INPUT,
-        fields=("Front", "Back", "Expected Answer", "Notion Block ID"),
+        fields=("Front", "Back", "Expected Answer", "Notion Block ID", AI_FORWARD_VARIANTS_FIELD, AI_FORWARD_AUDIO_FIELD),
         templates=(
             ModelTemplate(
                 name=INPUT_CARD_NAME,
-                front=(
-                    '<div class="notion-front">{{Front}}</div>'
-                    '<div class="notion-input">{{type:Expected Answer}}</div>'
+                front=_front_template(
+                    question_field="Front",
+                    variants_field=AI_FORWARD_VARIANTS_FIELD,
+                    audio_field=AI_FORWARD_AUDIO_FIELD,
+                    direction="forward",
+                    include_typed_input=True,
                 ),
-                back=(
-                    '{{FrontSide}}<hr id="answer">'
-                    '<div class="notion-back">{{Back}}</div>'
-                ),
+                back=_input_back_template(),
             ),
         ),
         model_type=0,
