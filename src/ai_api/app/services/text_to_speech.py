@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+import re
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
 from app.core.config import Settings
 from app.core.errors import ApiError
+from app.services.utils import _load_system_prompt
+
+
+_CLOZE_PROMPT_VERSION = "tts_cloze_v1"
+_CLOZE_SYSTEM_PROMPT_FILE = Path(__file__).resolve().parents[1] / "prompts" / f"{_CLOZE_PROMPT_VERSION}_system_prompt.txt"
+_CLOZE_MARKER_RE = re.compile(r"\{\{c\d+::.*?(?:::.*?)?\}\}")
+_CLOZE_PLACEHOLDER_TOKEN = "[blank]"
 
 
 @dataclass(frozen=True)
@@ -18,6 +27,7 @@ class TextToSpeechInput:
     voice: str
     format: str
     speed: float
+    parse_cloze: bool = False
 
 
 @dataclass(frozen=True)
@@ -47,14 +57,37 @@ def synthesize_text_to_speech(payload: TextToSpeechInput, settings: Settings) ->
         timeout=settings.openai_timeout_seconds,
     )
 
+    synthesized_text = payload.text
+    instructions: str | None = None
+    if payload.parse_cloze:
+        synthesized_text = _replace_cloze_markers_with_placeholder(payload.text)
+        instructions = _load_system_prompt(
+            _CLOZE_SYSTEM_PROMPT_FILE,
+            load_error_message="Failed to load cloze text-to-speech system prompt",
+            empty_error_message="Cloze text-to-speech system prompt file is empty",
+        ).replace("{placeholder}", _CLOZE_PLACEHOLDER_TOKEN)
+
+    request_payload: dict[str, object] = {
+        "model": settings.openai_tts_model,
+        "voice": payload.voice,
+        "input": synthesized_text,
+        "response_format": payload.format,
+        "speed": payload.speed,
+    }
+    fallback_payload: dict[str, object] | None = None
+    if instructions:
+        request_payload["instructions"] = instructions
+        # Keep one fallback payload for environments where `instructions` is unsupported.
+        fallback_payload = {
+            "model": settings.openai_tts_model,
+            "voice": payload.voice,
+            "input": synthesized_text,
+            "response_format": payload.format,
+            "speed": payload.speed,
+        }
+
     try:
-        response = client.audio.speech.create(
-            model=settings.openai_tts_model,
-            voice=payload.voice,
-            input=payload.text,
-            response_format=payload.format,
-            speed=payload.speed,
-        )
+        response = _create_speech_response(client, request_payload, fallback_payload=fallback_payload)
     except APITimeoutError as exc:
         raise ApiError(
             status_code=502,
@@ -86,6 +119,28 @@ def synthesize_text_to_speech(payload: TextToSpeechInput, settings: Settings) ->
         voice=payload.voice,
         format=payload.format,
     )
+
+
+def _replace_cloze_markers_with_placeholder(text: str) -> str:
+    """Replace Anki-style cloze markers with one deterministic spoken placeholder."""
+    replaced = _CLOZE_MARKER_RE.sub(_CLOZE_PLACEHOLDER_TOKEN, text)
+    normalized = " ".join(replaced.split())
+    return normalized if normalized else _CLOZE_PLACEHOLDER_TOKEN
+
+
+def _create_speech_response(
+    client: OpenAI,
+    request_payload: dict[str, object],
+    *,
+    fallback_payload: dict[str, object] | None,
+) -> object:
+    """Call TTS once and retry without instructions when the SDK rejects that argument."""
+    try:
+        return client.audio.speech.create(**request_payload)
+    except TypeError:
+        if fallback_payload is None:
+            raise
+        return client.audio.speech.create(**fallback_payload)
 
 
 def _extract_audio_bytes(response: object) -> bytes:

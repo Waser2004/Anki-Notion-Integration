@@ -175,6 +175,55 @@ class AiApiClient:
         
         return variants
 
+    def generate_cloze_variants(
+        self,
+        *,
+        base_url: str,
+        cloze_text: str,
+        number_variations: int,
+        style: str,
+        difficulty: str,
+        no_trick_questions: bool,
+        keep_length_similar: bool,
+        language: str = "en",
+    ) -> list[str]:
+        """Generate cloze variants and return ordered cloze text list."""
+        payload = self._request_json(
+            method="POST",
+            base_url=base_url,
+            path="/v1/static/generate-cloze-variants",
+            body={
+                "cloze_text": cloze_text,
+                "number_variations": number_variations,
+                "language": language,
+                "style": style,
+                "difficulty": difficulty,
+                "constraints": {
+                    "no_trick_questions": bool(no_trick_questions),
+                    "keep_length_similar": bool(keep_length_similar),
+                },
+            },
+            require_auth=True,
+            retry_on_unauthorized=True,
+        )
+
+        # Extract and validate cloze variants from response payload.
+        items = payload.get("items")
+        if not isinstance(items, list):
+            raise AiApiError("Cloze variant response did not include an items list.")
+
+        variants: list[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            cloze_value = item.get("cloze_text")
+            if isinstance(cloze_value, str) and cloze_value.strip():
+                variants.append(cloze_value.strip())
+        if not variants:
+            raise AiApiError("Cloze variant response contained no valid cloze text values.")
+
+        return variants
+
     def text_to_speech(
         self,
         *,
@@ -183,6 +232,7 @@ class AiApiClient:
         voice: str,
         speed: float,
         output_format: str = "mp3",
+        parse_cloze: bool = False,
     ) -> bytes:
         """Generate speech audio bytes for one text input."""
         status_code, headers, body_bytes = self._request_raw(
@@ -194,6 +244,7 @@ class AiApiClient:
                 "voice": voice,
                 "format": output_format,
                 "speed": speed,
+                "parse_cloze": bool(parse_cloze),
             },
             require_auth=True,
             retry_on_unauthorized=True,

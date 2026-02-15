@@ -5,6 +5,7 @@ This service hosts the external API for AI features used by the Noteck Anki add-
 Current milestone status:
 - Auth endpoints are fully implemented.
 - `generate-question-variants` is implemented with OpenAI (HTTP).
+- `generate-cloze-variants` is implemented with OpenAI (HTTP).
 - `text-to-speech` is implemented with OpenAI audio synthesis.
 - `evaluate-answer` is implemented with OpenAI answer evaluation.
 - Environment is local/dev focused and uses SQLite by default.
@@ -18,6 +19,7 @@ Current milestone status:
 | `POST /v1/auth/refresh` | Implemented |
 | `GET /v1/auth/me` | Implemented |
 | `POST /v1/static/generate-question-variants` | Implemented |
+| `POST /v1/static/generate-cloze-variants` | Implemented |
 | `POST /v1/static/text-to-speech` | Implemented |
 | `POST /v1/active/evaluate-answer` | Implemented |
 
@@ -70,8 +72,29 @@ Example request against the running API:
 curl -X POST "http://127.0.0.1:8000/v1/static/text-to-speech" \
   -H "Authorization: Bearer <ACCESS_TOKEN>" \
   -H "Content-Type: application/json" \
-  -d '{"text":"What is photosynthesis?","voice":"alloy","format":"mp3","speed":1.0}' \
+  -d '{"text":"What is photosynthesis?","voice":"alloy","format":"mp3","speed":1.0,"parse_cloze":false}' \
   --output tts_sample.mp3
+```
+
+For cloze input, enable parser mode so cloze markers are converted to placeholder sounds:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/v1/static/text-to-speech" \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"Paris is the capital of {{c1::France}}.","voice":"alloy","format":"mp3","speed":1.0,"parse_cloze":true}' \
+  --output tts_cloze_sample.mp3
+```
+
+## Generate-cloze-variants usage
+
+Example request against the running API:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/v1/static/generate-cloze-variants" \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"cloze_text":"Paris is the capital of {{c1::France}}.","number_variations":3,"language":"en","style":"exam","difficulty":"medium","constraints":{"no_trick_questions":true,"keep_length_similar":true}}'
 ```
 
 Generate sample audio and auto-play it locally:
@@ -160,6 +183,8 @@ make prod-down
 ## Notes
 
 - `POST /v1/static/generate-question-variants` calls OpenAI over HTTP and returns `502` for upstream provider errors.
+- `POST /v1/static/generate-cloze-variants` calls OpenAI over HTTP and preserves original cloze targets.
+- `POST /v1/static/text-to-speech` accepts optional `parse_cloze` for cloze-marker placeholder synthesis.
 - The error envelope is stable across routes:
 
 ```json

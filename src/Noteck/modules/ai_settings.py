@@ -19,6 +19,13 @@ AI_GENERATE_VARIANTS_DIFFICULTY_KEY = "ai_generate_variants_difficulty"
 AI_GENERATE_VARIANTS_NO_TRICK_KEY = "ai_generate_variants_no_trick_questions"
 AI_GENERATE_VARIANTS_KEEP_LENGTH_KEY = "ai_generate_variants_keep_length_similar"
 
+AI_GENERATE_CLOZE_VARIANTS_ENABLED_KEY = "ai_generate_cloze_variants_enabled"
+AI_GENERATE_CLOZE_VARIANTS_NUMBER_KEY = "ai_generate_cloze_variants_number_variations"
+AI_GENERATE_CLOZE_VARIANTS_STYLE_KEY = "ai_generate_cloze_variants_style"
+AI_GENERATE_CLOZE_VARIANTS_DIFFICULTY_KEY = "ai_generate_cloze_variants_difficulty"
+AI_GENERATE_CLOZE_VARIANTS_NO_TRICK_KEY = "ai_generate_cloze_variants_no_trick_questions"
+AI_GENERATE_CLOZE_VARIANTS_KEEP_LENGTH_KEY = "ai_generate_cloze_variants_keep_length_similar"
+
 AI_TTS_ENABLED_KEY = "ai_tts_enabled"
 AI_TTS_VOICE_KEY = "ai_tts_voice"
 AI_TTS_SPEED_KEY = "ai_tts_speed"
@@ -87,6 +94,13 @@ class AiSettings:
     generate_difficulty: str
     generate_no_trick_questions: bool
     generate_keep_length_similar: bool
+
+    generate_cloze_variants_enabled: bool
+    generate_cloze_number_variations: int
+    generate_cloze_style: str
+    generate_cloze_difficulty: str
+    generate_cloze_no_trick_questions: bool
+    generate_cloze_keep_length_similar: bool
 
     tts_enabled: bool
     tts_voice: str
@@ -206,6 +220,34 @@ class AiSettingsStore:
             ),
             generate_keep_length_similar=_parse_bool(
                 self._db.get_setting(AI_GENERATE_VARIANTS_KEEP_LENGTH_KEY),
+                default=True,
+            ),
+            generate_cloze_variants_enabled=_parse_bool(
+                self._db.get_setting(AI_GENERATE_CLOZE_VARIANTS_ENABLED_KEY),
+                default=False,
+            ),
+            generate_cloze_number_variations=_parse_int(
+                self._db.get_setting(AI_GENERATE_CLOZE_VARIANTS_NUMBER_KEY),
+                default=3,
+                minimum=1,
+                maximum=20,
+            ),
+            generate_cloze_style=_normalized_choice(
+                self._db.get_setting(AI_GENERATE_CLOZE_VARIANTS_STYLE_KEY),
+                "exam",
+                AI_VARIANT_STYLE_OPTIONS,
+            ),
+            generate_cloze_difficulty=_normalized_choice(
+                self._db.get_setting(AI_GENERATE_CLOZE_VARIANTS_DIFFICULTY_KEY),
+                "medium",
+                ("easy", "medium", "hard"),
+            ),
+            generate_cloze_no_trick_questions=_parse_bool(
+                self._db.get_setting(AI_GENERATE_CLOZE_VARIANTS_NO_TRICK_KEY),
+                default=True,
+            ),
+            generate_cloze_keep_length_similar=_parse_bool(
+                self._db.get_setting(AI_GENERATE_CLOZE_VARIANTS_KEEP_LENGTH_KEY),
                 default=True,
             ),
             tts_enabled=_parse_bool(

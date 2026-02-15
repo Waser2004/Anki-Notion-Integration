@@ -789,12 +789,12 @@ def _enrich_payload_with_ai(
     ai_runtime: AiSyncRuntime,
 ) -> tuple[ToggleCardPayload, list[str]]:
     """Inject AI variants/audio fields into eligible payloads before sync mapping checks."""
-    if payload.card_type not in {BASIC, INPUT, BASIC_REVERSED}:
+    if payload.card_type not in {BASIC, INPUT, BASIC_REVERSED, CLOZE}:
         return payload, []
 
-    # AI features not enabled return
     settings = ai_runtime.settings
-    if not settings.generate_variants_enabled and not settings.tts_enabled:
+    variants_enabled = _variants_enabled_for_card_type(payload.card_type, settings)
+    if not variants_enabled and not settings.tts_enabled:
         return payload, []
 
     fields = dict(payload.fields) if payload.fields else {
@@ -813,31 +813,34 @@ def _enrich_payload_with_ai(
         fields[AI_REVERSE_VARIANTS_FIELD] = ""
         fields[AI_REVERSE_AUDIO_FIELD] = ""
 
-    for direction, question_text, answer_text, variants_field, audio_field in _ai_direction_payloads(payload, fields):
+    for (
+        direction,
+        question_text,
+        answer_text,
+        variants_field,
+        audio_field,
+        use_cloze_variant_generation,
+        parse_cloze_tts,
+    ) in _ai_direction_payloads(payload, fields):
         # Compute card hashes to determine when changes have occurred that require regeneration.
         source_hash = _sha256_text(f"{question_text}\n---\n{answer_text}")
+        variants_settings_payload = _variant_settings_payload(payload.card_type, settings)
         variants_settings_hash = _sha256_json(
-            {
-                "enabled": settings.generate_variants_enabled,
-                "number": settings.generate_number_variations,
-                "style": settings.generate_style,
-                "difficulty": settings.generate_difficulty,
-                "no_trick_questions": settings.generate_no_trick_questions,
-                "keep_length_similar": settings.generate_keep_length_similar,
-            }
+            variants_settings_payload
         )
         tts_settings_hash = _sha256_json(
             {
                 "enabled": settings.tts_enabled,
                 "voice": settings.tts_voice,
                 "speed": settings.tts_speed,
+                "parse_cloze": bool(parse_cloze_tts),
             }
         )
         cached = ai_runtime.assets_store.get_asset(block_id, direction)
 
         # validate cached question variants
         variants: list[str] = []
-        if settings.generate_variants_enabled:
+        if variants_enabled:
             # No changes accured since last generation, reuse cached generations.
             if _is_cached_variants_valid(cached, source_hash, variants_settings_hash):
                 variants = list(cached.variants)
@@ -845,16 +848,27 @@ def _enrich_payload_with_ai(
             # Changes detected or no cache, generate new variants.
             else:
                 try:
-                    variants = ai_runtime.client.generate_question_variants(
-                        base_url=settings.api_base_url,
-                        question=question_text,
-                        answer=answer_text,
-                        number_variations=settings.generate_number_variations,
-                        style=settings.generate_style,
-                        difficulty=settings.generate_difficulty,
-                        no_trick_questions=settings.generate_no_trick_questions,
-                        keep_length_similar=settings.generate_keep_length_similar,
-                    )
+                    if use_cloze_variant_generation:
+                        variants = ai_runtime.client.generate_cloze_variants(
+                            base_url=settings.api_base_url,
+                            cloze_text=question_text,
+                            number_variations=settings.generate_cloze_number_variations,
+                            style=settings.generate_cloze_style,
+                            difficulty=settings.generate_cloze_difficulty,
+                            no_trick_questions=settings.generate_cloze_no_trick_questions,
+                            keep_length_similar=settings.generate_cloze_keep_length_similar,
+                        )
+                    else:
+                        variants = ai_runtime.client.generate_question_variants(
+                            base_url=settings.api_base_url,
+                            question=question_text,
+                            answer=answer_text,
+                            number_variations=settings.generate_number_variations,
+                            style=settings.generate_style,
+                            difficulty=settings.generate_difficulty,
+                            no_trick_questions=settings.generate_no_trick_questions,
+                            keep_length_similar=settings.generate_keep_length_similar,
+                        )
                 except Exception as exc:
                     warnings.append(f"Block {block_id} [{direction}] variants failed: {exc}")
                     variants = [question_text]
@@ -887,6 +901,7 @@ def _enrich_payload_with_ai(
                     speed=settings.tts_speed,
                     variants=variants,
                     warnings=warnings,
+                    parse_cloze=parse_cloze_tts,
                 )
 
         # Persist the new generations in the assets store for future sync.
@@ -922,20 +937,65 @@ def _enrich_payload_with_ai(
 def _ai_direction_payloads(
     payload: ToggleCardPayload,
     fields: dict[str, str],
-) -> list[tuple[str, str, str, str, str]]:
+) -> list[tuple[str, str, str, str, str, bool, bool]]:
     """Return normalized AI prompt/audio targets for one payload by card direction."""
     front_text = _html_to_plain(fields.get("Front", payload.front_html))
     back_text = _html_to_plain(fields.get("Back", payload.back_html))
     expected_answer = _html_to_plain(fields.get("Expected Answer", "")) or back_text
 
+    if payload.card_type == CLOZE:
+        cloze_text = str(fields.get("Text") or "")
+        extra_text = _html_to_plain(str(fields.get("Extra") or ""))
+        return [
+            (
+                "forward",
+                cloze_text,
+                extra_text,
+                AI_FORWARD_VARIANTS_FIELD,
+                AI_FORWARD_AUDIO_FIELD,
+                True,
+                True,
+            )
+        ]
+
     if payload.card_type == BASIC_REVERSED:
         return [
-            ("forward", front_text, back_text, AI_FORWARD_VARIANTS_FIELD, AI_FORWARD_AUDIO_FIELD),
-            ("reverse", back_text, front_text, AI_REVERSE_VARIANTS_FIELD, AI_REVERSE_AUDIO_FIELD),
+            ("forward", front_text, back_text, AI_FORWARD_VARIANTS_FIELD, AI_FORWARD_AUDIO_FIELD, False, False),
+            ("reverse", back_text, front_text, AI_REVERSE_VARIANTS_FIELD, AI_REVERSE_AUDIO_FIELD, False, False),
         ]
     if payload.card_type == INPUT:
-        return [("forward", front_text, expected_answer, AI_FORWARD_VARIANTS_FIELD, AI_FORWARD_AUDIO_FIELD)]
-    return [("forward", front_text, back_text, AI_FORWARD_VARIANTS_FIELD, AI_FORWARD_AUDIO_FIELD)]
+        return [("forward", front_text, expected_answer, AI_FORWARD_VARIANTS_FIELD, AI_FORWARD_AUDIO_FIELD, False, False)]
+    return [("forward", front_text, back_text, AI_FORWARD_VARIANTS_FIELD, AI_FORWARD_AUDIO_FIELD, False, False)]
+
+
+def _variants_enabled_for_card_type(card_type: str, settings: AiSettings) -> bool:
+    """Return whether variant generation is enabled for the given card type."""
+    if card_type == CLOZE:
+        return bool(settings.generate_cloze_variants_enabled)
+    return bool(settings.generate_variants_enabled)
+
+
+def _variant_settings_payload(card_type: str, settings: AiSettings) -> dict[str, Any]:
+    """Return deterministic variant settings payload for cache hashing."""
+    if card_type == CLOZE:
+        return {
+            "enabled": settings.generate_cloze_variants_enabled,
+            "number": settings.generate_cloze_number_variations,
+            "style": settings.generate_cloze_style,
+            "difficulty": settings.generate_cloze_difficulty,
+            "no_trick_questions": settings.generate_cloze_no_trick_questions,
+            "keep_length_similar": settings.generate_cloze_keep_length_similar,
+            "mode": "cloze",
+        }
+    return {
+        "enabled": settings.generate_variants_enabled,
+        "number": settings.generate_number_variations,
+        "style": settings.generate_style,
+        "difficulty": settings.generate_difficulty,
+        "no_trick_questions": settings.generate_no_trick_questions,
+        "keep_length_similar": settings.generate_keep_length_similar,
+        "mode": "question",
+    }
 
 
 def _generate_tts_audio_files(
@@ -949,6 +1009,7 @@ def _generate_tts_audio_files(
     speed: float,
     variants: list[str],
     warnings: list[str],
+    parse_cloze: bool,
 ) -> list[str]:
     """Generate audio files for all provided variants and return media filenames."""
     media_dir = _resolve_media_directory(collection)
@@ -965,6 +1026,7 @@ def _generate_tts_audio_files(
                 voice=voice,
                 speed=speed,
                 output_format="mp3",
+                parse_cloze=parse_cloze,
             )
         except Exception as exc:
             warnings.append(f"Block {block_id} [{direction}] TTS failed on variant {index + 1}: {exc}")

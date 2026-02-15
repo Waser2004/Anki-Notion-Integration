@@ -73,6 +73,17 @@ class ShellApiTests(unittest.TestCase):
             "constraints": {"no_trick_questions": True, "keep_length_similar": True},
         }
 
+    def _cloze_variants_payload(self) -> dict[str, object]:
+        """Return a valid request payload for cloze variant generation tests."""
+        return {
+            "cloze_text": "Paris is the capital of {{c1::France}}.",
+            "number_variations": 2,
+            "language": "en",
+            "style": "exam",
+            "difficulty": "medium",
+            "constraints": {"no_trick_questions": True, "keep_length_similar": True},
+        }
+
     def test_shell_endpoints_require_auth(self) -> None:
         response = self.client.post(
             "/v1/static/generate-question-variants",
@@ -80,6 +91,13 @@ class ShellApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json()["error"]["code"], "UNAUTHORIZED")
+
+        cloze_response = self.client.post(
+            "/v1/static/generate-cloze-variants",
+            json=self._cloze_variants_payload(),
+        )
+        self.assertEqual(cloze_response.status_code, 401)
+        self.assertEqual(cloze_response.json()["error"]["code"], "UNAUTHORIZED")
 
         tts_response = self.client.post(
             "/v1/static/text-to-speech",
@@ -188,6 +206,93 @@ class ShellApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "AI_PROVIDER_NOT_CONFIGURED")
 
+    def test_generate_cloze_variants_success_contract(self) -> None:
+        mocked_provider_response = {
+            "items": [
+                {"cloze_text": "Paris remains the capital of {{c1::France}}."},
+                {"cloze_text": "The capital city of {{c1::France}} is Paris."},
+            ],
+            "usage": {"input_tokens": 11, "output_tokens": 22},
+            "model": "gpt-5-mini-2025-08-07",
+        }
+        with patch(
+            "app.services.cloze_variants._call_openai_responses_parse",
+            return_value=mocked_provider_response,
+        ):
+            response = self.client.post(
+                "/v1/static/generate-cloze-variants",
+                headers=self._auth_headers(),
+                json=self._cloze_variants_payload(),
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(len(payload["items"]), 2)
+        self.assertEqual(payload["items"][0]["type"], "cloze")
+        self.assertTrue(payload["items"][0]["cloze_text"])
+        self.assertEqual(payload["meta"]["prompt_version"], "varc_v1")
+        self.assertEqual(payload["meta"]["model"], "gpt-5-mini-2025-08-07")
+        self.assertEqual(payload["meta"]["usage"]["input_tokens"], 11)
+        self.assertEqual(payload["meta"]["usage"]["output_tokens"], 22)
+        self.assertIn("X-Request-Id", response.headers)
+
+    def test_generate_cloze_variants_provider_error_contract(self) -> None:
+        with patch(
+            "app.services.cloze_variants._call_openai_responses_parse",
+            side_effect=ApiError(
+                status_code=502,
+                code="UPSTREAM_AI_ERROR",
+                message="OpenAI returned an error response",
+            ),
+        ):
+            response = self.client.post(
+                "/v1/static/generate-cloze-variants",
+                headers=self._auth_headers(),
+                json=self._cloze_variants_payload(),
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["error"]["code"], "UPSTREAM_AI_ERROR")
+
+    def test_generate_cloze_variants_malformed_payload_contract(self) -> None:
+        with patch(
+            "app.services.cloze_variants._call_openai_responses_parse",
+            return_value={"items": [{}], "usage": {"input_tokens": 1, "output_tokens": 1}},
+        ):
+            response = self.client.post(
+                "/v1/static/generate-cloze-variants",
+                headers=self._auth_headers(),
+                json=self._cloze_variants_payload(),
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["error"]["code"], "UPSTREAM_AI_ERROR")
+
+    def test_generate_cloze_variants_missing_api_key_contract(self) -> None:
+        self.client.app.state.settings = Settings(
+            app_name="Noteck AI API Test",
+            environment="test",
+            database_url=self.client.app.state.settings.database_url,
+            jwt_secret="test-secret",
+            access_token_ttl_seconds=3600,
+            refresh_token_ttl_seconds=7200,
+            enable_startup_admin_seed=False,
+            startup_admin_email="",
+            startup_admin_password="",
+            openai_api_key="",
+            openai_model="gpt-5-mini-2025-08-07",
+            openai_tts_model="gpt-4o-mini-tts",
+            openai_timeout_seconds=20.0,
+            openai_base_url="https://api.openai.com/v1",
+        )
+        response = self.client.post(
+            "/v1/static/generate-cloze-variants",
+            headers=self._auth_headers(),
+            json=self._cloze_variants_payload(),
+        )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "AI_PROVIDER_NOT_CONFIGURED")
+
     def test_text_to_speech_success_contract(self) -> None:
         with patch(
             "app.api.v1.static.synthesize_text_to_speech",
@@ -198,17 +303,45 @@ class ShellApiTests(unittest.TestCase):
                 voice="alloy",
                 format="mp3",
             ),
-        ):
+        ) as synth_mock:
             tts_response = self.client.post(
                 "/v1/static/text-to-speech",
                 headers=self._auth_headers(),
-                json={"text": "Define a group.", "voice": "alloy", "format": "mp3", "speed": 1.0},
+                json={
+                    "text": "Paris is in {{c1::France}}.",
+                    "voice": "alloy",
+                    "format": "mp3",
+                    "speed": 1.0,
+                    "parse_cloze": True,
+                },
             )
 
         self.assertEqual(tts_response.status_code, 200)
         self.assertEqual(tts_response.content, b"FAKE_MP3_BYTES")
         self.assertEqual(tts_response.headers["content-type"], "audio/mpeg")
         self.assertIn("X-Request-Id", tts_response.headers)
+        called_input = synth_mock.call_args.args[0]
+        self.assertTrue(called_input.parse_cloze)
+
+    def test_text_to_speech_parse_cloze_defaults_false(self) -> None:
+        with patch(
+            "app.api.v1.static.synthesize_text_to_speech",
+            return_value=TextToSpeechResult(
+                audio_bytes=b"FAKE_MP3_BYTES",
+                content_type="audio/mpeg",
+                model="gpt-4o-mini-tts",
+                voice="alloy",
+                format="mp3",
+            ),
+        ) as synth_mock:
+            response = self.client.post(
+                "/v1/static/text-to-speech",
+                headers=self._auth_headers(),
+                json={"text": "Define a group.", "voice": "alloy", "format": "mp3", "speed": 1.0},
+            )
+        self.assertEqual(response.status_code, 200)
+        called_input = synth_mock.call_args.args[0]
+        self.assertFalse(called_input.parse_cloze)
 
     def test_text_to_speech_provider_error_contract(self) -> None:
         with patch(

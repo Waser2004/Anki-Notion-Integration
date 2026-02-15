@@ -167,6 +167,96 @@ def _input_back_template() -> str:
     )
 
 
+def _cloze_audio_meta_script(*, direction: str) -> str:
+    """Build cloze variant script that updates visible text and optional audio."""
+    return (
+        "<script>"
+        "(function(){"
+        "function decodeList(value){"
+        "if(!value){return [];}var normalized=String(value).trim().replace(/-/g,'+').replace(/_/g,'/');"
+        "if(!normalized){return [];}while(normalized.length%4){normalized+='=';}"
+        "try{var decoded=atob(normalized);var parsed=JSON.parse(decoded);"
+        "if(Array.isArray(parsed)){return parsed.filter(function(x){return typeof x==='string';});}}"
+        "catch(_err){return [];}return [];"
+        "}"
+        "function escapeHtml(value){"
+        "return String(value).replace(/[&<>\"']/g,function(ch){"
+        "if(ch==='&'){return '&amp;';}"
+        "if(ch==='<'){return '&lt;';}"
+        "if(ch==='>'){return '&gt;';}"
+        "if(ch==='\"'){return '&quot;';}"
+        "return '&#39;';"
+        "});"
+        "}"
+        "function withLineBreaks(value){"
+        "return String(value).replace(/\\r\\n?/g,'\\n').replace(/\\n/g,'<br/>');"
+        "}"
+        "function renderClozeVariant(variant,isBack){"
+        "var input=String(variant||'');"
+        "var regex=/\\{\\{c\\d+::(.*?)(?:::(.*?))?\\}\\}/g;"
+        "var htmlParts=[];"
+        "var cursor=0;"
+        "for(;;){"
+        "var match=regex.exec(input);"
+        "if(!match){break;}"
+        "htmlParts.push(withLineBreaks(escapeHtml(input.slice(cursor,match.index))));"
+        "var answer=match[1]||'';"
+        "var hint=match[2]||'';"
+        "var frontLabel='[...]';"
+        "if(!isBack&&hint){frontLabel='['+hint+']';}"
+        "var token=isBack?escapeHtml(answer):escapeHtml(frontLabel);"
+        "htmlParts.push('<span class=\"cloze\">'+token+'</span>');"
+        "cursor=match.index+match[0].length;"
+        "}"
+        "htmlParts.push(withLineBreaks(escapeHtml(input.slice(cursor))));"
+        "return htmlParts.join('');"
+        "}"
+        "var meta=document.querySelector('.noteck-ai-meta');"
+        "var questionNode=document.querySelector('.noteck-ai-cloze-text');"
+        "if(!meta||!questionNode){if(window.noteckIsBack===true){window.noteckIsBack=false;}return;}"
+        "var blockId=String(meta.getAttribute('data-block-id')||'');"
+        f"var direction='{direction}';"
+        "var variants=decodeList(meta.getAttribute('data-variants'));"
+        "var audioFiles=decodeList(meta.getAttribute('data-audio'));"
+        "var isBack=window.noteckIsBack===true;"
+        "if(!variants.length){if(isBack){window.noteckIsBack=false;}return;}"
+        "var storageKey='noteck:variant:'+blockId+':'+direction;"
+        "var sessionKey=storageKey+':current';"
+        "var rawIndex=isBack?sessionStorage.getItem(sessionKey):localStorage.getItem(storageKey);"
+        "var idx=parseInt(rawIndex||'0',10);"
+        "if(!Number.isFinite(idx)||idx<0){idx=0;}idx=idx%variants.length;"
+        "questionNode.innerHTML=renderClozeVariant(variants[idx],isBack);"
+        "if(isBack){window.noteckIsBack=false;return;}"
+        "sessionStorage.setItem(sessionKey,String(idx));"
+        "if(variants.length>1){localStorage.setItem(storageKey,String((idx+1)%variants.length));}"
+        "if(idx<audioFiles.length&&audioFiles[idx]){try{var audio=new Audio(audioFiles[idx]);audio.play();}catch(_audioErr){}}"
+        "})();"
+        "</script>"
+    )
+
+
+def _cloze_front_template() -> str:
+    """Build cloze front template with AI metadata for text/audio variant playback."""
+    return (
+        '<div class="notion-front"><span class="noteck-ai-cloze-text">{{cloze:Text}}</span></div>'
+        f'<div class="noteck-ai-meta" data-block-id="{{{{Notion Block ID}}}}" data-direction="forward" '
+        f'data-variants="{{{{{AI_FORWARD_VARIANTS_FIELD}}}}}" data-audio="{{{{{AI_FORWARD_AUDIO_FIELD}}}}}"></div>'
+        f"{_cloze_audio_meta_script(direction='forward')}"
+    )
+
+
+def _cloze_back_template() -> str:
+    """Build cloze back template with AI metadata for variant-consistent rendering."""
+    return (
+        "<script>window.noteckIsBack=true;</script>"
+        '<div class="notion-front"><span class="noteck-ai-cloze-text">{{cloze:Text}}</span></div>'
+        '<div class="notion-back" style="font-style: italic">{{Extra}}</div>'
+        f'<div class="noteck-ai-meta" data-block-id="{{{{Notion Block ID}}}}" data-direction="forward" '
+        f'data-variants="{{{{{AI_FORWARD_VARIANTS_FIELD}}}}}" data-audio="{{{{{AI_FORWARD_AUDIO_FIELD}}}}}"></div>'
+        f"{_cloze_audio_meta_script(direction='forward')}"
+    )
+
+
 _MODEL_DEFINITIONS: tuple[ModelDefinition, ...] = (
     # Basic card type
     ModelDefinition(
@@ -247,15 +337,12 @@ _MODEL_DEFINITIONS: tuple[ModelDefinition, ...] = (
     # Cloze card type
     ModelDefinition(
         name=MODEL_NAME_CLOZE,
-        fields=("Text", "Extra", "Notion Block ID"),
+        fields=("Text", "Extra", "Notion Block ID", AI_FORWARD_VARIANTS_FIELD, AI_FORWARD_AUDIO_FIELD),
         templates=(
             ModelTemplate(
                 name=CLOZE_CARD_NAME,
-                front='<div class="notion-front">{{cloze:Text}}</div>',
-                back=(
-                    '<div class="notion-front">{{cloze:Text}}</div>'
-                    '<div class="notion-back" style="font-style: italic">{{Extra}}</div>'
-                ),
+                front=_cloze_front_template(),
+                back=_cloze_back_template(),
             ),
         ),
         model_type=1,

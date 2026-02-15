@@ -31,6 +31,12 @@ from ..modules.ai_settings import (
     AI_EVALUATE_ENABLED_KEY,
     AI_EVALUATE_OUTPUT_FORMAT_KEY,
     AI_EVALUATE_STRICTNESS_KEY,
+    AI_GENERATE_CLOZE_VARIANTS_DIFFICULTY_KEY,
+    AI_GENERATE_CLOZE_VARIANTS_ENABLED_KEY,
+    AI_GENERATE_CLOZE_VARIANTS_KEEP_LENGTH_KEY,
+    AI_GENERATE_CLOZE_VARIANTS_NO_TRICK_KEY,
+    AI_GENERATE_CLOZE_VARIANTS_NUMBER_KEY,
+    AI_GENERATE_CLOZE_VARIANTS_STYLE_KEY,
     AI_GENERATE_VARIANTS_DIFFICULTY_KEY,
     AI_GENERATE_VARIANTS_ENABLED_KEY,
     AI_GENERATE_VARIANTS_KEEP_LENGTH_KEY,
@@ -86,6 +92,7 @@ class AiPage(QWidget):
 
         layout.addWidget(self._build_auth_group())
         layout.addWidget(self._build_variants_group())
+        layout.addWidget(self._build_cloze_variants_group())
         layout.addWidget(self._build_tts_group())
         layout.addWidget(self._build_evaluate_group())
         layout.addStretch(1)
@@ -226,6 +233,55 @@ class AiPage(QWidget):
         form.addRow("Speed (0.5-2.0)", speed_row)
         return group
 
+    def _build_cloze_variants_group(self) -> QGroupBox:
+        """Build controls for cloze variant generation."""
+        group = QGroupBox("Generate Cloze Variants", self)
+        form = QFormLayout(group)
+        form.setContentsMargins(11, 11, 11, 11)
+
+        self._cloze_variants_enabled_checkbox = QCheckBox("Enable generate-cloze-variants", group)
+        self._cloze_variants_enabled_checkbox.stateChanged.connect(
+            lambda: self._save_bool(AI_GENERATE_CLOZE_VARIANTS_ENABLED_KEY, self._cloze_variants_enabled_checkbox)
+        )
+        form.addRow(self._cloze_variants_enabled_checkbox)
+
+        self._cloze_number_variations_combo = QComboBox(group)
+        for value in range(1, 21):
+            self._cloze_number_variations_combo.addItem(str(value), value)
+        self._cloze_number_variations_combo.currentIndexChanged.connect(
+            lambda: self._save_combo_data(AI_GENERATE_CLOZE_VARIANTS_NUMBER_KEY, self._cloze_number_variations_combo)
+        )
+        form.addRow("Number variations", self._cloze_number_variations_combo)
+
+        self._cloze_style_combo = QComboBox(group)
+        for style in AI_VARIANT_STYLE_OPTIONS:
+            self._cloze_style_combo.addItem(style, style)
+        self._cloze_style_combo.currentIndexChanged.connect(
+            lambda: self._save_combo_data(AI_GENERATE_CLOZE_VARIANTS_STYLE_KEY, self._cloze_style_combo)
+        )
+        form.addRow("Style", self._cloze_style_combo)
+
+        self._cloze_difficulty_combo = QComboBox(group)
+        for difficulty in ("easy", "medium", "hard"):
+            self._cloze_difficulty_combo.addItem(difficulty, difficulty)
+        self._cloze_difficulty_combo.currentIndexChanged.connect(
+            lambda: self._save_combo_data(AI_GENERATE_CLOZE_VARIANTS_DIFFICULTY_KEY, self._cloze_difficulty_combo)
+        )
+        form.addRow("Difficulty", self._cloze_difficulty_combo)
+
+        self._cloze_no_trick_checkbox = QCheckBox("No trick questions", group)
+        self._cloze_no_trick_checkbox.stateChanged.connect(
+            lambda: self._save_bool(AI_GENERATE_CLOZE_VARIANTS_NO_TRICK_KEY, self._cloze_no_trick_checkbox)
+        )
+        form.addRow(self._cloze_no_trick_checkbox)
+
+        self._cloze_keep_length_checkbox = QCheckBox("Keep length similar", group)
+        self._cloze_keep_length_checkbox.stateChanged.connect(
+            lambda: self._save_bool(AI_GENERATE_CLOZE_VARIANTS_KEEP_LENGTH_KEY, self._cloze_keep_length_checkbox)
+        )
+        form.addRow(self._cloze_keep_length_checkbox)
+        return group
+
     def _build_evaluate_group(self) -> QGroupBox:
         """Build controls for active answer evaluation settings."""
         group = QGroupBox("Evaluate Answer", self)
@@ -281,6 +337,13 @@ class AiPage(QWidget):
             self._set_combo_data(self._difficulty_combo, settings.generate_difficulty, fallback="medium")
             self._no_trick_checkbox.setChecked(settings.generate_no_trick_questions)
             self._keep_length_checkbox.setChecked(settings.generate_keep_length_similar)
+
+            self._cloze_variants_enabled_checkbox.setChecked(settings.generate_cloze_variants_enabled)
+            self._set_combo_data(self._cloze_number_variations_combo, settings.generate_cloze_number_variations, fallback=3)
+            self._set_combo_data(self._cloze_style_combo, settings.generate_cloze_style, fallback="exam")
+            self._set_combo_data(self._cloze_difficulty_combo, settings.generate_cloze_difficulty, fallback="medium")
+            self._cloze_no_trick_checkbox.setChecked(settings.generate_cloze_no_trick_questions)
+            self._cloze_keep_length_checkbox.setChecked(settings.generate_cloze_keep_length_similar)
 
             self._tts_enabled_checkbox.setChecked(settings.tts_enabled)
             self._set_combo_data(self._voice_combo, settings.tts_voice, fallback="alloy")

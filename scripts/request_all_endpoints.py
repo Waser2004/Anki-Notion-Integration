@@ -1,4 +1,4 @@
-"""Authenticate once and test all three AI API endpoints in one run."""
+"""Authenticate once and test all AI API endpoints in one run."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def _post_binary(url: str, payload: dict[str, Any], headers: dict[str, str] | No
 
 def _build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
-    parser = argparse.ArgumentParser(description="Run all three AI API endpoint checks in one script.")
+    parser = argparse.ArgumentParser(description="Run all AI API endpoint checks in one script.")
     parser.add_argument("--base-url", default="http://localhost:8000", help="AI API base URL.")
     parser.add_argument("--email", default=AI_API_STARTUP_ADMIN_EMAIL, help="Admin login email.")
     parser.add_argument("--password", default=AI_API_STARTUP_ADMIN_PASSWORD, help="Admin login password.")
@@ -110,12 +110,30 @@ def main() -> int:
     print(f"[generate-question-variants] HTTP {variants_status}")
     print(json.dumps(variants_body, indent=2))
 
-    # Endpoint 3: text-to-speech
+    # Endpoint 3: generate-cloze-variants
+    cloze_variants_payload = {
+        "cloze_text": "Paris is the capital of {{c1::France}}.",
+        "number_variations": 3,
+        "language": "en",
+        "style": "exam",
+        "difficulty": "medium",
+        "constraints": {"no_trick_questions": True, "keep_length_similar": True},
+    }
+    cloze_variants_status, cloze_variants_body = _post_json(
+        f"{base_url}/v1/static/generate-cloze-variants",
+        cloze_variants_payload,
+        headers=auth_headers,
+    )
+    print(f"[generate-cloze-variants] HTTP {cloze_variants_status}")
+    print(json.dumps(cloze_variants_body, indent=2))
+
+    # Endpoint 4: text-to-speech
     tts_payload = {
-        "text": "What is the capital of France and what is their current president?",
+        "text": "What is the capital of {{c1::France}}?",
         "voice": "alloy",
         "format": "mp3",
         "speed": 1.0,
+        "parse_cloze": True,
     }
     tts_status, tts_bytes = _post_binary(f"{base_url}/v1/static/text-to-speech", tts_payload, headers=auth_headers)
     print(f"[text-to-speech] HTTP {tts_status}")
@@ -130,7 +148,7 @@ def main() -> int:
         except (UnicodeDecodeError, json.JSONDecodeError):
             print(tts_bytes.decode("utf-8", errors="replace"))
 
-    statuses = [eval_status, variants_status, tts_status]
+    statuses = [eval_status, variants_status, cloze_variants_status, tts_status]
     return 0 if all(status == 200 for status in statuses) else 1
 
 

@@ -98,12 +98,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--password", default=AI_API_STARTUP_ADMIN_PASSWORD, help="Admin login password.")
     parser.add_argument(
         "--text",
-        default="What is the capital of France and what is their current president?",
+        default="What is the capital of {{c1::France}}?",
         help="Text to synthesize into speech.",
     )
     parser.add_argument("--voice", default="alloy", help="OpenAI voice name.")
     parser.add_argument("--format", default="mp3", choices=["mp3", "wav"], help="Audio output format.")
     parser.add_argument("--speed", type=float, default=1.0, help="Speech speed from 0.5 to 2.0.")
+    parser.add_argument(
+        "--parse-cloze",
+        action="store_true",
+        help="Enable cloze-marker parsing before synthesis.",
+    )
     parser.add_argument(
         "--output",
         default=None,
@@ -139,6 +144,7 @@ def main() -> int:
         "voice": args.voice,
         "format": args.format,
         "speed": args.speed,
+        "parse_cloze": bool(args.parse_cloze),
     }
     tts_status, tts_bytes, _ = _post_binary(
         f"{base_url}/v1/static/text-to-speech",

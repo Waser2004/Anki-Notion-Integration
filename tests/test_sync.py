@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -348,6 +349,30 @@ class SyncTests(unittest.TestCase):
             last_edited_time="2026-02-04T00:00:00.000Z",
         )
 
+    def _cloze_payload(self, content_hash: str = "hash-cloze-1") -> ToggleCardPayload:
+        """Return one deterministic cloze payload used for AI enrichment tests."""
+        return ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="block-1",
+            card_type="cloze",
+            model_name="Notion (Cloze)",
+            fields={
+                "Text": "Paris is the capital of {{c1::France}}.",
+                "Extra": "European capital",
+                "Notion Block ID": "block-1",
+            },
+            content_hash=content_hash,
+            last_edited_time="2026-02-04T00:00:00.000Z",
+        )
+
+    @staticmethod
+    def _decode_b64_list(value: str) -> list[str]:
+        """Decode compact URL-safe base64 JSON list fields from note payloads."""
+        padded = value + ("=" * (-len(value) % 4))
+        decoded = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        parsed = json.loads(decoded)
+        return [item for item in parsed if isinstance(item, str)] if isinstance(parsed, list) else []
+
     def test_sync_creates_note_and_mapping(self) -> None:
         collection = _FakeCollection()
         mw = _FakeMw(collection)
@@ -491,6 +516,99 @@ class SyncTests(unittest.TestCase):
         parse_mock.assert_called_once()
         include_block_ids = parse_mock.call_args.kwargs.get("include_block_ids")
         self.assertEqual(set(include_block_ids), {"cloze-included"})
+
+    def test_sync_cloze_payload_calls_generate_cloze_variants_when_enabled(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        self._db.set_setting("ai_generate_cloze_variants_enabled", "1")
+
+        cloze_payload = self._cloze_payload()
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[cloze_payload],
+        ), patch.object(
+            _SYNC_MODULE.AiApiClient,
+            "generate_cloze_variants",
+            return_value=["Capital of {{c1::France}} is Paris."],
+        ) as cloze_variants_mock:
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_created, 1)
+        cloze_variants_mock.assert_called_once()
+        self.assertEqual(cloze_variants_mock.call_args.kwargs["cloze_text"], "Paris is the capital of {{c1::France}}.")
+
+    def test_sync_cloze_payload_tts_uses_parse_cloze_true(self) -> None:
+        collection = _FakeCollection(media_dir=self._media_dir)
+        mw = _FakeMw(collection)
+        self._db.set_setting("ai_generate_cloze_variants_enabled", "1")
+        self._db.set_setting("ai_tts_enabled", "1")
+
+        cloze_payload = self._cloze_payload()
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[cloze_payload],
+        ), patch.object(
+            _SYNC_MODULE.AiApiClient,
+            "generate_cloze_variants",
+            return_value=["Capital of {{c1::France}} is Paris."],
+        ), patch.object(
+            _SYNC_MODULE.AiApiClient,
+            "text_to_speech",
+            return_value=b"FAKE_MP3_BYTES",
+        ) as tts_mock:
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_created, 1)
+        self.assertTrue(tts_mock.called)
+        self.assertTrue(bool(tts_mock.call_args.kwargs.get("parse_cloze")))
+
+    def test_sync_cloze_payload_tts_without_variants_generates_single_audio(self) -> None:
+        collection = _FakeCollection(media_dir=self._media_dir)
+        mw = _FakeMw(collection)
+        self._db.set_setting("ai_tts_enabled", "1")
+
+        cloze_payload = self._cloze_payload()
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[cloze_payload],
+        ), patch.object(
+            _SYNC_MODULE.AiApiClient,
+            "generate_cloze_variants",
+        ) as cloze_variants_mock, patch.object(
+            _SYNC_MODULE.AiApiClient,
+            "text_to_speech",
+            return_value=b"FAKE_MP3_BYTES",
+        ) as tts_mock:
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_created, 1)
+        cloze_variants_mock.assert_not_called()
+        tts_mock.assert_called_once()
+        self.assertEqual(tts_mock.call_args.kwargs["text"], "Paris is the capital of {{c1::France}}.")
+
+        self.assertEqual(len(collection.notes), 1)
+        saved_note = next(iter(collection.notes.values()))
+        encoded_audio = str(saved_note.get("AI Forward Audio B64", ""))
+        decoded_audio = self._decode_b64_list(encoded_audio)
+        self.assertEqual(len(decoded_audio), 1)
 
     def test_sync_unchanged_page_repair_parses_only_non_excluded_target_blocks(self) -> None:
         collection = _FakeCollection()
