@@ -53,6 +53,9 @@ class CardTemplateTests(unittest.TestCase):
         self.assertIn("noteck-ai-audio-fallback", template)
         self.assertIn("Play audio", template)
         self.assertIn("if(isBack){window.noteckIsBack=false;return;}", template)
+        self.assertIn("renderSafeVariantText(", template)
+        self.assertIn("typesetMath(", template)
+        self.assertNotIn("questionNode.textContent=variants[idx]", template)
 
     def test_cloze_template_uses_shared_deterministic_runtime(self) -> None:
         """Cloze runtime should share deterministic index and no web storage usage."""
@@ -60,6 +63,7 @@ class CardTemplateTests(unittest.TestCase):
         self.assertIn("deterministicVariantIndex(blockId,direction,variants.length)", script)
         self.assertIn("getUTCFullYear", script)
         self.assertIn("tryAutoplayAudio", script)
+        self.assertIn("typesetMath(", script)
         self.assertNotIn("localStorage", script)
         self.assertNotIn("sessionStorage", script)
 

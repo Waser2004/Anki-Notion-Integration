@@ -373,6 +373,48 @@ class SyncTests(unittest.TestCase):
         parsed = json.loads(decoded)
         return [item for item in parsed if isinstance(item, str)] if isinstance(parsed, list) else []
 
+    def test_html_to_prompt_text_preserves_math_delimiters(self) -> None:
+        rendered = _SYNC_MODULE._html_to_prompt_text(  # pylint: disable=protected-access
+            r'<p>Solve <span class="notion-equation">\(x^2+1\)</span>.</p>'
+        )
+        self.assertIn(r"\(x^2+1\)", rendered)
+        self.assertNotIn("<span", rendered)
+
+    def test_html_to_prompt_text_preserves_block_line_boundaries(self) -> None:
+        rendered = _SYNC_MODULE._html_to_prompt_text(  # pylint: disable=protected-access
+            "<p>Line one</p><p>Line two</p><div>Line three</div>"
+        )
+        self.assertEqual(rendered, "Line one\nLine two\nLine three")
+
+    def test_html_to_prompt_text_strips_unsafe_tags(self) -> None:
+        rendered = _SYNC_MODULE._html_to_prompt_text(  # pylint: disable=protected-access
+            "<p>safe</p><script>alert('x')</script><div>ok</div>"
+        )
+        self.assertEqual(rendered, "safe\nok")
+        self.assertNotIn("alert", rendered)
+
+    def test_ai_direction_payloads_use_prompt_text_for_question_side(self) -> None:
+        payload = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="block-1",
+            front_html="",
+            back_html="",
+            fields={
+                "Front": "<p>First line</p><p><span class=\"notion-equation\">\\(x+y\\)</span></p>",
+                "Back": "<p>Answer</p>",
+                "Notion Block ID": "block-1",
+            },
+        )
+        directions = _SYNC_MODULE._ai_direction_payloads(  # pylint: disable=protected-access
+            payload,
+            dict(payload.fields),
+        )
+        forward = directions[0]
+        self.assertEqual(forward[0], "forward")
+        self.assertIn(r"\(x+y\)", forward[1])
+        self.assertIn("\n", forward[1])
+        self.assertEqual(forward[2], "Answer")
+
     def test_sync_creates_note_and_mapping(self) -> None:
         collection = _FakeCollection()
         mw = _FakeMw(collection)

@@ -26,6 +26,33 @@ if(!(length>0)){return 0;}
 var seed=String(blockId||'')+'|'+String(direction||'forward')+'|'+utcDateKey();
 return stableHash32(seed)%length;
 }
+function escapeHtml(value){
+return String(value).replace(/[&<>"']/g,function(ch){
+if(ch==='&'){return '&amp;';}
+if(ch==='<'){return '&lt;';}
+if(ch==='>'){return '&gt;';}
+if(ch==='"'){return '&quot;';}
+return '&#39;';
+});
+}
+function withLineBreaks(value){
+return String(value).replace(/\r\n?/g,'\n').replace(/\n/g,'<br/>');
+}
+function renderSafeVariantText(value){
+return withLineBreaks(escapeHtml(value));
+}
+function typesetMath(node){
+if(!node){return;}
+var mj=window.MathJax;
+if(!mj){return;}
+if(typeof mj.typesetPromise==='function'){
+try{mj.typesetPromise([node]);}catch(_v3Err){}
+return;
+}
+if(mj.Hub&&typeof mj.Hub.Queue==='function'){
+try{mj.Hub.Queue(['Typeset',mj.Hub,node]);}catch(_v2Err){}
+}
+}
 function tryAutoplayAudio(source,mountNode){
 var audioSource=String(source||'').trim();
 if(!audioSource){return;}

@@ -1,17 +1,5 @@
 (function(){
 __SHARED_AI_HELPERS_JS__
-function escapeHtml(value){
-return String(value).replace(/[&<>"']/g,function(ch){
-if(ch==='&'){return '&amp;';}
-if(ch==='<'){return '&lt;';}
-if(ch==='>'){return '&gt;';}
-if(ch==='"'){return '&quot;';}
-return '&#39;';
-});
-}
-function withLineBreaks(value){
-return String(value).replace(/\r\n?/g,'\n').replace(/\n/g,'<br/>');
-}
 function renderClozeVariant(variant,isBack){
 var input=String(variant||'');
 var regex=/\{\{c\d+::(.*?)(?:::(.*?))?\}\}/g;
@@ -43,6 +31,7 @@ var isBack=window.noteckIsBack===true;
 if(!variants.length){if(isBack){window.noteckIsBack=false;}return;}
 var idx=deterministicVariantIndex(blockId,direction,variants.length);
 questionNode.innerHTML=renderClozeVariant(variants[idx],isBack);
+typesetMath(questionNode);
 if(isBack){window.noteckIsBack=false;return;}
 var audioSrc=idx<audioFiles.length?audioFiles[idx]:'';
 tryAutoplayAudio(audioSrc,questionNode.parentElement||questionNode);

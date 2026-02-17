@@ -143,7 +143,7 @@ class ShellApiTests(unittest.TestCase):
         self.assertEqual(len(payload["items"]), 2)
         self.assertTrue(payload["items"][0]["question"])
         self.assertEqual(payload["items"][0]["type"], "open")
-        self.assertEqual(payload["meta"]["prompt_version"], "varq_v3")
+        self.assertEqual(payload["meta"]["prompt_version"], "varq_v4")
         self.assertEqual(payload["meta"]["model"], "gpt-5-mini-2025-08-07")
         self.assertEqual(payload["meta"]["usage"]["input_tokens"], 123)
         self.assertEqual(payload["meta"]["usage"]["output_tokens"], 456)

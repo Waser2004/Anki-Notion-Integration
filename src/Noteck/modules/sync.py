@@ -939,6 +939,8 @@ def _ai_direction_payloads(
     fields: dict[str, str],
 ) -> list[tuple[str, str, str, str, str, bool, bool]]:
     """Return normalized AI prompt/audio targets for one payload by card direction."""
+    front_prompt_text = _html_to_prompt_text(fields.get("Front", payload.front_html))
+    back_prompt_text = _html_to_prompt_text(fields.get("Back", payload.back_html))
     front_text = _html_to_plain(fields.get("Front", payload.front_html))
     back_text = _html_to_plain(fields.get("Back", payload.back_html))
     expected_answer = _html_to_plain(fields.get("Expected Answer", "")) or back_text
@@ -960,12 +962,12 @@ def _ai_direction_payloads(
 
     if payload.card_type == BASIC_REVERSED:
         return [
-            ("forward", front_text, back_text, AI_FORWARD_VARIANTS_FIELD, AI_FORWARD_AUDIO_FIELD, False, False),
-            ("reverse", back_text, front_text, AI_REVERSE_VARIANTS_FIELD, AI_REVERSE_AUDIO_FIELD, False, False),
+            ("forward", front_prompt_text, back_text, AI_FORWARD_VARIANTS_FIELD, AI_FORWARD_AUDIO_FIELD, False, False),
+            ("reverse", back_prompt_text, front_text, AI_REVERSE_VARIANTS_FIELD, AI_REVERSE_AUDIO_FIELD, False, False),
         ]
     if payload.card_type == INPUT:
-        return [("forward", front_text, expected_answer, AI_FORWARD_VARIANTS_FIELD, AI_FORWARD_AUDIO_FIELD, False, False)]
-    return [("forward", front_text, back_text, AI_FORWARD_VARIANTS_FIELD, AI_FORWARD_AUDIO_FIELD, False, False)]
+        return [("forward", front_prompt_text, expected_answer, AI_FORWARD_VARIANTS_FIELD, AI_FORWARD_AUDIO_FIELD, False, False)]
+    return [("forward", front_prompt_text, back_text, AI_FORWARD_VARIANTS_FIELD, AI_FORWARD_AUDIO_FIELD, False, False)]
 
 
 def _variants_enabled_for_card_type(card_type: str, settings: AiSettings) -> bool:
@@ -1129,6 +1131,28 @@ def _html_to_plain(value: str) -> str:
     without_tags = re.sub(r"<[^>]+>", " ", value or "")
     decoded = html.unescape(without_tags)
     return " ".join(decoded.split())
+
+
+def _html_to_prompt_text(value: str) -> str:
+    """Convert HTML to readable prompt text while preserving line and math delimiters."""
+    normalized = (value or "").replace("\r\n", "\n").replace("\r", "\n")
+    # Drop script/style payloads completely before tag stripping.
+    without_unsafe = re.sub(r"(?is)<(script|style)\b[^>]*>.*?</\1>", " ", normalized)
+    with_newlines = re.sub(r"(?i)<br\s*/?>", "\n", without_unsafe)
+    # Preserve block boundaries as prompt line breaks.
+    with_newlines = re.sub(
+        r"(?i)</(p|div|li|h[1-6]|blockquote|tr|table|ul|ol|pre)>",
+        "\n",
+        with_newlines,
+    )
+    without_tags = re.sub(r"<[^>]+>", "", with_newlines)
+    decoded = html.unescape(without_tags)
+    cleaned_lines = [
+        re.sub(r"[^\S\n]+", " ", line).strip()
+        for line in decoded.split("\n")
+    ]
+    non_empty_lines = [line for line in cleaned_lines if line]
+    return "\n".join(non_empty_lines)
 
 
 def _sha256_text(value: str) -> str:

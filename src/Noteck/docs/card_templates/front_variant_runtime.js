@@ -10,7 +10,8 @@ var audioFiles=decodeList(meta.getAttribute('data-audio'));
 var isBack=window.noteckIsBack===true;
 if(!variants.length){if(isBack){window.noteckIsBack=false;}return;}
 var idx=deterministicVariantIndex(blockId,direction,variants.length);
-questionNode.textContent=variants[idx];
+questionNode.innerHTML=renderSafeVariantText(variants[idx]);
+typesetMath(questionNode);
 if(isBack){window.noteckIsBack=false;return;}
 var audioSrc=idx<audioFiles.length?audioFiles[idx]:'';
 tryAutoplayAudio(audioSrc,questionNode.parentElement||questionNode);

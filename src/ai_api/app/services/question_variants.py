@@ -14,7 +14,7 @@ from app.core.errors import ApiError
 from app.services.utils import TokenUsage, _extract_usage, _load_system_prompt
 
 
-PROMPT_VERSION = "varq_v3"
+PROMPT_VERSION = "varq_v4"
 SYSTEM_PROMPT_FILE = Path(__file__).resolve().parents[1] / "prompts" / f"{PROMPT_VERSION}_system_prompt.txt"
 
 
