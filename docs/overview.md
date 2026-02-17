@@ -49,3 +49,5 @@ Noteck syncs content from Notion into Anki so you can maintain notes in Notion a
 - Sync direction is one-way: Notion to Anki.
 - Notion remains the source of truth for generated content.
 - Image Occlusion cards are launched manually from the Image Occlusion tab.
+- AI-generated question/cloze variants rotate by a deterministic UTC-day index so the same card shows the same daily variant across devices.
+- TTS playback attempts autoplay on the front side and shows a manual `Play audio` button when autoplay is blocked.

@@ -245,6 +245,20 @@ th {
 	width: 100%;
 }
 
+.noteck-ai-audio-fallback {
+	margin-top: 0.6em;
+}
+
+.noteck-ai-audio-play-button {
+	padding: 0.25em 0.7em;
+	border: 1px solid var(--notion-border);
+	border-radius: 6px;
+	background: var(--notion-code-bg);
+	color: var(--notion-text);
+	cursor: pointer;
+	font-size: 0.92em;
+}
+
 .noteck-ai-eval {
 	margin: 0.9em auto 0;
 	max-width: 700px;

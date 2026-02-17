@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ CLOZE_CARD_NAME = "Notion (Cloze)"
 CSS_MANAGED_MARKER = "/* Noteck card model css */"
 # Module files live in Noteck/modules while shared resources stay in Noteck/docs.
 _PACKAGE_STYLESHEET_PATH = Path(__file__).resolve().parents[1] / "docs" / "Notion_Card_Stylesheet.css"
+_PACKAGE_CARD_TEMPLATES_PATH = Path(__file__).resolve().parents[1] / "docs" / "card_templates"
 
 AI_FORWARD_VARIANTS_FIELD = "AI Forward Variants B64"
 AI_FORWARD_AUDIO_FIELD = "AI Forward Audio B64"
@@ -54,207 +56,112 @@ def _front_template(
 ) -> str:
     """Build a front template that applies variant cycling and optional audio autoplay."""
     typed_input_html = '<div class="notion-input">{{type:Expected Answer}}</div>' if include_typed_input else ""
-    return (
-        f'<div class="notion-front"><span class="noteck-ai-question">{{{{{question_field}}}}}</span></div>'
-        f"{typed_input_html}"
-        f'<div class="noteck-ai-meta" data-block-id="{{{{Notion Block ID}}}}" data-direction="{direction}" '
-        f'data-variants="{{{{{variants_field}}}}}" data-audio="{{{{{audio_field}}}}}"></div>'
-        "<script>"
-        "(function(){"
-        "function decodeList(value){"
-        "if(!value){return [];}"
-        "var normalized=String(value).trim().replace(/-/g,'+').replace(/_/g,'/');"
-        "if(!normalized){return [];}"
-        "while(normalized.length%4){normalized+='=';}"
-        "try{var decoded=atob(normalized);var parsed=JSON.parse(decoded);"
-        "if(Array.isArray(parsed)){return parsed.filter(function(x){return typeof x==='string';});}}"
-        "catch(_err){return [];}"
-        "return [];"
-        "}"
-        "var meta=document.querySelector('.noteck-ai-meta');"
-        "var questionNode=document.querySelector('.noteck-ai-question');"
-        "if(!meta||!questionNode){return;}"
-        "var blockId=String(meta.getAttribute('data-block-id')||'');"
-        "var direction=String(meta.getAttribute('data-direction')||'forward');"
-        "var variants=decodeList(meta.getAttribute('data-variants'));"
-        "var audioFiles=decodeList(meta.getAttribute('data-audio'));"
-        "var isBack=window.noteckIsBack===true;"
-        "if(!variants.length){if(isBack){window.noteckIsBack=false;}return;}"
-        "var storageKey='noteck:variant:'+blockId+':'+direction;"
-        "var sessionKey=storageKey+':current';"
-        "var rawIndex=isBack?sessionStorage.getItem(sessionKey):localStorage.getItem(storageKey);"
-        "var idx=parseInt(rawIndex||'0',10);"
-        "if(!Number.isFinite(idx)||idx<0){idx=0;}"
-        "idx=idx%variants.length;"
-        "questionNode.textContent=variants[idx];"
-        "if(isBack){window.noteckIsBack=false;return;}"
-        "sessionStorage.setItem(sessionKey,String(idx));"
-        "if(variants.length>1){localStorage.setItem(storageKey,String((idx+1)%variants.length));}"
-        "if(idx<audioFiles.length&&audioFiles[idx]){"
-        "try{var audio=new Audio(audioFiles[idx]);audio.play();}catch(_audioErr){}}"
-        "})();"
-        "</script>"
+    return _render_template_asset(
+        "front_template.html",
+        {
+            "__QUESTION_FIELD__": _anki_field(question_field),
+            "__TYPED_INPUT_HTML__": typed_input_html,
+            "__DIRECTION__": direction,
+            "__VARIANTS_FIELD__": _anki_field(variants_field),
+            "__AUDIO_FIELD__": _anki_field(audio_field),
+            "__FRONT_RUNTIME_JS__": _front_variant_runtime_script(),
+        },
     )
 
 
 def _basic_back_template(answer_field: str) -> str:
     """Build a back template that preserves the variant chosen on front."""
-    return (
-        "<script>window.noteckIsBack=true;</script>"
-        "{{FrontSide}}<hr id=\"answer\">"
-        f"<div class=\"notion-back\">{{{{{answer_field}}}}}</div>"
+    return _render_template_asset(
+        "basic_back_template.html",
+        {"__ANSWER_FIELD__": _anki_field(answer_field)},
     )
 
 
 def _input_back_template() -> str:
     """Build an Input back template with placeholders for AI evaluation output."""
-    return (
-        "<script>window.noteckIsBack=true;</script>"
-        "{{FrontSide}}<hr id=\"answer\">"
-        "<div class=\"notion-back\">{{Back}}</div>"
-        "<div id=\"noteck-ai-eval\" class=\"noteck-ai-eval\">"
-        "<div id=\"noteck-ai-eval-status\" class=\"noteck-ai-eval-status\">Waiting for AI evaluation...</div>"
-        "<div class=\"noteck-ai-eval-progress\"><div id=\"noteck-ai-eval-progress-fill\"></div></div>"
-        "<div id=\"noteck-ai-eval-verdict\" class=\"noteck-ai-eval-verdict\"></div>"
-        "<div id=\"noteck-ai-eval-feedback\" class=\"noteck-ai-eval-feedback\"></div>"
-        "<ul id=\"noteck-ai-eval-missing\" class=\"noteck-ai-eval-missing\"></ul>"
-        "</div>"
-        "<script>"
-        "(function(){"
-        "function byId(id){return document.getElementById(id);}"
-        "function clearChildren(el){if(!el){return;}while(el.firstChild){el.removeChild(el.firstChild);}}"
-        "window.NoteckAiEvalRenderLoading=function(){"
-        "var status=byId('noteck-ai-eval-status');"
-        "var fill=byId('noteck-ai-eval-progress-fill');"
-        "var verdict=byId('noteck-ai-eval-verdict');"
-        "var feedback=byId('noteck-ai-eval-feedback');"
-        "var missing=byId('noteck-ai-eval-missing');"
-        "if(status){status.textContent='Evaluating answer...';}"
-        "if(fill){fill.style.width='0%';}"
-        "if(verdict){verdict.textContent='';}"
-        "if(feedback){feedback.textContent='';}"
-        "clearChildren(missing);"
-        "};"
-        "window.NoteckAiEvalRenderError=function(message){"
-        "var status=byId('noteck-ai-eval-status');"
-        "if(status){status.textContent=String(message||'AI evaluation failed.');}"
-        "};"
-        "window.NoteckAiEvalRender=function(payload){"
-        "if(!payload||typeof payload!=='object'){window.NoteckAiEvalRenderError('Invalid AI response.');return;}"
-        "var score=Number(payload.score||0);if(!Number.isFinite(score)){score=0;}score=Math.max(0,Math.min(1,score));"
-        "var verdictText=String(payload.verdict||'incorrect');"
-        "var feedbackText=String(payload.feedback||'');"
-        "var status=byId('noteck-ai-eval-status');"
-        "var fill=byId('noteck-ai-eval-progress-fill');"
-        "var verdict=byId('noteck-ai-eval-verdict');"
-        "var feedback=byId('noteck-ai-eval-feedback');"
-        "var missing=byId('noteck-ai-eval-missing');"
-        "if(status){status.textContent='AI evaluation completed.';}"
-        "if(fill){fill.style.width=String(Math.round(score*100))+'%';}"
-        "if(verdict){verdict.textContent='Verdict: '+verdictText+' ('+String(Math.round(score*100))+'%)';}"
-        "if(feedback){feedback.textContent=feedbackText;}"
-        "clearChildren(missing);"
-        "if(missing&&Array.isArray(payload.missing_points)){"
-        "payload.missing_points.forEach(function(item){"
-        "if(typeof item!=='string'||!item.trim()){return;}"
-        "var li=document.createElement('li');li.textContent=item;missing.appendChild(li);"
-        "});"
-        "}"
-        "};"
-        "window.NoteckAiEvalRenderLoading();"
-        "})();"
-        "</script>"
+    return _render_template_asset(
+        "input_back_template.html",
+        {"__INPUT_EVAL_RUNTIME_JS__": _load_template_asset("input_eval_runtime.js")},
     )
 
 
 def _cloze_audio_meta_script(*, direction: str) -> str:
     """Build cloze variant script that updates visible text and optional audio."""
-    return (
-        "<script>"
-        "(function(){"
-        "function decodeList(value){"
-        "if(!value){return [];}var normalized=String(value).trim().replace(/-/g,'+').replace(/_/g,'/');"
-        "if(!normalized){return [];}while(normalized.length%4){normalized+='=';}"
-        "try{var decoded=atob(normalized);var parsed=JSON.parse(decoded);"
-        "if(Array.isArray(parsed)){return parsed.filter(function(x){return typeof x==='string';});}}"
-        "catch(_err){return [];}return [];"
-        "}"
-        "function escapeHtml(value){"
-        "return String(value).replace(/[&<>\"']/g,function(ch){"
-        "if(ch==='&'){return '&amp;';}"
-        "if(ch==='<'){return '&lt;';}"
-        "if(ch==='>'){return '&gt;';}"
-        "if(ch==='\"'){return '&quot;';}"
-        "return '&#39;';"
-        "});"
-        "}"
-        "function withLineBreaks(value){"
-        "return String(value).replace(/\\r\\n?/g,'\\n').replace(/\\n/g,'<br/>');"
-        "}"
-        "function renderClozeVariant(variant,isBack){"
-        "var input=String(variant||'');"
-        "var regex=/\\{\\{c\\d+::(.*?)(?:::(.*?))?\\}\\}/g;"
-        "var htmlParts=[];"
-        "var cursor=0;"
-        "for(;;){"
-        "var match=regex.exec(input);"
-        "if(!match){break;}"
-        "htmlParts.push(withLineBreaks(escapeHtml(input.slice(cursor,match.index))));"
-        "var answer=match[1]||'';"
-        "var hint=match[2]||'';"
-        "var frontLabel='[...]';"
-        "if(!isBack&&hint){frontLabel='['+hint+']';}"
-        "var token=isBack?escapeHtml(answer):escapeHtml(frontLabel);"
-        "htmlParts.push('<span class=\"cloze\">'+token+'</span>');"
-        "cursor=match.index+match[0].length;"
-        "}"
-        "htmlParts.push(withLineBreaks(escapeHtml(input.slice(cursor))));"
-        "return htmlParts.join('');"
-        "}"
-        "var meta=document.querySelector('.noteck-ai-meta');"
-        "var questionNode=document.querySelector('.noteck-ai-cloze-text');"
-        "if(!meta||!questionNode){if(window.noteckIsBack===true){window.noteckIsBack=false;}return;}"
-        "var blockId=String(meta.getAttribute('data-block-id')||'');"
-        f"var direction='{direction}';"
-        "var variants=decodeList(meta.getAttribute('data-variants'));"
-        "var audioFiles=decodeList(meta.getAttribute('data-audio'));"
-        "var isBack=window.noteckIsBack===true;"
-        "if(!variants.length){if(isBack){window.noteckIsBack=false;}return;}"
-        "var storageKey='noteck:variant:'+blockId+':'+direction;"
-        "var sessionKey=storageKey+':current';"
-        "var rawIndex=isBack?sessionStorage.getItem(sessionKey):localStorage.getItem(storageKey);"
-        "var idx=parseInt(rawIndex||'0',10);"
-        "if(!Number.isFinite(idx)||idx<0){idx=0;}idx=idx%variants.length;"
-        "questionNode.innerHTML=renderClozeVariant(variants[idx],isBack);"
-        "if(isBack){window.noteckIsBack=false;return;}"
-        "sessionStorage.setItem(sessionKey,String(idx));"
-        "if(variants.length>1){localStorage.setItem(storageKey,String((idx+1)%variants.length));}"
-        "if(idx<audioFiles.length&&audioFiles[idx]){try{var audio=new Audio(audioFiles[idx]);audio.play();}catch(_audioErr){}}"
-        "})();"
-        "</script>"
+    return _cloze_variant_runtime_script(default_direction=direction)
+
+
+def _shared_ai_script_helpers() -> str:
+    """Load shared JS helpers used by card templates."""
+    return _load_template_asset("shared_ai_helpers.js")
+
+
+def _front_variant_runtime_script() -> str:
+    """Load the front-side runtime and inject shared helper functions."""
+    return _render_template_asset(
+        "front_variant_runtime.js",
+        {"__SHARED_AI_HELPERS_JS__": _shared_ai_script_helpers()},
+    )
+
+
+def _cloze_variant_runtime_script(*, default_direction: str = "forward") -> str:
+    """Load the cloze runtime and inject shared helper functions."""
+    return _render_template_asset(
+        "cloze_variant_runtime.js",
+        {
+            "__SHARED_AI_HELPERS_JS__": _shared_ai_script_helpers(),
+            "__DEFAULT_DIRECTION__": default_direction,
+        },
     )
 
 
 def _cloze_front_template() -> str:
     """Build cloze front template with AI metadata for text/audio variant playback."""
-    return (
-        '<div class="notion-front"><span class="noteck-ai-cloze-text">{{cloze:Text}}</span></div>'
-        f'<div class="noteck-ai-meta" data-block-id="{{{{Notion Block ID}}}}" data-direction="forward" '
-        f'data-variants="{{{{{AI_FORWARD_VARIANTS_FIELD}}}}}" data-audio="{{{{{AI_FORWARD_AUDIO_FIELD}}}}}"></div>'
-        f"{_cloze_audio_meta_script(direction='forward')}"
+    return _render_template_asset(
+        "cloze_front_template.html",
+        {
+            "__DIRECTION__": "forward",
+            "__FORWARD_VARIANTS_FIELD__": _anki_field(AI_FORWARD_VARIANTS_FIELD),
+            "__FORWARD_AUDIO_FIELD__": _anki_field(AI_FORWARD_AUDIO_FIELD),
+            "__CLOZE_RUNTIME_JS__": _cloze_audio_meta_script(direction="forward"),
+        },
     )
 
 
 def _cloze_back_template() -> str:
     """Build cloze back template with AI metadata for variant-consistent rendering."""
-    return (
-        "<script>window.noteckIsBack=true;</script>"
-        '<div class="notion-front"><span class="noteck-ai-cloze-text">{{cloze:Text}}</span></div>'
-        '<div class="notion-back" style="font-style: italic">{{Extra}}</div>'
-        f'<div class="noteck-ai-meta" data-block-id="{{{{Notion Block ID}}}}" data-direction="forward" '
-        f'data-variants="{{{{{AI_FORWARD_VARIANTS_FIELD}}}}}" data-audio="{{{{{AI_FORWARD_AUDIO_FIELD}}}}}"></div>'
-        f"{_cloze_audio_meta_script(direction='forward')}"
+    return _render_template_asset(
+        "cloze_back_template.html",
+        {
+            "__DIRECTION__": "forward",
+            "__FORWARD_VARIANTS_FIELD__": _anki_field(AI_FORWARD_VARIANTS_FIELD),
+            "__FORWARD_AUDIO_FIELD__": _anki_field(AI_FORWARD_AUDIO_FIELD),
+            "__CLOZE_RUNTIME_JS__": _cloze_audio_meta_script(direction="forward"),
+        },
     )
+
+
+def _anki_field(field_name: str) -> str:
+    """Return one Anki field reference for a given field name."""
+    return "{{" + str(field_name) + "}}"
+
+
+@lru_cache(maxsize=64)
+def _load_template_asset(filename: str) -> str:
+    """Load one card template or runtime asset from disk."""
+    path = _PACKAGE_CARD_TEMPLATES_PATH / filename
+    if not path.exists():
+        raise RuntimeError(f"Missing card template asset: {path}")
+    return path.read_text(encoding="utf-8")
+
+
+def _render_template_asset(filename: str, replacements: dict[str, str] | None = None) -> str:
+    """Render one template asset using literal token replacement."""
+    rendered = _load_template_asset(filename)
+    if not replacements:
+        return rendered
+    for marker, value in replacements.items():
+        rendered = rendered.replace(marker, value)
+    return rendered
 
 
 _MODEL_DEFINITIONS: tuple[ModelDefinition, ...] = (

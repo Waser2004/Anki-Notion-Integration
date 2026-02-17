@@ -610,6 +610,52 @@ class SyncTests(unittest.TestCase):
         decoded_audio = self._decode_b64_list(encoded_audio)
         self.assertEqual(len(decoded_audio), 1)
 
+    def test_sync_cloze_payload_variants_and_audio_remain_b64_json_lists(self) -> None:
+        """Sync should keep AI variant/audio fields as compact base64-encoded JSON lists."""
+        collection = _FakeCollection(media_dir=self._media_dir)
+        mw = _FakeMw(collection)
+        self._db.set_setting("ai_generate_cloze_variants_enabled", "1")
+        self._db.set_setting("ai_tts_enabled", "1")
+
+        cloze_payload = self._cloze_payload()
+        generated_variants = [
+            "Capital of {{c1::France}} is Paris.",
+            "Paris remains the capital of {{c1::France}}.",
+        ]
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[cloze_payload],
+        ), patch.object(
+            _SYNC_MODULE.AiApiClient,
+            "generate_cloze_variants",
+            return_value=generated_variants,
+        ), patch.object(
+            _SYNC_MODULE.AiApiClient,
+            "text_to_speech",
+            return_value=b"FAKE_MP3_BYTES",
+        ) as tts_mock:
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_created, 1)
+        self.assertEqual(tts_mock.call_count, 2)
+        self.assertEqual(len(collection.notes), 1)
+
+        saved_note = next(iter(collection.notes.values()))
+        encoded_variants = str(saved_note.get("AI Forward Variants B64", ""))
+        encoded_audio = str(saved_note.get("AI Forward Audio B64", ""))
+        decoded_variants = self._decode_b64_list(encoded_variants)
+        decoded_audio = self._decode_b64_list(encoded_audio)
+
+        self.assertEqual(decoded_variants, generated_variants)
+        self.assertEqual(len(decoded_audio), 2)
+        self.assertTrue(all(name.endswith(".mp3") for name in decoded_audio))
+
     def test_sync_unchanged_page_repair_parses_only_non_excluded_target_blocks(self) -> None:
         collection = _FakeCollection()
         mw = _FakeMw(collection)

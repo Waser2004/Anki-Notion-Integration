@@ -160,6 +160,8 @@ Images are launched manually into Image Occlusion workflow; they are not automat
 - If source content is unchanged, unnecessary updates are skipped.
 - If a mapped card changes card type, the mapped note is converted to the new type on sync.
 - Excluded cards remain excluded.
+- AI variant-enabled cards use a deterministic UTC-day variant index (`block id + direction + date`) so daily variant selection is consistent across synced devices.
+- AI TTS-enabled cards attempt front-side autoplay and render a manual `Play audio` fallback button if client autoplay is blocked.
 
 ## 9. Expected behavior and limitations
 
