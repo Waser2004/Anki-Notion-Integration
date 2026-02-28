@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -365,6 +367,22 @@ class SyncTests(unittest.TestCase):
             last_edited_time="2026-02-04T00:00:00.000Z",
         )
 
+    def _reversed_payload(self, content_hash: str = "hash-reversed-1") -> ToggleCardPayload:
+        """Return one deterministic basic-reversed payload for AI parallel tests."""
+        return ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="block-1",
+            card_type="basic_reversed",
+            model_name="Notion Toggle (Basic+Reversed)",
+            fields={
+                "Front": "<p>front</p>",
+                "Back": "<p>back</p>",
+                "Notion Block ID": "block-1",
+            },
+            content_hash=content_hash,
+            last_edited_time="2026-02-04T00:00:00.000Z",
+        )
+
     @staticmethod
     def _decode_b64_list(value: str) -> list[str]:
         """Decode compact URL-safe base64 JSON list fields from note payloads."""
@@ -585,6 +603,104 @@ class SyncTests(unittest.TestCase):
         cloze_variants_mock.assert_called_once()
         self.assertEqual(cloze_variants_mock.call_args.kwargs["cloze_text"], "Paris is the capital of {{c1::France}}.")
 
+    def test_ai_enrichment_runs_payload_calls_in_parallel(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        self._db.set_setting("ai_generate_variants_enabled", "1")
+
+        payload_one = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="block-1",
+            front_html="<p>front one</p>",
+            back_html="<p>back one</p>",
+            content_hash="hash-one",
+            last_edited_time="2026-02-04T00:00:00.000Z",
+        )
+        payload_two = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="block-2",
+            front_html="<p>front two</p>",
+            back_html="<p>back two</p>",
+            content_hash="hash-two",
+            last_edited_time="2026-02-04T00:00:00.000Z",
+        )
+        active_calls = 0
+        max_active_calls = 0
+        lock = threading.Lock()
+
+        def variants_side_effect(**kwargs: object) -> list[str]:
+            nonlocal active_calls, max_active_calls
+            _ = kwargs
+            with lock:
+                active_calls += 1
+                max_active_calls = max(max_active_calls, active_calls)
+            try:
+                time.sleep(0.15)
+                return ["parallel variant"]
+            finally:
+                with lock:
+                    active_calls -= 1
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[payload_one, payload_two],
+        ), patch.object(
+            _SYNC_MODULE.AiApiClient,
+            "generate_question_variants",
+            side_effect=variants_side_effect,
+        ) as variants_mock:
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(variants_mock.call_count, 2)
+        self.assertGreaterEqual(max_active_calls, 2)
+
+    def test_basic_reversed_directions_run_in_parallel(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        self._db.set_setting("ai_generate_variants_enabled", "1")
+        reversed_payload = self._reversed_payload()
+        active_calls = 0
+        max_active_calls = 0
+        lock = threading.Lock()
+
+        def variants_side_effect(**kwargs: object) -> list[str]:
+            nonlocal active_calls, max_active_calls
+            _ = kwargs
+            with lock:
+                active_calls += 1
+                max_active_calls = max(max_active_calls, active_calls)
+            try:
+                time.sleep(0.15)
+                return ["direction variant"]
+            finally:
+                with lock:
+                    active_calls -= 1
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[reversed_payload],
+        ), patch.object(
+            _SYNC_MODULE.AiApiClient,
+            "generate_question_variants",
+            side_effect=variants_side_effect,
+        ) as variants_mock:
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(variants_mock.call_count, 2)
+        self.assertGreaterEqual(max_active_calls, 2)
+
     def test_sync_cloze_payload_tts_uses_parse_cloze_true(self) -> None:
         collection = _FakeCollection(media_dir=self._media_dir)
         mw = _FakeMw(collection)
@@ -615,6 +731,196 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(result.stats.cards_created, 1)
         self.assertTrue(tts_mock.called)
         self.assertTrue(bool(tts_mock.call_args.kwargs.get("parse_cloze")))
+
+    def test_tts_variants_run_in_parallel_and_preserve_order(self) -> None:
+        collection = _FakeCollection(media_dir=self._media_dir)
+        mw = _FakeMw(collection)
+        self._db.set_setting("ai_generate_cloze_variants_enabled", "1")
+        self._db.set_setting("ai_tts_enabled", "1")
+        cloze_payload = self._cloze_payload()
+        generated_variants = [
+            "Capital of {{c1::France}} is Paris.",
+            "Paris is still {{c1::France}}'s capital.",
+            "Name the capital of {{c1::France}}.",
+        ]
+        delay_by_text = {
+            generated_variants[0]: 0.2,
+            generated_variants[1]: 0.05,
+            generated_variants[2]: 0.1,
+        }
+        active_calls = 0
+        max_active_calls = 0
+        lock = threading.Lock()
+
+        def tts_side_effect(**kwargs: object) -> bytes:
+            nonlocal active_calls, max_active_calls
+            text = str(kwargs["text"])
+            with lock:
+                active_calls += 1
+                max_active_calls = max(max_active_calls, active_calls)
+            try:
+                time.sleep(delay_by_text[text])
+                return text.encode("utf-8")
+            finally:
+                with lock:
+                    active_calls -= 1
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[cloze_payload],
+        ), patch.object(
+            _SYNC_MODULE.AiApiClient,
+            "generate_cloze_variants",
+            return_value=generated_variants,
+        ), patch.object(
+            _SYNC_MODULE.AiApiClient,
+            "text_to_speech",
+            side_effect=tts_side_effect,
+        ) as tts_mock:
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(tts_mock.call_count, 3)
+        self.assertGreaterEqual(max_active_calls, 2)
+
+        saved_note = next(iter(collection.notes.values()))
+        decoded_audio = self._decode_b64_list(str(saved_note.get("AI Forward Audio B64", "")))
+        expected_audio = [
+            _SYNC_MODULE._tts_media_filename(  # pylint: disable=protected-access
+                block_id="block-1",
+                direction="forward",
+                index=index,
+                variant=variant,
+                voice="alloy",
+                speed=1.0,
+            )
+            for index, variant in enumerate(generated_variants)
+        ]
+        self.assertEqual(decoded_audio, expected_audio)
+
+    def test_tts_parallel_failure_keeps_strict_fallback(self) -> None:
+        collection = _FakeCollection(media_dir=self._media_dir)
+        mw = _FakeMw(collection)
+        self._db.set_setting("ai_generate_cloze_variants_enabled", "1")
+        self._db.set_setting("ai_tts_enabled", "1")
+        cloze_payload = self._cloze_payload()
+        generated_variants = [
+            "Capital of {{c1::France}} is Paris.",
+            "Name the capital of {{c1::France}}.",
+        ]
+
+        def tts_side_effect(**kwargs: object) -> bytes:
+            text = str(kwargs["text"])
+            if text == generated_variants[1]:
+                raise RuntimeError("boom")
+            return b"ok"
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[cloze_payload],
+        ), patch.object(
+            _SYNC_MODULE.AiApiClient,
+            "generate_cloze_variants",
+            return_value=generated_variants,
+        ), patch.object(
+            _SYNC_MODULE.AiApiClient,
+            "text_to_speech",
+            side_effect=tts_side_effect,
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertFalse(result.ok)
+        self.assertTrue(any("TTS failed on variant 2" in error for error in result.errors))
+        saved_note = next(iter(collection.notes.values()))
+        decoded_audio = self._decode_b64_list(str(saved_note.get("AI Forward Audio B64", "")))
+        self.assertEqual(decoded_audio, [])
+
+    def test_parallel_ai_keeps_b64_json_field_shape(self) -> None:
+        collection = _FakeCollection(media_dir=self._media_dir)
+        mw = _FakeMw(collection)
+        self._db.set_setting("ai_generate_variants_enabled", "1")
+        self._db.set_setting("ai_tts_enabled", "1")
+        reversed_payload = self._reversed_payload()
+
+        def variants_side_effect(**kwargs: object) -> list[str]:
+            question = str(kwargs.get("question", ""))
+            if "front" in question:
+                return ["Forward one", "Forward two"]
+            return ["Reverse one", "Reverse two"]
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[reversed_payload],
+        ), patch.object(
+            _SYNC_MODULE.AiApiClient,
+            "generate_question_variants",
+            side_effect=variants_side_effect,
+        ), patch.object(
+            _SYNC_MODULE.AiApiClient,
+            "text_to_speech",
+            return_value=b"FAKE_MP3_BYTES",
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        saved_note = next(iter(collection.notes.values()))
+        forward_variants = self._decode_b64_list(str(saved_note.get("AI Forward Variants B64", "")))
+        forward_audio = self._decode_b64_list(str(saved_note.get("AI Forward Audio B64", "")))
+        reverse_variants = self._decode_b64_list(str(saved_note.get("AI Reverse Variants B64", "")))
+        reverse_audio = self._decode_b64_list(str(saved_note.get("AI Reverse Audio B64", "")))
+        self.assertEqual(forward_variants, ["Forward one", "Forward two"])
+        self.assertEqual(reverse_variants, ["Reverse one", "Reverse two"])
+        self.assertEqual(len(forward_audio), 2)
+        self.assertEqual(len(reverse_audio), 2)
+
+    def test_parallel_ai_preserves_cache_reuse_semantics(self) -> None:
+        collection = _FakeCollection(media_dir=self._media_dir)
+        mw = _FakeMw(collection)
+        self._db.set_setting("ai_generate_variants_enabled", "1")
+        self._db.set_setting("ai_tts_enabled", "1")
+        payload = self._payload(content_hash="hash-ai-cache")
+        fake_client = _FakeNotionClient(page_last_edited_time="2026-02-04T00:00:00.000Z")
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=fake_client,
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[payload],
+        ), patch.object(
+            _SYNC_MODULE.AiApiClient,
+            "generate_question_variants",
+            return_value=["Variant one", "Variant two"],
+        ) as variants_mock, patch.object(
+            _SYNC_MODULE.AiApiClient,
+            "text_to_speech",
+            return_value=b"FAKE_MP3_BYTES",
+        ) as tts_mock:
+            first_result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            fake_client._page_last_edited_time = "2026-02-05T00:00:00.000Z"
+            second_result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(first_result.ok)
+        self.assertTrue(second_result.ok)
+        self.assertEqual(variants_mock.call_count, 1)
+        self.assertEqual(tts_mock.call_count, 2)
 
     def test_sync_cloze_payload_tts_without_variants_generates_single_audio(self) -> None:
         collection = _FakeCollection(media_dir=self._media_dir)

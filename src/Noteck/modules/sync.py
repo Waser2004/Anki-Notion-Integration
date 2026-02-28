@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 import hashlib
 import html
@@ -88,6 +89,44 @@ class AiSyncRuntime:
     assets_store: CardAiAssetsStore
 
 
+@dataclass(frozen=True)
+class _AiDirectionWork:
+    """AI enrichment work payload for one card direction."""
+
+    block_id: str
+    card_type: str
+    direction: str
+    question_text: str
+    answer_text: str
+    variants_field: str
+    audio_field: str
+    use_cloze_variant_generation: bool
+    parse_cloze_tts: bool
+
+
+@dataclass(frozen=True)
+class _AiDirectionResult:
+    """Computed AI enrichment result for one card direction."""
+
+    work: _AiDirectionWork
+    source_hash: str
+    variants_settings_hash: str
+    tts_settings_hash: str
+    variants: list[str]
+    audio_files: list[str]
+    warnings: list[str]
+
+
+@dataclass(frozen=True)
+class _PreparedAiPayloadEnrichment:
+    """Prepared AI enrichment for one payload before cache persistence."""
+
+    payload: ToggleCardPayload
+    fields: dict[str, str]
+    direction_results: list[_AiDirectionResult]
+    warnings: list[str]
+
+
 SyncDoneCallback = Callable[[SyncResult], None]
 SyncProgressCallback = Callable[[str], None]
 SyncCancelCheck = Callable[[], bool]
@@ -102,6 +141,7 @@ _MERMAID_FIGURE_RE = re.compile(
     re.DOTALL,
 )
 _HTTP_TIMEOUT_SECONDS = 20.0
+_AI_MAX_WORKERS = 4
 
 
 def sync_notion_to_anki(
@@ -520,22 +560,19 @@ def _sync_changed_page_fast(
         )
 
     # Sync only the payloads we actually expanded.
-    for payload in toggle_payloads:
-        if _is_sync_cancelled(should_cancel):
-            return stats, errors, True
-        stats, payload_errors, cancelled = _sync_one_payload(
-            db=db,
-            collection=collection,
-            page_id=page_id,
-            deck_id=deck_id,
-            payload=payload,
-            ai_runtime=ai_runtime,
-            stats=stats,
-            should_cancel=should_cancel,
-        )
-        errors.extend(payload_errors)
-        if cancelled:
-            return stats, errors, True
+    stats, payload_errors, cancelled = _sync_payload_batch(
+        db=db,
+        collection=collection,
+        page_id=page_id,
+        deck_id=deck_id,
+        payloads=toggle_payloads,
+        ai_runtime=ai_runtime,
+        stats=stats,
+        should_cancel=should_cancel,
+    )
+    errors.extend(payload_errors)
+    if cancelled:
+        return stats, errors, True
 
     # sync colze cards
     if enable_cloze:
@@ -565,23 +602,21 @@ def _sync_changed_page_fast(
                 if payload.card_type == CLOZE
             ]
         if cloze_payloads:
-            for payload in cloze_payloads:
-                if _is_sync_cancelled(should_cancel):
-                    return stats, errors, True
-                stats = _replace_stats(stats, cards_seen=stats.cards_seen + 1)
-                stats, payload_errors, cancelled = _sync_one_payload(
-                    db=db,
-                    collection=collection,
-                    page_id=page_id,
-                    deck_id=deck_id,
-                    payload=payload,
-                    ai_runtime=ai_runtime,
-                    stats=stats,
-                    should_cancel=should_cancel,
-                )
-                errors.extend(payload_errors)
-                if cancelled:
-                    return stats, errors, True
+            # Keep existing stats semantics: only count candidate cloze payloads right before sync.
+            stats = _replace_stats(stats, cards_seen=stats.cards_seen + len(cloze_payloads))
+            stats, payload_errors, cancelled = _sync_payload_batch(
+                db=db,
+                collection=collection,
+                page_id=page_id,
+                deck_id=deck_id,
+                payloads=cloze_payloads,
+                ai_runtime=ai_runtime,
+                stats=stats,
+                should_cancel=should_cancel,
+            )
+            errors.extend(payload_errors)
+            if cancelled:
+                return stats, errors, True
 
     return stats, errors, False
 
@@ -642,6 +677,7 @@ def _repair_missing_notes_for_unchanged_page(
     )
     payloads_by_block_id = {payload.notion_block_id: payload for payload in payloads}
 
+    payloads_to_sync: list[ToggleCardPayload] = []
     for block_id in blocks_needing_resync:
         if _is_sync_cancelled(should_cancel):
             return stats, errors, True
@@ -650,19 +686,21 @@ def _repair_missing_notes_for_unchanged_page(
         if payload is None:
             errors.append(f"Block {block_id}: no payload could be generated during repair.")
             continue
-        stats, payload_errors, cancelled = _sync_one_payload(
-            db=db,
-            collection=collection,
-            page_id=page_id,
-            deck_id=deck_id,
-            payload=payload,
-            ai_runtime=ai_runtime,
-            stats=stats,
-            should_cancel=should_cancel,
-        )
-        errors.extend(payload_errors)
-        if cancelled:
-            return stats, errors, True
+        payloads_to_sync.append(payload)
+
+    stats, payload_errors, cancelled = _sync_payload_batch(
+        db=db,
+        collection=collection,
+        page_id=page_id,
+        deck_id=deck_id,
+        payloads=payloads_to_sync,
+        ai_runtime=ai_runtime,
+        stats=stats,
+        should_cancel=should_cancel,
+    )
+    errors.extend(payload_errors)
+    if cancelled:
+        return stats, errors, True
 
     return stats, errors, False
 
@@ -688,6 +726,55 @@ def _effective_card_type_for_block(
     return normalize_default_selectable_card_type(default_card_type)
 
 
+def _sync_payload_batch(
+    *,
+    db: Database,
+    collection: Any,
+    page_id: str,
+    deck_id: int,
+    payloads: list[ToggleCardPayload],
+    ai_runtime: AiSyncRuntime,
+    stats: SyncStats,
+    should_cancel: SyncCancelCheck | None = None,
+) -> tuple[SyncStats, list[str], bool]:
+    """Enrich one payload batch in parallel, then write Anki/DB mutations serially."""
+    if not payloads:
+        return stats, [], False
+
+    if _is_sync_cancelled(should_cancel):
+        return stats, [], True
+    enriched_items = _enrich_payloads_with_ai_parallel(
+        payloads=payloads,
+        collection=collection,
+        ai_runtime=ai_runtime,
+        should_cancel=should_cancel,
+    )
+    if _is_sync_cancelled(should_cancel):
+        return stats, [], True
+
+    errors: list[str] = []
+    for payload, ai_warnings, is_precomputed in enriched_items:
+        if _is_sync_cancelled(should_cancel):
+            return stats, errors, True
+        stats, payload_errors, cancelled = _sync_one_payload(
+            db=db,
+            collection=collection,
+            page_id=page_id,
+            deck_id=deck_id,
+            payload=payload,
+            ai_runtime=ai_runtime,
+            stats=stats,
+            should_cancel=should_cancel,
+            pre_enriched_payload=payload if is_precomputed else None,
+            precomputed_ai_warnings=ai_warnings if is_precomputed else None,
+        )
+        errors.extend(payload_errors)
+        if cancelled:
+            return stats, errors, True
+
+    return stats, errors, False
+
+
 def _sync_one_payload(
     db: Database,
     collection: Any,
@@ -697,6 +784,8 @@ def _sync_one_payload(
     ai_runtime: AiSyncRuntime,
     stats: SyncStats,
     should_cancel: SyncCancelCheck | None = None,
+    pre_enriched_payload: ToggleCardPayload | None = None,
+    precomputed_ai_warnings: list[str] | None = None,
 ) -> tuple[SyncStats, list[str], bool]:
     """Sync a single card payload (small wrapper around the existing mapping logic)."""
     if _is_sync_cancelled(should_cancel):
@@ -709,11 +798,15 @@ def _sync_one_payload(
 
     try:
         ai_warnings: list[str] = []
-        enriched_payload, ai_warnings = _enrich_payload_with_ai(
-            payload=payload,
-            collection=collection,
-            ai_runtime=ai_runtime,
-        )
+        if pre_enriched_payload is not None:
+            enriched_payload = pre_enriched_payload
+            ai_warnings = list(precomputed_ai_warnings or [])
+        else:
+            enriched_payload, ai_warnings = _enrich_payload_with_ai(
+                payload=payload,
+                collection=collection,
+                ai_runtime=ai_runtime,
+            )
         model_name = enriched_payload.model_name or MODEL_NAME_BASIC
         model = _model_by_name(collection, model_name)
         if model is None:
@@ -789,13 +882,78 @@ def _enrich_payload_with_ai(
     ai_runtime: AiSyncRuntime,
 ) -> tuple[ToggleCardPayload, list[str]]:
     """Inject AI variants/audio fields into eligible payloads before sync mapping checks."""
-    if payload.card_type not in {BASIC, INPUT, BASIC_REVERSED, CLOZE}:
+    prepared = _prepare_payload_ai_enrichment(
+        payload=payload,
+        collection=collection,
+        ai_runtime=ai_runtime,
+    )
+    if prepared is None:
         return payload, []
+    return _apply_prepared_ai_enrichment(prepared, ai_runtime=ai_runtime)
+
+
+def _enrich_payloads_with_ai_parallel(
+    *,
+    payloads: list[ToggleCardPayload],
+    collection: Any,
+    ai_runtime: AiSyncRuntime,
+    should_cancel: SyncCancelCheck | None = None,
+) -> list[tuple[ToggleCardPayload, list[str], bool]]:
+    """Prepare AI enrichment across payloads concurrently, then apply serially."""
+    if not payloads:
+        return []
+
+    workers = max(1, min(_AI_MAX_WORKERS, len(payloads)))
+    prepared_by_index: dict[int, _PreparedAiPayloadEnrichment | None] = {}
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_by_index: dict[Future[_PreparedAiPayloadEnrichment | None], int] = {}
+        for payload_index, payload in enumerate(payloads):
+            if _is_sync_cancelled(should_cancel):
+                break
+            future = executor.submit(
+                _prepare_payload_ai_enrichment,
+                payload=payload,
+                collection=collection,
+                ai_runtime=ai_runtime,
+            )
+            future_by_index[future] = payload_index
+
+        for future in as_completed(future_by_index):
+            payload_index = future_by_index[future]
+            try:
+                prepared_by_index[payload_index] = future.result()
+            except Exception:
+                prepared_by_index[payload_index] = None
+
+    enriched_items: list[tuple[ToggleCardPayload, list[str], bool]] = []
+    for payload_index, payload in enumerate(payloads):
+        if _is_sync_cancelled(should_cancel):
+            enriched_items.append((payload, [], False))
+            continue
+        prepared = prepared_by_index.get(payload_index)
+        if prepared is None:
+            # Keep failed/missed preparations on the serial fallback path in _sync_one_payload.
+            enriched_items.append((payload, [], False))
+            continue
+        enriched_payload, warnings = _apply_prepared_ai_enrichment(prepared, ai_runtime=ai_runtime)
+        enriched_items.append((enriched_payload, warnings, True))
+    return enriched_items
+
+
+def _prepare_payload_ai_enrichment(
+    *,
+    payload: ToggleCardPayload,
+    collection: Any,
+    ai_runtime: AiSyncRuntime,
+) -> _PreparedAiPayloadEnrichment | None:
+    """Compute AI variants/audio for one payload without mutating cache storage."""
+    if payload.card_type not in {BASIC, INPUT, BASIC_REVERSED, CLOZE}:
+        return None
 
     settings = ai_runtime.settings
     variants_enabled = _variants_enabled_for_card_type(payload.card_type, settings)
     if not variants_enabled and not settings.tts_enabled:
-        return payload, []
+        return None
 
     fields = dict(payload.fields) if payload.fields else {
         "Front": payload.front_html,
@@ -803,7 +961,6 @@ def _enrich_payload_with_ai(
         "Notion Block ID": payload.notion_block_id,
     }
     block_id = payload.notion_block_id
-    warnings: list[str] = []
     media_dir = _resolve_media_directory(collection)
 
     # Always initialize AI fields so disabling a feature clears stale note values.
@@ -813,113 +970,200 @@ def _enrich_payload_with_ai(
         fields[AI_REVERSE_VARIANTS_FIELD] = ""
         fields[AI_REVERSE_AUDIO_FIELD] = ""
 
-    for (
-        direction,
-        question_text,
-        answer_text,
-        variants_field,
-        audio_field,
-        use_cloze_variant_generation,
-        parse_cloze_tts,
-    ) in _ai_direction_payloads(payload, fields):
-        # Compute card hashes to determine when changes have occurred that require regeneration.
-        source_hash = _sha256_text(f"{question_text}\n---\n{answer_text}")
-        variants_settings_payload = _variant_settings_payload(payload.card_type, settings)
-        variants_settings_hash = _sha256_json(
-            variants_settings_payload
-        )
-        tts_settings_hash = _sha256_json(
-            {
-                "enabled": settings.tts_enabled,
-                "voice": settings.tts_voice,
-                "speed": settings.tts_speed,
-                "parse_cloze": bool(parse_cloze_tts),
-            }
-        )
-        cached = ai_runtime.assets_store.get_asset(block_id, direction)
-
-        # validate cached question variants
-        variants: list[str] = []
-        if variants_enabled:
-            # No changes accured since last generation, reuse cached generations.
-            if _is_cached_variants_valid(cached, source_hash, variants_settings_hash):
-                variants = list(cached.variants)
-
-            # Changes detected or no cache, generate new variants.
-            else:
-                try:
-                    if use_cloze_variant_generation:
-                        variants = ai_runtime.client.generate_cloze_variants(
-                            base_url=settings.api_base_url,
-                            cloze_text=question_text,
-                            number_variations=settings.generate_cloze_number_variations,
-                            style=settings.generate_cloze_style,
-                            difficulty=settings.generate_cloze_difficulty,
-                            no_trick_questions=settings.generate_cloze_no_trick_questions,
-                            keep_length_similar=settings.generate_cloze_keep_length_similar,
-                        )
-                    else:
-                        variants = ai_runtime.client.generate_question_variants(
-                            base_url=settings.api_base_url,
-                            question=question_text,
-                            answer=answer_text,
-                            number_variations=settings.generate_number_variations,
-                            style=settings.generate_style,
-                            difficulty=settings.generate_difficulty,
-                            no_trick_questions=settings.generate_no_trick_questions,
-                            keep_length_similar=settings.generate_keep_length_similar,
-                        )
-                except Exception as exc:
-                    warnings.append(f"Block {block_id} [{direction}] variants failed: {exc}")
-                    variants = [question_text]
-        else:
-            variants = [question_text]
-
-        # validate cached question audio generations
-        audio_files: list[str] = []
-        if settings.tts_enabled and variants:
-            # No changes accured since last generation, reuse cached generations.
-            if _is_cached_audio_valid(
-                cached=cached,
-                source_hash=source_hash,
-                variants_settings_hash=variants_settings_hash,
-                tts_settings_hash=tts_settings_hash,
-                expected_count=len(variants),
-                media_dir=media_dir,
-            ):
-                audio_files = list(cached.audio_files)
-
-            # Changes detected or no cache, generate new variants.
-            else:
-                audio_files = _generate_tts_audio_files(
-                    collection=collection,
-                    base_url=settings.api_base_url,
-                    ai_client=ai_runtime.client,
-                    block_id=block_id,
-                    direction=direction,
-                    voice=settings.tts_voice,
-                    speed=settings.tts_speed,
-                    variants=variants,
-                    warnings=warnings,
-                    parse_cloze=parse_cloze_tts,
-                )
-
-        # Persist the new generations in the assets store for future sync.
-        ai_runtime.assets_store.upsert_asset(
-            notion_block_id=block_id,
+    directions = _ai_direction_payloads(payload, fields)
+    direction_works = [
+        _AiDirectionWork(
+            block_id=block_id,
+            card_type=payload.card_type,
             direction=direction,
-            source_hash=source_hash,
-            variant_settings_hash=variants_settings_hash,
-            tts_settings_hash=tts_settings_hash,
-            variants=variants,
-            audio_files=audio_files,
+            question_text=question_text,
+            answer_text=answer_text,
+            variants_field=variants_field,
+            audio_field=audio_field,
+            use_cloze_variant_generation=use_cloze_variant_generation,
+            parse_cloze_tts=parse_cloze_tts,
         )
+        for (
+            direction,
+            question_text,
+            answer_text,
+            variants_field,
+            audio_field,
+            use_cloze_variant_generation,
+            parse_cloze_tts,
+        ) in directions
+    ]
+    direction_results = _prepare_ai_direction_results(
+        direction_works=direction_works,
+        collection=collection,
+        ai_runtime=ai_runtime,
+        media_dir=media_dir,
+    )
+    warnings: list[str] = []
+    for direction_result in direction_results:
+        warnings.extend(direction_result.warnings)
 
-        # update hash fields
-        fields[variants_field] = _encode_json_b64(variants)
-        fields[audio_field] = _encode_json_b64(audio_files)
+    return _PreparedAiPayloadEnrichment(
+        payload=payload,
+        fields=fields,
+        direction_results=direction_results,
+        warnings=warnings,
+    )
 
-    # Return an enriched payload with AI-generated fields for mapping and syncing.
+
+def _prepare_ai_direction_results(
+    *,
+    direction_works: list[_AiDirectionWork],
+    collection: Any,
+    ai_runtime: AiSyncRuntime,
+    media_dir: Path | None,
+) -> list[_AiDirectionResult]:
+    """Compute one payload's per-direction AI work with deterministic result ordering."""
+    if not direction_works:
+        return []
+    if len(direction_works) == 1:
+        return [
+            _prepare_one_ai_direction(
+                work=direction_works[0],
+                collection=collection,
+                ai_runtime=ai_runtime,
+                media_dir=media_dir,
+            )
+        ]
+
+    workers = max(1, min(_AI_MAX_WORKERS, len(direction_works)))
+    results_by_index: dict[int, _AiDirectionResult] = {}
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_by_index: dict[Future[_AiDirectionResult], int] = {
+            executor.submit(
+                _prepare_one_ai_direction,
+                work=work,
+                collection=collection,
+                ai_runtime=ai_runtime,
+                media_dir=media_dir,
+            ): index
+            for index, work in enumerate(direction_works)
+        }
+        for future in as_completed(future_by_index):
+            direction_index = future_by_index[future]
+            results_by_index[direction_index] = future.result()
+
+    return [results_by_index[index] for index in range(len(direction_works))]
+
+
+def _prepare_one_ai_direction(
+    *,
+    work: _AiDirectionWork,
+    collection: Any,
+    ai_runtime: AiSyncRuntime,
+    media_dir: Path | None,
+) -> _AiDirectionResult:
+    """Compute AI variants/audio for one direction and return a serializable result."""
+    settings = ai_runtime.settings
+    variants_enabled = _variants_enabled_for_card_type(work.card_type, settings)
+    source_hash = _sha256_text(f"{work.question_text}\n---\n{work.answer_text}")
+    variants_settings_hash = _sha256_json(_variant_settings_payload(work.card_type, settings))
+    tts_settings_hash = _sha256_json(
+        {
+            "enabled": settings.tts_enabled,
+            "voice": settings.tts_voice,
+            "speed": settings.tts_speed,
+            "parse_cloze": bool(work.parse_cloze_tts),
+        }
+    )
+    cached = ai_runtime.assets_store.get_asset(work.block_id, work.direction)
+    warnings: list[str] = []
+
+    variants: list[str]
+    if variants_enabled:
+        if _is_cached_variants_valid(cached, source_hash, variants_settings_hash):
+            variants = list(cached.variants)
+        else:
+            try:
+                if work.use_cloze_variant_generation:
+                    variants = ai_runtime.client.generate_cloze_variants(
+                        base_url=settings.api_base_url,
+                        cloze_text=work.question_text,
+                        number_variations=settings.generate_cloze_number_variations,
+                        style=settings.generate_cloze_style,
+                        difficulty=settings.generate_cloze_difficulty,
+                        no_trick_questions=settings.generate_cloze_no_trick_questions,
+                        keep_length_similar=settings.generate_cloze_keep_length_similar,
+                    )
+                else:
+                    variants = ai_runtime.client.generate_question_variants(
+                        base_url=settings.api_base_url,
+                        question=work.question_text,
+                        answer=work.answer_text,
+                        number_variations=settings.generate_number_variations,
+                        style=settings.generate_style,
+                        difficulty=settings.generate_difficulty,
+                        no_trick_questions=settings.generate_no_trick_questions,
+                        keep_length_similar=settings.generate_keep_length_similar,
+                    )
+            except Exception as exc:
+                warnings.append(f"Block {work.block_id} [{work.direction}] variants failed: {exc}")
+                variants = [work.question_text]
+    else:
+        variants = [work.question_text]
+
+    audio_files: list[str] = []
+    if settings.tts_enabled and variants:
+        if _is_cached_audio_valid(
+            cached=cached,
+            source_hash=source_hash,
+            variants_settings_hash=variants_settings_hash,
+            tts_settings_hash=tts_settings_hash,
+            expected_count=len(variants),
+            media_dir=media_dir,
+        ):
+            audio_files = list(cached.audio_files)
+        else:
+            audio_files = _generate_tts_audio_files(
+                collection=collection,
+                base_url=settings.api_base_url,
+                ai_client=ai_runtime.client,
+                block_id=work.block_id,
+                direction=work.direction,
+                voice=settings.tts_voice,
+                speed=settings.tts_speed,
+                variants=variants,
+                warnings=warnings,
+                parse_cloze=work.parse_cloze_tts,
+            )
+
+    return _AiDirectionResult(
+        work=work,
+        source_hash=source_hash,
+        variants_settings_hash=variants_settings_hash,
+        tts_settings_hash=tts_settings_hash,
+        variants=variants,
+        audio_files=audio_files,
+        warnings=warnings,
+    )
+
+
+def _apply_prepared_ai_enrichment(
+    prepared: _PreparedAiPayloadEnrichment,
+    *,
+    ai_runtime: AiSyncRuntime,
+) -> tuple[ToggleCardPayload, list[str]]:
+    """Persist prepared direction cache entries and return enriched payload."""
+    fields = dict(prepared.fields)
+    for direction_result in prepared.direction_results:
+        ai_runtime.assets_store.upsert_asset(
+            notion_block_id=direction_result.work.block_id,
+            direction=direction_result.work.direction,
+            source_hash=direction_result.source_hash,
+            variant_settings_hash=direction_result.variants_settings_hash,
+            tts_settings_hash=direction_result.tts_settings_hash,
+            variants=direction_result.variants,
+            audio_files=direction_result.audio_files,
+        )
+        fields[direction_result.work.variants_field] = _encode_json_b64(direction_result.variants)
+        fields[direction_result.work.audio_field] = _encode_json_b64(direction_result.audio_files)
+
+    payload = prepared.payload
     enriched_payload = ToggleCardPayload(
         notion_page_id=payload.notion_page_id,
         notion_block_id=payload.notion_block_id,
@@ -931,7 +1175,7 @@ def _enrich_payload_with_ai(
         content_hash=_compute_sync_payload_content_hash(payload, fields),
         last_edited_time=payload.last_edited_time,
     )
-    return enriched_payload, warnings
+    return enriched_payload, list(prepared.warnings)
 
 
 def _ai_direction_payloads(
@@ -1019,21 +1263,21 @@ def _generate_tts_audio_files(
         warnings.append(f"Block {block_id} [{direction}] TTS skipped: Anki media directory is unavailable.")
         return []
 
-    generated_files: list[str] = []
-    for index, variant in enumerate(variants):
-        try:
-            audio_bytes = ai_client.text_to_speech(
-                base_url=base_url,
-                text=variant,
-                voice=voice,
-                speed=speed,
-                output_format="mp3",
-                parse_cloze=parse_cloze,
-            )
-        except Exception as exc:
-            warnings.append(f"Block {block_id} [{direction}] TTS failed on variant {index + 1}: {exc}")
-            return []
+    if not variants:
+        return []
 
+    workers = max(1, min(_AI_MAX_WORKERS, len(variants)))
+    results_by_index: dict[int, tuple[str, bytes]] = {}
+
+    def generate_one(index: int, variant: str) -> tuple[int, str, bytes]:
+        audio_bytes = ai_client.text_to_speech(
+            base_url=base_url,
+            text=variant,
+            voice=voice,
+            speed=speed,
+            output_format="mp3",
+            parse_cloze=parse_cloze,
+        )
         filename = _tts_media_filename(
             block_id=block_id,
             direction=direction,
@@ -1042,6 +1286,25 @@ def _generate_tts_audio_files(
             voice=voice,
             speed=speed,
         )
+        return index, filename, audio_bytes
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_by_index: dict[Future[tuple[int, str, bytes]], int] = {
+            executor.submit(generate_one, index, variant): index
+            for index, variant in enumerate(variants)
+        }
+        for future in as_completed(future_by_index):
+            index = future_by_index[future]
+            try:
+                resolved_index, filename, audio_bytes = future.result()
+            except Exception as exc:
+                warnings.append(f"Block {block_id} [{direction}] TTS failed on variant {index + 1}: {exc}")
+                return []
+            results_by_index[resolved_index] = (filename, audio_bytes)
+
+    generated_files: list[str] = []
+    for index in range(len(variants)):
+        filename, audio_bytes = results_by_index[index]
         _write_media_file(media_dir, filename, audio_bytes)
         generated_files.append(filename)
 

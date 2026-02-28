@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import threading
 from typing import Any
 from urllib import error, request
 
@@ -55,6 +56,7 @@ class AiApiClient:
     def __init__(self, settings_store: AiSettingsStore, timeout_seconds: float = 20.0) -> None:
         self._settings_store = settings_store
         self._timeout_seconds = timeout_seconds
+        self._refresh_lock = threading.Lock()
 
     def login(self, base_url: str, email: str, password: str) -> LoginResult:
         """Exchange credentials for a token pair and persist it."""
@@ -372,11 +374,13 @@ class AiApiClient:
         # Create header and body for the request.
         request_url = f"{base_url.rstrip('/')}{path}"
         request_headers = {"Content-Type": "application/json"}
+        access_token_used = ""
         if require_auth:
             token_pair = self._settings_store.get_tokens()
             if token_pair is None or not token_pair.access_token:
                 raise AiApiError("Missing access token. Please login first.")
-            request_headers["Authorization"] = f"Bearer {token_pair.access_token}"
+            access_token_used = token_pair.access_token
+            request_headers["Authorization"] = f"Bearer {access_token_used}"
 
         # send request
         encoded_body = json.dumps(body).encode("utf-8") if body is not None else None
@@ -397,7 +401,10 @@ class AiApiClient:
             status_code = int(exc.code)
             response_body = bytes(exc.read())
             if require_auth and retry_on_unauthorized and status_code == 401:
-                self._refresh_access_token(base_url)
+                self._refresh_access_token_threadsafe(
+                    base_url=base_url,
+                    stale_access_token=access_token_used,
+                )
                 return self._request_raw(
                     method=method,
                     base_url=base_url,
@@ -411,6 +418,20 @@ class AiApiClient:
         # Raise API error for connection issues, timeouts, DNS errors, etc.
         except error.URLError as exc:
             raise AiApiError(f"Failed to reach AI API at {request_url}: {exc}") from exc
+
+    def _refresh_access_token_threadsafe(self, *, base_url: str, stale_access_token: str) -> None:
+        """Refresh tokens once for concurrent 401 responses across worker threads."""
+        with self._refresh_lock:
+            token_pair = self._settings_store.get_tokens()
+            if (
+                token_pair is not None
+                and token_pair.access_token
+                and stale_access_token
+                and token_pair.access_token != stale_access_token
+            ):
+                # Another worker already refreshed and persisted a newer token.
+                return
+            self._refresh_access_token(base_url)
 
     @staticmethod
     def _raise_api_error(status_code: int, response_body: bytes) -> None:
