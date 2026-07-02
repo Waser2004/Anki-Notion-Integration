@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, Optional
 from urllib import request, parse
 
 from .db import Database
@@ -66,7 +66,8 @@ class NotionBlock:
     children: tuple["NotionBlock", ...] = ()
 
 
-Transport = Callable[[str, str, dict[str, str], bytes | None, float], NotionResponse]
+# Keep this alias Python 3.9-compatible because it is evaluated at import time.
+Transport = Callable[[str, str, dict[str, str], Optional[bytes], float], NotionResponse]
 
 
 class NotionClient:

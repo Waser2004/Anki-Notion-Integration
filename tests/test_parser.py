@@ -67,6 +67,28 @@ def _text_item(
     }
 
 
+def _equation_item(
+    expression: str,
+    *,
+    annotations: dict | None = None,
+) -> dict:
+    """Create an inline equation rich-text item for tests."""
+    return {
+        "type": "equation",
+        "equation": {"expression": expression},
+        "href": None,
+        "annotations": annotations
+        or {
+            "bold": False,
+            "italic": False,
+            "strikethrough": False,
+            "underline": False,
+            "code": False,
+            "color": "default",
+        },
+    }
+
+
 class ParserTests(unittest.TestCase):
     """Validate parser rendering and toggle-card extraction rules."""
 
@@ -624,6 +646,169 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(payloads[0].card_type, "cloze")
         self.assertIn("{{c1::Paris}}", payloads[0].fields["Text"])
         self.assertEqual(payloads[0].fields["Extra"], "")
+
+    def test_parse_page_to_cards_cloze_preserves_non_highlighted_inline_math(self) -> None:
+        cloze_paragraph = _block(
+            "paragraph-cloze",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item("Solve "),
+                    _equation_item(r"x+1"),
+                    _text_item(" when "),
+                    _text_item(
+                        "x=2",
+                        annotations={
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "yellow_background",
+                        },
+                    ),
+                ]
+            },
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [cloze_paragraph],
+            default_card_type="basic",
+            enable_cloze=True,
+        )
+
+        self.assertEqual(payloads[0].fields["Text"], r"Solve \(x+1\) when {{c1::x=2}}")
+
+    def test_parse_page_to_cards_cloze_renders_highlighted_inline_math(self) -> None:
+        cloze_paragraph = _block(
+            "paragraph-cloze",
+            "paragraph",
+            {
+                "rich_text": [
+                    _equation_item(
+                        r"x^2",
+                        annotations={
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "yellow_background",
+                        },
+                    ),
+                ]
+            },
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [cloze_paragraph],
+            default_card_type="basic",
+            enable_cloze=True,
+        )
+
+        self.assertEqual(payloads[0].fields["Text"], r"{{c1::\(x^2\)}}")
+
+    def test_parse_page_to_cards_cloze_merges_contiguous_highlighted_text_and_math(self) -> None:
+        cloze_paragraph = _block(
+            "paragraph-cloze",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item("The derivative of "),
+                    _equation_item(
+                        r"x^2",
+                        annotations={
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "yellow_background",
+                        },
+                    ),
+                    _text_item(
+                        " is ",
+                        annotations={
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "yellow_background",
+                        },
+                    ),
+                    _equation_item(
+                        r"2x",
+                        annotations={
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "yellow_background",
+                        },
+                    ),
+                ]
+            },
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [cloze_paragraph],
+            default_card_type="basic",
+            enable_cloze=True,
+        )
+
+        self.assertEqual(
+            payloads[0].fields["Text"],
+            r"The derivative of {{c1::\(x^2\) is \(2x\)}}",
+        )
+        self.assertEqual(payloads[0].fields["Text"].count("{{c1::"), 1)
+
+    def test_parse_page_to_cards_cloze_keeps_separated_highlighted_runs_distinct(self) -> None:
+        cloze_paragraph = _block(
+            "paragraph-cloze",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item(
+                        "Paris",
+                        annotations={
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "yellow_background",
+                        },
+                    ),
+                    _text_item(" and "),
+                    _equation_item(
+                        r"\pi",
+                        annotations={
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "yellow_background",
+                        },
+                    ),
+                ]
+            },
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [cloze_paragraph],
+            default_card_type="basic",
+            enable_cloze=True,
+        )
+
+        self.assertEqual(payloads[0].fields["Text"], r"{{c1::Paris}} and {{c1::\(\pi\)}}")
+        self.assertEqual(payloads[0].fields["Text"].count("{{c1::"), 2)
 
     def test_parse_page_to_cards_cloze_extra_from_immediate_next_extra_paragraph(self) -> None:
         cloze_paragraph = _block(

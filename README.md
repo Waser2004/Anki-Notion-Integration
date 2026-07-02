@@ -24,7 +24,8 @@ The deployment script mirrors `src/Noteck` to:
 ## Dependency behavior (`keyring`)
 
 - `keyring` is required for secure storage of the Notion API key.
-- The add-on attempts runtime installation if `keyring` is missing.
+- The deployment scripts install Python dependencies into the add-on `_vendor` folder.
+- At startup, the add-on only checks whether `keyring` is importable and asks you to redeploy if it is missing.
 - The current Python requirement is `keyring>=25.7.0` (see `requirements.txt`).
 
 ## Running tests

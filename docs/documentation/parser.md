@@ -28,6 +28,8 @@ Each payload includes:
 - Source scope: top-level paragraph blocks only.
 - Marker: yellow highlight annotation (`color: yellow_background` or `background_color: yellow`).
 - Only paragraphs containing at least one marker emit a cloze payload.
+- Inline equations inside cloze text are rendered with Anki MathJax delimiters (`\(...\)`).
+- Consecutive highlighted rich-text fragments are combined into one cloze deletion, even when inline equations split the rich-text items.
 - Optional `Extra` field source: the immediate next top-level paragraph whose plain text starts with `Extra:` (case-insensitive).
 - The `Extra:` prefix is removed before rendering and the remaining rich text is kept as sanitized HTML.
 - The matched `Extra:` paragraph is consumed and is not emitted as a separate cloze payload, even if it also has yellow markers.

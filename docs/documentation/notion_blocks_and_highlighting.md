@@ -68,3 +68,5 @@ Cloze parsing treats text as a cloze marker when either condition is true:
 - `annotations.background_color == "yellow"`
 
 Only marked segments are converted into `{{c1::...}}`.
+Consecutive marked rich-text fragments are merged into one cloze, even when Notion splits inline math into separate `equation` items.
+Inline equations inside the cloze field are rendered with Anki MathJax inline delimiters (`\(...\)`).

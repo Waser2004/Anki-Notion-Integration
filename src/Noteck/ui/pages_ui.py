@@ -500,6 +500,25 @@ class PagesPage(QWidget):
         if item is None:
             return
 
+        # Removing a parent item also destroys its Qt child items, so purge the
+        # cached descendant wrappers first to avoid reusing deleted objects.
+        descendant_items: list[QTreeWidgetItem] = []
+        stack = [item]
+        while stack:
+            current_item = stack.pop()
+            for index in range(current_item.childCount()):
+                child_item = current_item.child(index)
+                descendant_items.append(child_item)
+                stack.append(child_item)
+
+        for descendant_item in descendant_items:
+            descendant_page_id = descendant_item.data(0, self._item_role_user())
+            if descendant_page_id:
+                self._items_by_id.pop(str(descendant_page_id), None)
+                if self._hovered_page_id == str(descendant_page_id):
+                    self._hovered_page_id = None
+            self._detach_item_actions(descendant_item)
+
         self._detach_item_actions(item)
         if self._hovered_page_id == page_id:
             self._hovered_page_id = None

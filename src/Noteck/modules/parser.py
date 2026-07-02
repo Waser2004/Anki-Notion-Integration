@@ -912,12 +912,7 @@ def _strip_extra_prefix_from_rich_text(rich_text: list[dict[str, Any]]) -> list[
 def _paragraph_has_cloze_marker(rich_text: Iterable[dict[str, Any]]) -> bool:
     """Return whether rich text includes a cloze marker annotation."""
     for item in rich_text:
-        annotations = item.get("annotations") if isinstance(item, dict) else None
-        if not isinstance(annotations, dict):
-            continue
-        color = str(annotations.get("color") or "").strip().lower()
-        background_color = str(annotations.get("background_color") or "").strip().lower()
-        if color == "yellow_background" or background_color == "yellow":
+        if _is_cloze_marker_item(item):
             return True
     return False
 
@@ -925,32 +920,70 @@ def _paragraph_has_cloze_marker(rich_text: Iterable[dict[str, Any]]) -> bool:
 def _rich_text_to_cloze_text(rich_text: Iterable[dict[str, Any]]) -> str:
     """Build Anki cloze text from Notion rich text using yellow markers."""
     parts: list[str] = []
+    run_parts: list[str] = []
+    run_is_marker: bool | None = None
+
+    def flush_run() -> None:
+        """Append one accumulated rich-text run to the final cloze output."""
+        nonlocal run_is_marker
+        if not run_parts:
+            return
+
+        rendered_run = "".join(run_parts)
+        parts.append(f"{{{{c1::{rendered_run}}}}}" if run_is_marker else rendered_run)
+        run_parts.clear()
+        run_is_marker = None
+
     for item in rich_text:
         if not isinstance(item, dict):
             continue
-
-        annotations = item.get("annotations")
-        is_marker = False
-        if isinstance(annotations, dict):
-            color = str(annotations.get("color") or "").strip().lower()
-            background_color = str(annotations.get("background_color") or "").strip().lower()
-            is_marker = color == "yellow_background" or background_color == "yellow"
-
-        raw_text = ""
-        if item.get("type") == "equation":
-            equation = item.get("equation")
-            if isinstance(equation, dict):
-                expression = equation.get("expression")
-                if isinstance(expression, str):
-                    raw_text = expression
-        else:
-            raw_text = _extract_text_content(item)
-        if not raw_text:
+        rendered_fragment = _render_cloze_rich_text_fragment(item)
+        if not rendered_fragment:
             continue
+        is_marker = _is_cloze_marker_item(item)
 
-        safe_text = html.escape(raw_text)
-        parts.append(f"{{{{c1::{safe_text}}}}}" if is_marker else safe_text)
+        # Merge adjacent highlighted items so one visual phrase becomes one cloze.
+        if run_is_marker is not None and is_marker != run_is_marker:
+            flush_run()
+
+        if run_is_marker is None:
+            run_is_marker = is_marker
+        run_parts.append(rendered_fragment)
+
+    flush_run()
     return "".join(parts)
+
+
+def _is_cloze_marker_item(item: Any) -> bool:
+    """Return whether one rich-text item is marked for cloze conversion."""
+    if not isinstance(item, dict):
+        return False
+
+    annotations = item.get("annotations")
+    if not isinstance(annotations, dict):
+        return False
+
+    color = str(annotations.get("color") or "").strip().lower()
+    background_color = str(annotations.get("background_color") or "").strip().lower()
+    return color == "yellow_background" or background_color == "yellow"
+
+
+def _render_cloze_rich_text_fragment(item: dict[str, Any]) -> str:
+    """Render one rich-text item for the cloze field without broader text styling."""
+    if item.get("type") == "equation":
+        equation = item.get("equation")
+        if not isinstance(equation, dict):
+            return ""
+
+        expression = _normalize_equation_expression(equation.get("expression"))
+        if not expression:
+            return ""
+        return f'\\({html.escape(expression)}\\)'
+
+    raw_text = _extract_text_content(item)
+    if not raw_text:
+        return ""
+    return html.escape(raw_text)
 
 
 def normalize_typed_answer(value: str) -> str:

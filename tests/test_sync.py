@@ -270,6 +270,10 @@ class _FakeNotionClientWithParagraphs(_FakeNotionClient):
 
     def get_page_blocks_shallow(self, page_id: str) -> list[NotionBlock]:
         _ = page_id
+        return self.get_page_content(page_id)
+
+    def get_page_content(self, page_id: str) -> list[NotionBlock]:
+        _ = page_id
         return [
             self._paragraph_block("cloze-excluded", "Excluded"),
             self._paragraph_block("cloze-included", "Included"),
@@ -1367,6 +1371,154 @@ class SyncTests(unittest.TestCase):
             connection.close()
         self.assertIsNotNone(row)
         self.assertIsNone(row["last_synced_at"])
+
+    def test_sync_unchanged_page_reprocesses_existing_cloze_cards_after_parser_upgrade(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        existing_note = collection.new_note({"name": "Notion (Cloze)"})
+        collection.add_note(existing_note, deck_id=1)
+        self._db.set_setting("enable_cloze_parsing", "1")
+
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                UPDATE pages
+                SET last_seen_notion_edit_time = ?
+                WHERE notion_page_id = ?
+                """,
+                ("2026-02-04T00:00:00.000Z", "page-1"),
+            )
+            connection.execute(
+                """
+                INSERT INTO cards (
+                    notion_block_id,
+                    notion_page_id,
+                    anki_note_id,
+                    card_type,
+                    content_hash,
+                    last_seen_notion_edit_time
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "cloze-included",
+                    "page-1",
+                    existing_note.id,
+                    "cloze",
+                    "legacy-hash",
+                    "2026-02-04T00:00:00.000Z",
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        cloze_payload = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="cloze-included",
+            card_type="cloze",
+            model_name="Notion (Cloze)",
+            fields={
+                "Text": "{{c1::Included}}",
+                "Extra": "",
+                "Notion Block ID": "cloze-included",
+            },
+            content_hash="hash-updated",
+            last_edited_time="2026-02-04T00:00:00.000Z",
+        )
+
+        fake_client = _FakeNotionClientWithParagraphs(page_last_edited_time="2026-02-04T00:00:00.000Z")
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=fake_client,
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[cloze_payload],
+        ) as parse_mock:
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_updated, 1)
+        parse_mock.assert_called_once()
+        include_block_ids = parse_mock.call_args.kwargs.get("include_block_ids")
+        self.assertEqual(list(include_block_ids), ["cloze-included"])
+        self.assertEqual(
+            self._db.get_setting(_SYNC_MODULE._CLOZE_REFRESH_REVISION_SETTING_KEY),
+            _SYNC_MODULE._CLOZE_REFRESH_REVISION,
+        )
+
+        connection = self._db.connect()
+        try:
+            row = connection.execute(
+                "SELECT content_hash FROM cards WHERE notion_block_id = ?",
+                ("cloze-included",),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(str(row["content_hash"]), "hash-updated")
+
+    def test_sync_unchanged_page_skips_repeat_cloze_refresh_after_revision_marker(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        existing_note = collection.new_note({"name": "Notion (Cloze)"})
+        collection.add_note(existing_note, deck_id=1)
+        self._db.set_setting("enable_cloze_parsing", "1")
+        self._db.set_setting(
+            _SYNC_MODULE._CLOZE_REFRESH_REVISION_SETTING_KEY,
+            _SYNC_MODULE._CLOZE_REFRESH_REVISION,
+        )
+
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                UPDATE pages
+                SET last_seen_notion_edit_time = ?
+                WHERE notion_page_id = ?
+                """,
+                ("2026-02-04T00:00:00.000Z", "page-1"),
+            )
+            connection.execute(
+                """
+                INSERT INTO cards (
+                    notion_block_id,
+                    notion_page_id,
+                    anki_note_id,
+                    card_type,
+                    content_hash,
+                    last_seen_notion_edit_time
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "cloze-included",
+                    "page-1",
+                    existing_note.id,
+                    "cloze",
+                    "hash-current",
+                    "2026-02-04T00:00:00.000Z",
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        fake_client = _FakeNotionClientWithParagraphs(page_last_edited_time="2026-02-04T00:00:00.000Z")
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=fake_client,
+        ), patch.object(_SYNC_MODULE, "parse_page_to_cards") as parse_mock:
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        parse_mock.assert_not_called()
+        self.assertEqual(result.stats.cards_updated, 0)
+        self.assertEqual(result.stats.cards_created, 0)
 
     def test_sync_unchanged_page_reprocesses_toggle_when_default_card_type_changes(self) -> None:
         collection = _FakeCollection()

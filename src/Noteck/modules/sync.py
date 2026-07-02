@@ -74,6 +74,8 @@ _MERMAID_FIGURE_RE = re.compile(
     re.DOTALL,
 )
 _HTTP_TIMEOUT_SECONDS = 20.0
+_CLOZE_REFRESH_REVISION_SETTING_KEY = "_internal_cloze_refresh_revision"
+_CLOZE_REFRESH_REVISION = "2026-02-cloze-inline-math-v1"
 
 
 def sync_notion_to_anki(
@@ -101,6 +103,10 @@ def sync_notion_to_anki(
     card_type_override_store = CardTypeOverrideStore(db)
     global_default_card_type = normalize_default_selectable_card_type(store.get_value("default_card_type"))
     enable_cloze = bool(store.get_value("enable_cloze_parsing"))
+    force_cloze_refresh = (
+        enable_cloze
+        and _load_cloze_refresh_revision(db) != _CLOZE_REFRESH_REVISION
+    )
 
     stats = SyncStats()
     errors: list[str] = []
@@ -170,6 +176,7 @@ def sync_notion_to_anki(
                     default_card_type=page_default_card_type,
                     card_type_overrides=page_card_type_overrides,
                     enable_cloze=enable_cloze,
+                    force_cloze_refresh=force_cloze_refresh,
                     should_cancel=should_cancel,
                 )
             
@@ -224,6 +231,9 @@ def sync_notion_to_anki(
             stats=stats,
             errors=tuple(errors),
         )
+
+    if force_cloze_refresh:
+        _set_cloze_refresh_revision(db, _CLOZE_REFRESH_REVISION)
 
     return SyncResult(
         ok=True,
@@ -562,6 +572,7 @@ def _repair_missing_notes_for_unchanged_page(
     default_card_type: str,
     card_type_overrides: dict[str, str],
     enable_cloze: bool,
+    force_cloze_refresh: bool = False,
     should_cancel: SyncCancelCheck | None = None,
 ) -> tuple[SyncStats, list[str], bool]:
     """Recreate local Anki notes that are missing even though the Notion page is unchanged."""
@@ -570,15 +581,21 @@ def _repair_missing_notes_for_unchanged_page(
 
     # Collect only blocks that need local repair so we avoid a full Notion page fetch.
     blocks_needing_resync: list[str] = []
+
+    def schedule_resync(block_id: str) -> None:
+        """Queue one block for re-parse without duplicating work."""
+        if block_id not in blocks_needing_resync:
+            blocks_needing_resync.append(block_id)
+
     for block_id, mapping in existing_cards.items():
         if mapping["excluded"]:
             continue
         note_id = mapping["anki_note_id"]
         if note_id is None:
-            blocks_needing_resync.append(block_id)
+            schedule_resync(block_id)
             continue
         if _get_note(collection, note_id) is None:
-            blocks_needing_resync.append(block_id)
+            schedule_resync(block_id)
             continue
 
         # Re-sync toggle notes when page default type changed without a Notion page edit.
@@ -588,7 +605,12 @@ def _repair_missing_notes_for_unchanged_page(
             card_type_overrides=card_type_overrides,
         )
         if _card_type_needs_default_conversion(mapping["card_type"], effective_card_type):
-            blocks_needing_resync.append(block_id)
+            schedule_resync(block_id)
+            continue
+
+        # Force one parser-refresh pass for existing cloze cards after parser upgrades.
+        if force_cloze_refresh and normalize_card_type(mapping["card_type"], default=BASIC) == CLOZE:
+            schedule_resync(block_id)
 
     if not blocks_needing_resync:
         return stats, errors, False
@@ -629,6 +651,16 @@ def _repair_missing_notes_for_unchanged_page(
             return stats, errors, True
 
     return stats, errors, False
+
+
+def _load_cloze_refresh_revision(db: Database) -> str | None:
+    """Return the last completed internal cloze-refresh revision, if any."""
+    return _as_optional_string(db.get_setting(_CLOZE_REFRESH_REVISION_SETTING_KEY))
+
+
+def _set_cloze_refresh_revision(db: Database, value: str) -> None:
+    """Persist the latest completed internal cloze-refresh revision."""
+    db.set_setting(_CLOZE_REFRESH_REVISION_SETTING_KEY, value)
 
 
 def _card_type_needs_default_conversion(current_card_type: str, default_card_type: str) -> bool:

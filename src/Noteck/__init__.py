@@ -3,6 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
+
+# Dependencies installed by the deployment scripts live next to the add-on.
+_VENDOR_DIR = Path(__file__).resolve().parent / "_vendor"
+if _VENDOR_DIR.is_dir():
+    _vendor_path = str(_VENDOR_DIR)
+    if _vendor_path not in sys.path:
+        sys.path.insert(0, _vendor_path)
 
 from .modules.db import Database
 from .modules.sync import trigger_startup_sync, trigger_sync_with_anki_button
