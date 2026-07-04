@@ -114,6 +114,16 @@ _MODEL_DEFINITIONS: tuple[ModelDefinition, ...] = (
 
 def ensure_notion_toggle_model(mw: Any) -> None:
     """Ensure all Notion note types exist in the collection."""
+    _ensure_notion_toggle_model(mw, overwrite_existing_templates=False)
+
+
+def restore_default_card_templates(mw: Any) -> None:
+    """Restore Noteck's default card template HTML and CSS."""
+    _ensure_notion_toggle_model(mw, overwrite_existing_templates=True)
+
+
+def _ensure_notion_toggle_model(mw: Any, *, overwrite_existing_templates: bool) -> None:
+    """Ensure Noteck note types exist, optionally resetting template contents."""
     collection = getattr(mw, "col", None)
     if collection is None:
         return
@@ -124,10 +134,21 @@ def ensure_notion_toggle_model(mw: Any) -> None:
 
     css = _build_managed_css(_load_model_css())
     for definition in _MODEL_DEFINITIONS:
-        _ensure_model(models, definition, css)
+        _ensure_model(
+            models,
+            definition,
+            css,
+            overwrite_existing_templates=overwrite_existing_templates,
+        )
 
 
-def _ensure_model(models: Any, definition: ModelDefinition, css: str) -> None:
+def _ensure_model(
+    models: Any,
+    definition: ModelDefinition,
+    css: str,
+    *,
+    overwrite_existing_templates: bool = False,
+) -> None:
     """Create one model definition or add only missing structure to an existing one."""
     model = _model_by_name(models, definition.name)
 
@@ -155,10 +176,19 @@ def _ensure_model(models: Any, definition: ModelDefinition, css: str) -> None:
         if existing_template is None:
             _add_template(models, model, template.name, template.front, template.back)
             changed = True
+            continue
+
+        if overwrite_existing_templates:
+            if str(existing_template.get("qfmt") or "") != template.front:
+                existing_template["qfmt"] = template.front
+                changed = True
+            if str(existing_template.get("afmt") or "") != template.back:
+                existing_template["afmt"] = template.back
+                changed = True
 
     # Initialize CSS for new or empty note types, but never overwrite existing styles.
     current_css = str(model.get("css") or "")
-    if created or not current_css.strip():
+    if created or overwrite_existing_templates or not current_css.strip():
         if current_css != css:
             model["css"] = css
             changed = True

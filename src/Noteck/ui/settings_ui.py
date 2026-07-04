@@ -29,6 +29,7 @@ from aqt.qt import (
 )
 
 from ..modules.card_types import DEFAULT_SELECTABLE_CARD_TYPES, card_type_label
+from ..modules.cards import restore_default_card_templates
 from ..modules.db import Database
 from ..modules.settings import (
     SettingDefinition,
@@ -262,8 +263,42 @@ class SettingsPage(QWidget):
         if key == "sync_notion_now":
             self._run_manual_notion_sync()
             return
+        if key == "restore_default_card_templates":
+            self._restore_default_card_templates()
+            return
 
         QMessageBox.information(self, "Settings", f"No action is registered for '{key}'.")
+
+    def _restore_default_card_templates(self) -> None:
+        """Reset Noteck note type templates after explicit user confirmation."""
+        if not self._confirm_restore_default_card_templates():
+            return
+
+        try:
+            restore_default_card_templates(self._context.mw)
+        except Exception as exc:
+            self._show_error(f"Failed to restore default card templates.\n\n{exc}")
+            return
+
+        QMessageBox.information(
+            self,
+            "Settings",
+            "Default card templates have been restored.",
+        )
+
+    def _confirm_restore_default_card_templates(self) -> bool:
+        """Ask before overwriting user-customized Noteck card templates."""
+        result = QMessageBox.question(
+            self,
+            "Restore default card templates",
+            (
+                "This will overwrite the HTML and styling for Noteck card templates "
+                "with the bundled defaults. Continue?"
+            ),
+        )
+        standard_button = getattr(QMessageBox, "StandardButton", None)
+        yes_value = standard_button.Yes if standard_button is not None else QMessageBox.Yes
+        return result == yes_value
 
     def _run_manual_notion_sync(self) -> None:
         """Trigger a manual Notion refresh through the Pages tab when available."""

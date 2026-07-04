@@ -103,6 +103,35 @@ class CardModelTests(unittest.TestCase):
         self.assertEqual(model["tmpls"][0]["qfmt"], "<custom-front>")
         self.assertEqual(model["tmpls"][0]["afmt"], "<custom-back>")
 
+    def test_restore_mode_overwrites_template_html_and_css(self) -> None:
+        definition = _MODEL_DEFINITIONS[0]
+        model = {
+            "name": MODEL_NAME_BASIC,
+            "flds": [{"name": name} for name in definition.fields],
+            "tmpls": [
+                {
+                    "name": BASIC_CARD_NAME,
+                    "qfmt": "<custom-front>",
+                    "afmt": "<custom-back>",
+                }
+            ],
+            "type": definition.model_type,
+            "css": "/* custom css */",
+        }
+        models = _FakeModels(model)
+
+        _ensure_model(
+            models,
+            definition,
+            "/* default css */",
+            overwrite_existing_templates=True,
+        )
+
+        self.assertTrue(models.updated)
+        self.assertEqual(model["css"], "/* default css */")
+        self.assertEqual(model["tmpls"][0]["qfmt"], definition.templates[0].front)
+        self.assertEqual(model["tmpls"][0]["afmt"], definition.templates[0].back)
+
 
 if __name__ == "__main__":
     unittest.main()

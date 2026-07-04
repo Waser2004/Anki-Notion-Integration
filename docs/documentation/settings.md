@@ -9,6 +9,7 @@ Settings are schema-driven from `src/Noteck/docs/settings.json`.
   - `default_card_type` (`basic`, `basic_reversed`, `input`)
   - `enable_cloze_parsing` (bool)
   - `enable_image_occlusion_parsing` (bool)
+  - `restore_default_card_templates` (button action)
 - `sync`:
   - `sync_with_anki_sync_button` (bool)
   - `notion_to_anki_auto_sync` (bool)

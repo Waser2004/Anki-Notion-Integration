@@ -45,6 +45,13 @@
           "name": "Enable image occlusion parsing",
           "description": "Enable image extraction for the Image Occlusion page.",
           "default": false
+        },
+        {
+          "key": "restore_default_card_templates",
+          "type": "button",
+          "name": "Restore default card templates",
+          "description": "Overwrite Noteck card template HTML and styling with the bundled defaults.",
+          "default": null
         }
       ]
     },
