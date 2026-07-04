@@ -24,11 +24,19 @@ from aqt.qt import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QTimer,
     QVBoxLayout,
     QWidget,
 )
 
 from ..modules.card_types import DEFAULT_SELECTABLE_CARD_TYPES, card_type_label
+from ..modules.cards import (
+    CARD_TEMPLATE_STATUS_CURRENT,
+    CARD_TEMPLATE_STATUS_UPDATE_AVAILABLE,
+    CARD_TEMPLATE_STATUS_USER_MODIFIED,
+    card_template_status,
+    restore_default_card_templates,
+)
 from ..modules.db import Database
 from ..modules.settings import (
     SettingDefinition,
@@ -148,6 +156,8 @@ class SettingsPage(QWidget):
         if setting.type == "button":
             widget = QPushButton(setting.name, self)
             widget.setToolTip(setting.description)
+            if setting.key == "restore_default_card_templates":
+                widget.setVisible(False)
             return widget
 
         if setting.type == "dropdown":
@@ -195,7 +205,9 @@ class SettingsPage(QWidget):
             # `editingFinished` persists when the user leaves the field or presses Enter.
             widget.editingFinished.connect(lambda k=key: self._autosave_setting(k))
         elif isinstance(widget, QPushButton):
-            widget.clicked.connect(lambda _checked=False, k=key: self._trigger_action(k))
+            widget.clicked.connect(
+                lambda _checked=False, k=key, button=widget: self._trigger_button_action(k, button)
+            )
 
     def reload_values(self) -> None:
         """Reload persisted values into the input widgets."""
@@ -229,6 +241,7 @@ class SettingsPage(QWidget):
                     widget.setText("" if value is None else str(value))
         finally:
             self._is_loading = False
+        self._refresh_card_template_action()
 
     def _autosave_setting(self, key: str) -> None:
         """Persist a single setting based on its current widget value."""
@@ -262,8 +275,82 @@ class SettingsPage(QWidget):
         if key == "sync_notion_now":
             self._run_manual_notion_sync()
             return
+        if key == "restore_default_card_templates":
+            self._restore_default_card_templates()
+            return
 
         QMessageBox.information(self, "Settings", f"No action is registered for '{key}'.")
+
+    def _trigger_button_action(self, key: str, button: QPushButton) -> None:
+        """Run a button action, then remove mouse-click focus while preserving tab focus."""
+        try:
+            self._trigger_action(key)
+        finally:
+            QTimer.singleShot(0, button.clearFocus)
+
+    def _restore_default_card_templates(self) -> None:
+        """Reset Noteck note type templates after explicit user confirmation."""
+        status = card_template_status(self._context.mw)
+        if not self._confirm_restore_default_card_templates(status):
+            return
+
+        try:
+            restore_default_card_templates(self._context.mw)
+        except Exception as exc:
+            self._show_error(f"Failed to restore default card templates.\n\n{exc}")
+            return
+
+        QMessageBox.information(
+            self,
+            "Settings",
+            "Card templates have been updated.",
+        )
+        self._refresh_card_template_action()
+
+    def _refresh_card_template_action(self) -> None:
+        """Show the restore action only when installed card templates differ."""
+        binding = self._bindings.get("restore_default_card_templates")
+        button = binding.widget if binding is not None else None
+        if not isinstance(button, QPushButton):
+            return
+
+        try:
+            status = card_template_status(self._context.mw)
+        except Exception as exc:
+            button.setVisible(True)
+            button.setEnabled(False)
+            button.setToolTip(f"Could not inspect card templates: {exc}")
+            return
+
+        should_show = status != CARD_TEMPLATE_STATUS_CURRENT
+        button.setVisible(should_show)
+        button.setEnabled(should_show)
+        if status == CARD_TEMPLATE_STATUS_UPDATE_AVAILABLE:
+            button.setText("Update card templates")
+            button.setToolTip("Install the latest bundled Noteck card templates.")
+        else:
+            button.setText(binding.definition.name)
+            button.setToolTip(binding.definition.description)
+
+    def _confirm_restore_default_card_templates(self, status: str) -> bool:
+        """Ask before overwriting user-customized Noteck card templates."""
+        title = "Update card templates"
+        message = "This will update Noteck card templates to the latest bundled version. Continue?"
+        if status == CARD_TEMPLATE_STATUS_USER_MODIFIED:
+            title = "Restore default card templates"
+            message = (
+                "This will overwrite the HTML and styling for Noteck card templates "
+                "with the bundled defaults. Continue?"
+            )
+
+        result = QMessageBox.question(
+            self,
+            title,
+            message,
+        )
+        standard_button = getattr(QMessageBox, "StandardButton", None)
+        yes_value = standard_button.Yes if standard_button is not None else QMessageBox.Yes
+        return result == yes_value
 
     def _run_manual_notion_sync(self) -> None:
         """Trigger a manual Notion refresh through the Pages tab when available."""

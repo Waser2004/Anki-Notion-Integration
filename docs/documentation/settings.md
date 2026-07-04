@@ -9,6 +9,7 @@ Settings are schema-driven from `src/Noteck/docs/settings.json`.
   - `default_card_type` (`basic`, `basic_reversed`, `input`)
   - `enable_cloze_parsing` (bool)
   - `enable_image_occlusion_parsing` (bool)
+  - `restore_default_card_templates` (button action)
 - `sync`:
   - `sync_with_anki_sync_button` (bool)
   - `notion_to_anki_auto_sync` (bool)
@@ -19,6 +20,9 @@ Settings are schema-driven from `src/Noteck/docs/settings.json`.
 - Defaults are inserted by `create_default_settings(db)` for DB-backed settings.
 - Dropdown values are validated against schema options.
 - Button settings are action-only and are not persisted.
+- The card template action is hidden when templates match the bundled defaults. It is shown
+  as an update action for older bundled template versions and as a restore action for
+  user-modified templates.
 
 ## Usage
 

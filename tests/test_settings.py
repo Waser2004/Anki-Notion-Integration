@@ -58,6 +58,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(self._db.get_setting("default_card_type"), "basic")
         self.assertEqual(self._db.get_setting("enable_cloze_parsing"), "1")
         self.assertEqual(self._db.get_setting("enable_image_occlusion_parsing"), "0")
+        self.assertIsNone(self._db.get_setting("restore_default_card_templates"))
         self.assertEqual(self._db.get_setting("sync_with_anki_sync_button"), "0")
         self.assertEqual(self._db.get_setting("notion_to_anki_auto_sync"), "1")
         self.assertIsNone(self._db.get_setting("sync_notion_now"))
@@ -78,8 +79,11 @@ class SettingsTests(unittest.TestCase):
     def test_button_settings_are_actions_only(self) -> None:
         store = SettingsStore(self._db, profile_name="test", schema=self._schema)
         self.assertIsNone(store.get_value("sync_notion_now"))
+        self.assertIsNone(store.get_value("restore_default_card_templates"))
         with self.assertRaises(SettingsError):
             store.set_value("sync_notion_now", "clicked")
+        with self.assertRaises(SettingsError):
+            store.set_value("restore_default_card_templates", "clicked")
 
     def test_keyring_secret_store_operations(self) -> None:
         secret_store = KeyringSecretStore("Noteck", "profile-a")
