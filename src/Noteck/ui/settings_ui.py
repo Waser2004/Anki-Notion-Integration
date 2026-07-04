@@ -24,6 +24,7 @@ from aqt.qt import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QTimer,
     QVBoxLayout,
     QWidget,
 )
@@ -204,7 +205,9 @@ class SettingsPage(QWidget):
             # `editingFinished` persists when the user leaves the field or presses Enter.
             widget.editingFinished.connect(lambda k=key: self._autosave_setting(k))
         elif isinstance(widget, QPushButton):
-            widget.clicked.connect(lambda _checked=False, k=key: self._trigger_action(k))
+            widget.clicked.connect(
+                lambda _checked=False, k=key, button=widget: self._trigger_button_action(k, button)
+            )
 
     def reload_values(self) -> None:
         """Reload persisted values into the input widgets."""
@@ -277,6 +280,13 @@ class SettingsPage(QWidget):
             return
 
         QMessageBox.information(self, "Settings", f"No action is registered for '{key}'.")
+
+    def _trigger_button_action(self, key: str, button: QPushButton) -> None:
+        """Run a button action, then remove mouse-click focus while preserving tab focus."""
+        try:
+            self._trigger_action(key)
+        finally:
+            QTimer.singleShot(0, button.clearFocus)
 
     def _restore_default_card_templates(self) -> None:
         """Reset Noteck note type templates after explicit user confirmation."""
