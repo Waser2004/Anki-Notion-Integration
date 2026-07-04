@@ -29,7 +29,13 @@ from aqt.qt import (
 )
 
 from ..modules.card_types import DEFAULT_SELECTABLE_CARD_TYPES, card_type_label
-from ..modules.cards import default_card_templates_are_modified, restore_default_card_templates
+from ..modules.cards import (
+    CARD_TEMPLATE_STATUS_CURRENT,
+    CARD_TEMPLATE_STATUS_UPDATE_AVAILABLE,
+    CARD_TEMPLATE_STATUS_USER_MODIFIED,
+    card_template_status,
+    restore_default_card_templates,
+)
 from ..modules.db import Database
 from ..modules.settings import (
     SettingDefinition,
@@ -274,7 +280,8 @@ class SettingsPage(QWidget):
 
     def _restore_default_card_templates(self) -> None:
         """Reset Noteck note type templates after explicit user confirmation."""
-        if not self._confirm_restore_default_card_templates():
+        status = card_template_status(self._context.mw)
+        if not self._confirm_restore_default_card_templates(status):
             return
 
         try:
@@ -286,7 +293,7 @@ class SettingsPage(QWidget):
         QMessageBox.information(
             self,
             "Settings",
-            "Default card templates have been restored.",
+            "Card templates have been updated.",
         )
         self._refresh_card_template_action()
 
@@ -298,26 +305,38 @@ class SettingsPage(QWidget):
             return
 
         try:
-            should_show = default_card_templates_are_modified(self._context.mw)
+            status = card_template_status(self._context.mw)
         except Exception as exc:
             button.setVisible(True)
             button.setEnabled(False)
             button.setToolTip(f"Could not inspect card templates: {exc}")
             return
 
+        should_show = status != CARD_TEMPLATE_STATUS_CURRENT
         button.setVisible(should_show)
         button.setEnabled(should_show)
-        button.setToolTip(binding.definition.description)
+        if status == CARD_TEMPLATE_STATUS_UPDATE_AVAILABLE:
+            button.setText("Update card templates")
+            button.setToolTip("Install the latest bundled Noteck card templates.")
+        else:
+            button.setText(binding.definition.name)
+            button.setToolTip(binding.definition.description)
 
-    def _confirm_restore_default_card_templates(self) -> bool:
+    def _confirm_restore_default_card_templates(self, status: str) -> bool:
         """Ask before overwriting user-customized Noteck card templates."""
-        result = QMessageBox.question(
-            self,
-            "Restore default card templates",
-            (
+        title = "Update card templates"
+        message = "This will update Noteck card templates to the latest bundled version. Continue?"
+        if status == CARD_TEMPLATE_STATUS_USER_MODIFIED:
+            title = "Restore default card templates"
+            message = (
                 "This will overwrite the HTML and styling for Noteck card templates "
                 "with the bundled defaults. Continue?"
-            ),
+            )
+
+        result = QMessageBox.question(
+            self,
+            title,
+            message,
         )
         standard_button = getattr(QMessageBox, "StandardButton", None)
         yes_value = standard_button.Yes if standard_button is not None else QMessageBox.Yes

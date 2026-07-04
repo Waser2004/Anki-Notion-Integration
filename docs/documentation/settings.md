@@ -20,6 +20,9 @@ Settings are schema-driven from `src/Noteck/docs/settings.json`.
 - Defaults are inserted by `create_default_settings(db)` for DB-backed settings.
 - Dropdown values are validated against schema options.
 - Button settings are action-only and are not persisted.
+- The card template action is hidden when templates match the bundled defaults. It is shown
+  as an update action for older bundled template versions and as a restore action for
+  user-modified templates.
 
 ## Usage
 

@@ -10,10 +10,16 @@ sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from Noteck.modules.cards import (  # noqa: E402
     BASIC_CARD_NAME,
+    CARD_TEMPLATE_STATUS_CURRENT,
+    CARD_TEMPLATE_STATUS_UPDATE_AVAILABLE,
+    CARD_TEMPLATE_STATUS_USER_MODIFIED,
     MODEL_NAME_BASIC,
     _MODEL_DEFINITIONS,
+    _build_managed_css,
     _ensure_model,
     _model_differs_from_defaults,
+    _model_template_status,
+    _strip_template_version,
 )
 
 
@@ -125,6 +131,72 @@ class CardModelTests(unittest.TestCase):
 
         model["tmpls"][0]["qfmt"] = "<custom-front>"
         self.assertTrue(_model_differs_from_defaults(models, definition, "/* default css */"))
+
+    def test_model_template_status_reports_current_templates(self) -> None:
+        definition = _MODEL_DEFINITIONS[0]
+        css = _build_managed_css("body { color: black; }")
+        model = {
+            "name": MODEL_NAME_BASIC,
+            "flds": [{"name": name} for name in definition.fields],
+            "tmpls": [
+                {
+                    "name": BASIC_CARD_NAME,
+                    "qfmt": definition.templates[0].front,
+                    "afmt": definition.templates[0].back,
+                }
+            ],
+            "type": definition.model_type,
+            "css": css,
+        }
+
+        self.assertEqual(
+            _model_template_status(_FakeModels(model), definition, css),
+            CARD_TEMPLATE_STATUS_CURRENT,
+        )
+
+    def test_model_template_status_reports_update_available_for_legacy_defaults(self) -> None:
+        definition = _MODEL_DEFINITIONS[0]
+        css = _build_managed_css("body { color: black; }")
+        model = {
+            "name": MODEL_NAME_BASIC,
+            "flds": [{"name": name} for name in definition.fields],
+            "tmpls": [
+                {
+                    "name": BASIC_CARD_NAME,
+                    "qfmt": _strip_template_version(definition.templates[0].front),
+                    "afmt": _strip_template_version(definition.templates[0].back),
+                }
+            ],
+            "type": definition.model_type,
+            "css": css,
+        }
+
+        self.assertEqual(
+            _model_template_status(_FakeModels(model), definition, css),
+            CARD_TEMPLATE_STATUS_UPDATE_AVAILABLE,
+        )
+
+    def test_model_template_status_reports_user_modified_for_custom_html(self) -> None:
+        definition = _MODEL_DEFINITIONS[0]
+        css = _build_managed_css("body { color: black; }")
+        model = {
+            "name": MODEL_NAME_BASIC,
+            "flds": [{"name": name} for name in definition.fields],
+            "tmpls": [
+                {
+                    "name": BASIC_CARD_NAME,
+                    "qfmt": "<custom-front>",
+                    "afmt": definition.templates[0].back,
+                }
+            ],
+            "type": definition.model_type,
+            "css": css,
+        }
+
+        self.assertEqual(
+            _model_template_status(_FakeModels(model), definition, css),
+            CARD_TEMPLATE_STATUS_USER_MODIFIED,
+        )
 
     def test_restore_mode_overwrites_template_html_and_css(self) -> None:
         definition = _MODEL_DEFINITIONS[0]
