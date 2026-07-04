@@ -29,7 +29,7 @@ from aqt.qt import (
 )
 
 from ..modules.card_types import DEFAULT_SELECTABLE_CARD_TYPES, card_type_label
-from ..modules.cards import restore_default_card_templates
+from ..modules.cards import default_card_templates_are_modified, restore_default_card_templates
 from ..modules.db import Database
 from ..modules.settings import (
     SettingDefinition,
@@ -149,6 +149,8 @@ class SettingsPage(QWidget):
         if setting.type == "button":
             widget = QPushButton(setting.name, self)
             widget.setToolTip(setting.description)
+            if setting.key == "restore_default_card_templates":
+                widget.setVisible(False)
             return widget
 
         if setting.type == "dropdown":
@@ -230,6 +232,7 @@ class SettingsPage(QWidget):
                     widget.setText("" if value is None else str(value))
         finally:
             self._is_loading = False
+        self._refresh_card_template_action()
 
     def _autosave_setting(self, key: str) -> None:
         """Persist a single setting based on its current widget value."""
@@ -285,6 +288,26 @@ class SettingsPage(QWidget):
             "Settings",
             "Default card templates have been restored.",
         )
+        self._refresh_card_template_action()
+
+    def _refresh_card_template_action(self) -> None:
+        """Show the restore action only when installed card templates differ."""
+        binding = self._bindings.get("restore_default_card_templates")
+        button = binding.widget if binding is not None else None
+        if not isinstance(button, QPushButton):
+            return
+
+        try:
+            should_show = default_card_templates_are_modified(self._context.mw)
+        except Exception as exc:
+            button.setVisible(True)
+            button.setEnabled(False)
+            button.setToolTip(f"Could not inspect card templates: {exc}")
+            return
+
+        button.setVisible(should_show)
+        button.setEnabled(should_show)
+        button.setToolTip(binding.definition.description)
 
     def _confirm_restore_default_card_templates(self) -> bool:
         """Ask before overwriting user-customized Noteck card templates."""

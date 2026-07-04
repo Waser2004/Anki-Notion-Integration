@@ -13,6 +13,7 @@ from Noteck.modules.cards import (  # noqa: E402
     MODEL_NAME_BASIC,
     _MODEL_DEFINITIONS,
     _ensure_model,
+    _model_differs_from_defaults,
 )
 
 
@@ -102,6 +103,28 @@ class CardModelTests(unittest.TestCase):
         self.assertEqual(model["css"], "/* custom css */")
         self.assertEqual(model["tmpls"][0]["qfmt"], "<custom-front>")
         self.assertEqual(model["tmpls"][0]["afmt"], "<custom-back>")
+
+    def test_model_differs_from_defaults_only_when_template_or_css_changes(self) -> None:
+        definition = _MODEL_DEFINITIONS[0]
+        model = {
+            "name": MODEL_NAME_BASIC,
+            "flds": [{"name": name} for name in definition.fields],
+            "tmpls": [
+                {
+                    "name": BASIC_CARD_NAME,
+                    "qfmt": definition.templates[0].front,
+                    "afmt": definition.templates[0].back,
+                }
+            ],
+            "type": definition.model_type,
+            "css": "/* default css */",
+        }
+        models = _FakeModels(model)
+
+        self.assertFalse(_model_differs_from_defaults(models, definition, "/* default css */"))
+
+        model["tmpls"][0]["qfmt"] = "<custom-front>"
+        self.assertTrue(_model_differs_from_defaults(models, definition, "/* default css */"))
 
     def test_restore_mode_overwrites_template_html_and_css(self) -> None:
         definition = _MODEL_DEFINITIONS[0]

@@ -122,6 +122,20 @@ def restore_default_card_templates(mw: Any) -> None:
     _ensure_notion_toggle_model(mw, overwrite_existing_templates=True)
 
 
+def default_card_templates_are_modified(mw: Any) -> bool:
+    """Return whether installed Noteck card templates differ from bundled defaults."""
+    collection = getattr(mw, "col", None)
+    if collection is None:
+        return False
+
+    models = getattr(collection, "models", None)
+    if models is None:
+        return False
+
+    css = _build_managed_css(_load_model_css())
+    return any(_model_differs_from_defaults(models, definition, css) for definition in _MODEL_DEFINITIONS)
+
+
 def _ensure_notion_toggle_model(mw: Any, *, overwrite_existing_templates: bool) -> None:
     """Ensure Noteck note types exist, optionally resetting template contents."""
     collection = getattr(mw, "col", None)
@@ -202,6 +216,24 @@ def _ensure_model(
         return
     if changed:
         _update_model(models, model)
+
+
+def _model_differs_from_defaults(models: Any, definition: ModelDefinition, css: str) -> bool:
+    """Check whether one existing model has user-visible template differences."""
+    model = _model_by_name(models, definition.name)
+    if model is None:
+        return False
+
+    for template in definition.templates:
+        existing_template = _template_by_name(model, template.name)
+        if existing_template is None:
+            return True
+        if str(existing_template.get("qfmt") or "") != template.front:
+            return True
+        if str(existing_template.get("afmt") or "") != template.back:
+            return True
+
+    return str(model.get("css") or "") != css
 
 
 def _model_by_name(models: Any, name: str) -> dict[str, Any] | None:
