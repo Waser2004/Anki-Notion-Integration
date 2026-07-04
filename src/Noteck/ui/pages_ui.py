@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import queue
 import threading
@@ -34,6 +35,9 @@ from ..modules.card_types import (
 from ..modules.db import Database
 from ..modules.notion_client import NotionApiError, NotionClient, NotionPage, NotionTransportError
 from ..modules.pages import (
+    DEFAULT_PAGE_SELECTION_BEHAVIOR,
+    PAGE_SELECTION_BEHAVIOR_DETAILS,
+    PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS,
     PagesStore,
     StoredPage,
     apply_default_card_type_rule,
@@ -41,10 +45,16 @@ from ..modules.pages import (
     build_children_map_from_pages,
     build_deck_names_from_pages,
     get_descendant_ids,
+    normalize_page_selection_behavior,
+    page_selection_behavior_tooltip,
 )
+from ..modules.settings import SettingsError, SettingsStore
 from .ui import navigate_to_page
 from .ui import UiContext
 from .context_menu_schema import ContextMenuEntry, load_context_menu_schema
+
+
+_DYNAMIC_SELECTION_PARENT_IDS_SETTING = "page_selection_dynamic_parent_ids"
 
 
 class PagesPage(QWidget):
@@ -55,6 +65,11 @@ class PagesPage(QWidget):
 
         self._db = Database(context.db_path)
         self._store = PagesStore(self._db)
+        self._settings_store = SettingsStore(
+            self._db,
+            profile_name=self._resolve_profile_name(context),
+        )
+        self._page_selection_behavior = self._load_page_selection_behavior()
         self._children_map: dict[str, tuple[str, ...]] = {}
         self._deck_names_by_page_id: dict[str, str] = {}
         self._page_default_card_types: dict[str, str | None] = {}
@@ -88,6 +103,12 @@ class PagesPage(QWidget):
         self._error_label.setWordWrap(True)
         self._error_label.hide()
         groupbox_layout.addWidget(self._error_label)
+
+        self._selection_behavior_label = QLabel("", self._groupbox)
+        self._selection_behavior_label.setWordWrap(True)
+        self._selection_behavior_label.setAutoFillBackground(True)
+        self._refresh_selection_behavior_label_style()
+        self._refresh_selection_behavior_label()
 
         self._tree = QTreeWidget(self)
         self._tree.setColumnCount(4)
@@ -137,8 +158,38 @@ class PagesPage(QWidget):
 
         self.reload()
 
+    def showEvent(self, event: Any) -> None:
+        """Refresh visible behavior text when returning from the Settings tab."""
+        super().showEvent(event)
+        # get previous and current behavior
+        previous_behavior             = self._page_selection_behavior
+        self._page_selection_behavior = self._load_page_selection_behavior()
+
+        # After change to dynamic-descendants behavior, re-apply cascade selection
+        if (
+            self._page_selection_behavior == PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS
+            and previous_behavior != PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS
+        ):
+            self._cascade_selected_parent_ids.update(self._selected_ids)
+            self._selected_ids = self._apply_cascade_selection(self._selected_ids)
+            self._apply_selected_ids(self._selected_ids)
+            self._persist_selection_state()
+
+        # Update the label text and position to reflect the current behavior.
+        self._refresh_selection_behavior_label()
+        self._position_selection_behavior_label()
+        QTimer.singleShot(0, self._refresh_selection_behavior_label_style)
+
+    def resizeEvent(self, event: Any) -> None:
+        """Keep the page-sync status aligned with the group-box title area."""
+        super().resizeEvent(event)
+        self._position_selection_behavior_label()
+        QTimer.singleShot(0, self._refresh_selection_behavior_label_style)
+
     def reload(self) -> None:
         """Load pages progressively and update the tree while data is being fetched."""
+        self._page_selection_behavior = self._load_page_selection_behavior()
+        self._refresh_selection_behavior_label()
         self._load_generation += 1
         generation = self._load_generation
         self._is_loading = True
@@ -161,9 +212,7 @@ class PagesPage(QWidget):
             self._page_default_card_types = {}
             self._ordered_child_ids_by_parent = {}
             self._selected_ids = self._store.get_selected_page_ids()
-            # Cascade tracking is session-local user intent. Persisted DB state
-            # should be restored exactly and must not auto-select descendants.
-            self._cascade_selected_parent_ids = set()
+            self._cascade_selected_parent_ids = self._load_dynamic_selection_parent_ids()
             self._cascade_card_type_parent_types = {}
             self._error_label.clear()
             self._error_label.hide()
@@ -695,6 +744,7 @@ class PagesPage(QWidget):
 
     def _persist_selection_state(self) -> None:
         """Persist known pages and currently selected ids to the pages table."""
+        self._persist_dynamic_selection_parent_ids()
         if not self._deck_names_by_page_id:
             return
         
@@ -729,6 +779,7 @@ class PagesPage(QWidget):
             for page_id, stored_page in stored_pages.items()
         }
         self._children_map = build_children_map_from_pages(self._pages_by_id)
+        self._selected_ids = self._apply_cascade_selection(self._selected_ids)
         self._sync_tree_items()
         self._apply_selected_ids(self._selected_ids)
 
@@ -805,6 +856,9 @@ class PagesPage(QWidget):
 
     def _apply_cascade_selection(self, selected_ids: set[str]) -> set[str]:
         """Ensure descendants of cascade-selected parents are selected when they appear."""
+        if self._page_selection_behavior != PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS:
+            return set(selected_ids)
+
         updated = set(selected_ids)
 
         for page_id in self._cascade_selected_parent_ids:
@@ -814,6 +868,87 @@ class PagesPage(QWidget):
             updated.update(get_descendant_ids(page_id, self._children_map))
 
         return updated
+
+    def _load_page_selection_behavior(self) -> str:
+        """Read the configured page-selection behavior from settings storage."""
+        try:
+            value = self._settings_store.get_value("page_selection_behavior")
+        except SettingsError:
+            return DEFAULT_PAGE_SELECTION_BEHAVIOR
+        return normalize_page_selection_behavior(value)
+
+    def _refresh_selection_behavior_label(self) -> None:
+        """Show the active page-selection behavior above the page tree."""
+        name, _ = PAGE_SELECTION_BEHAVIOR_DETAILS[self._page_selection_behavior]
+        self._selection_behavior_label.setText(self._selection_behavior_status_name(name))
+        self._selection_behavior_label.setToolTip(page_selection_behavior_tooltip(self._page_selection_behavior))
+        self._selection_behavior_label.adjustSize()
+        self._position_selection_behavior_label()
+
+    def _load_dynamic_selection_parent_ids(self) -> set[str]:
+        """Read persisted dynamic-selection roots from the settings table."""
+        raw_value = self._db.get_setting(_DYNAMIC_SELECTION_PARENT_IDS_SETTING)
+        if not raw_value:
+            return set()
+
+        try:
+            payload = json.loads(raw_value)
+        except json.JSONDecodeError:
+            return set()
+
+        if not isinstance(payload, list):
+            return set()
+
+        return {
+            page_id
+            for page_id in payload
+            if isinstance(page_id, str) and page_id.strip()
+        }
+
+    def _persist_dynamic_selection_parent_ids(self) -> None:
+        """Persist dynamic-selection roots so refreshes include future children."""
+        parent_ids = sorted(
+            page_id
+            for page_id in self._cascade_selected_parent_ids
+            if page_id in self._selected_ids
+        )
+        self._db.set_setting(_DYNAMIC_SELECTION_PARENT_IDS_SETTING, json.dumps(parent_ids))
+
+    def _position_selection_behavior_label(self) -> None:
+        """Place the page-sync status in the group box's top-right title area."""
+        label_width = self._selection_behavior_label.sizeHint().width()
+        label_height = self._selection_behavior_label.sizeHint().height()
+        right_margin = 20
+        top_margin = 0
+        x_position = max(0, self._groupbox.width() - label_width - right_margin)
+        self._selection_behavior_label.setGeometry(
+            x_position,
+            top_margin,
+            label_width,
+            label_height,
+        )
+        self._selection_behavior_label.raise_()
+
+    def _refresh_selection_behavior_label_style(self) -> None:
+        """Fill the badge with the group-box title-row surface color behind it."""
+        background_color = self._selection_behavior_label_background()
+        self._selection_behavior_label.setStyleSheet(
+            "QLabel {"
+            f" background-color: {background_color};"
+            " padding-left: 2px;"
+            " padding-right: 2px;"
+            "}"
+        )
+
+    def _selection_behavior_label_background(self) -> str:
+        """Return a background color that blends with the group box title area."""
+        palette = self._groupbox.palette()
+        return palette.color(self._groupbox.backgroundRole()).name()
+
+    @staticmethod
+    def _selection_behavior_status_name(name: str) -> str:
+        """Return the short status label for a page-selection behavior name."""
+        return name.split(":", 1)[0].strip()
 
     def _apply_cascade_card_type_to_page(self, page_id: str) -> None:
         """Apply one pending card-type cascade to a newly loaded page, if needed."""
@@ -932,12 +1067,13 @@ class PagesPage(QWidget):
         checked = item.checkState(0) == self._check_state_checked()
         page_id = str(page_id)
         selected_ids = self._collect_selected_ids()
-        descendants = get_descendant_ids(page_id, self._children_map)
-        has_selected_descendant = any(descendant in selected_ids for descendant in descendants)
         ancestor_ids = self._get_ancestor_ids(page_id)
 
         # Manage cascade-selected parents.
-        if checked and not has_selected_descendant:
+        if (
+            checked
+            and self._page_selection_behavior == PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS
+        ):
             self._cascade_selected_parent_ids.add(page_id)
         elif not checked:
             self._cascade_selected_parent_ids.discard(page_id)
@@ -949,6 +1085,7 @@ class PagesPage(QWidget):
             checked      = checked,
             selected_ids = selected_ids,
             children_map = self._children_map,
+            behavior     = self._page_selection_behavior,
         )
         updated_selected_ids = self._apply_cascade_selection(updated_selected_ids)
         self._selected_ids = set(updated_selected_ids)
@@ -1215,7 +1352,9 @@ class PagesPage(QWidget):
                 self._event_type_application_palette_change(),
             ):
                 self._reload_action_icons()
-                self._refresh_action_icons_in_tree()
+                if hasattr(self, "_tree"):
+                    self._refresh_action_icons_in_tree()
+                self._refresh_selection_behavior_label_style()
         super().changeEvent(event)
 
     @staticmethod

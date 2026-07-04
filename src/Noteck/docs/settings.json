@@ -10,6 +10,7 @@
           "type": "text",
           "name": "Notion Integration key",
           "description": "API key used to access Notion; stored securely in the OS keychain.",
+          "tooltip": "Notion integration secret stored in the OS keychain.",
           "default": "",
           "storage": "keyring"
         }
@@ -25,6 +26,7 @@
           "type": "dropdown",
           "name": "Default card type",
           "description": "Default card type used for synced pages unless overridden per page.",
+          "tooltip": "Fallback card type for synced pages.",
           "default": "basic",
           "options": [
             "basic",
@@ -37,6 +39,7 @@
           "type": "checkbox",
           "name": "Enable cloze parsing",
           "description": "Convert top-level paragraphs with yellow highlight markers to cloze cards.",
+          "tooltip": "Turn yellow-highlighted top-level paragraphs into cloze cards.",
           "default": true
         },
         {
@@ -44,6 +47,7 @@
           "type": "checkbox",
           "name": "Enable image occlusion parsing",
           "description": "Enable image extraction for the Image Occlusion page.",
+          "tooltip": "Show image candidates for Image Occlusion workflows.",
           "default": false
         },
         {
@@ -51,6 +55,7 @@
           "type": "button",
           "name": "Restore default card templates",
           "description": "Overwrite Noteck card template HTML and styling with the bundled defaults.",
+          "tooltip": "Restore bundled Noteck card templates.",
           "default": null
         }
       ]
@@ -65,6 +70,7 @@
           "type": "checkbox",
           "name": "Run Notion sync when Anki syncs",
           "description": "Start the Notion sync flow whenever the Anki Sync button is used.",
+          "tooltip": "Run Noteck sync before Anki sync.",
           "default": false
         },
         {
@@ -72,13 +78,28 @@
           "type": "checkbox",
           "name": "Notion → Anki auto-sync",
           "description": "Automatically sync selected Notion pages when Anki starts.",
+          "tooltip": "Sync selected Notion pages when Anki starts.",
           "default": true
+        },
+        {
+          "key": "page_selection_behavior",
+          "type": "dropdown",
+          "name": "Pages tab selection behavior",
+          "description": "Choose how Pages tab checkboxes handle parent pages, existing child pages, and child pages discovered on later refreshes.",
+          "tooltip": "Choose how parent and child page checkboxes behave.",
+          "default": "existing_descendants",
+          "options": [
+            "manual",
+            "existing_descendants",
+            "dynamic_descendants"
+          ]
         },
         {
           "key": "sync_notion_now",
           "type": "button",
           "name": "Sync Notion now",
           "description": "Run a manual Notion sync immediately.",
+          "tooltip": "Start a Notion sync now.",
           "default": null
         }
       ]
