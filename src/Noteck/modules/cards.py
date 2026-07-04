@@ -149,7 +149,10 @@ def _ensure_model(
     *,
     overwrite_existing_templates: bool = False,
 ) -> None:
-    """Create one model definition or add only missing structure to an existing one."""
+    """Create one model definition or update an existing one idempotently.
+
+    When overwrite_existing_templates is True, template HTML and CSS are reset to bundled defaults.
+    """
     model = _model_by_name(models, definition.name)
 
     # create model if not found.
@@ -186,7 +189,7 @@ def _ensure_model(
                 existing_template["afmt"] = template.back
                 changed = True
 
-    # Initialize CSS for new or empty note types, but never overwrite existing styles.
+    # Initialize CSS for new or empty note types, or when explicitly restoring defaults.
     current_css = str(model.get("css") or "")
     if created or overwrite_existing_templates or not current_css.strip():
         if current_css != css:
