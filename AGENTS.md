@@ -24,6 +24,9 @@ AI agents: follow these repo rules. Keep changes minimal and scoped.
 - Leave TODOs only when unavoidable and clearly scoped.
 - Always comment code to ensure readability by humans.
 - When preparing a PR, update the docs if the change affects behavior, usage, or any documented workflow.
+- A PR must always be created as ready for review.
+- If a PR is not ready for review, resolve the limiting factor and keep going until it is ready.
+- If the blocker is missing information, ask for clarification.
 
 ## Testing
 - Activate the project virtual environment (`.venv\Scripts\Activate.ps1`).
