@@ -128,7 +128,7 @@ def ensure_notion_toggle_model(mw: Any) -> None:
 
 
 def _ensure_model(models: Any, definition: ModelDefinition, css: str) -> None:
-    """Create or update one model definition idempotently."""
+    """Create one model definition or add only missing structure to an existing one."""
     model = _model_by_name(models, definition.name)
 
     # create model if not found.
@@ -149,24 +149,16 @@ def _ensure_model(models: Any, definition: ModelDefinition, css: str) -> None:
             _add_field(models, model, field_name)
             changed = True
 
-    # Update existing templates if front or back format has changed.
+    # Add missing templates, but preserve existing user-customized HTML.
     for template in definition.templates:
         existing_template = _template_by_name(model, template.name)
         if existing_template is None:
             _add_template(models, model, template.name, template.front, template.back)
             changed = True
-            continue
-        
-        if str(existing_template.get("qfmt") or "") != template.front:
-            existing_template["qfmt"] = template.front
-            changed = True
-        if str(existing_template.get("afmt") or "") != template.back:
-            existing_template["afmt"] = template.back
-            changed = True
 
-    # update existing css if it has changed.
+    # Initialize CSS for new or empty note types, but never overwrite existing styles.
     current_css = str(model.get("css") or "")
-    if created or not current_css.strip() or _is_managed_css(current_css):
+    if created or not current_css.strip():
         if current_css != css:
             model["css"] = css
             changed = True
