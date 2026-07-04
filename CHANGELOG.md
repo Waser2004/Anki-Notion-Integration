@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.0 - 2026-07-04
+
+- Added dynamic page-selection behavior so selecting or deselecting a parent page now keeps its descendant pages in sync.
+
 ## 1.1.0 - 2026-07-04
 
 - Preserved user-customized Noteck card template HTML and styling during normal startup and sync setup.
