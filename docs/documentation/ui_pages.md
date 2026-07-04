@@ -21,3 +21,13 @@ Current tabs:
 1. Add a schema entry in `ui.json` with unique `key`, `name`, `module`, and optional `factory`.
 2. Implement `build_page(parent, context) -> QWidget` in the module.
 3. Keep heavy work out of module import; load data on user action or `reload()`.
+
+## Pages tab selection behavior
+
+The Pages tab shows the active selection behavior in its status label. The dropdown for changing it is available in the Settings tab under Sync as `Pages tab selection behavior`.
+
+- `manual` (`Manual`): checkboxes affect only the page clicked. Parent pages and child pages stay independent.
+- `existing_descendants` (`Smart`): default compatibility mode. Selecting a parent with no already selected child pages also selects the child pages currently visible in the Pages tab. New child pages created in Notion later are not selected automatically.
+- `dynamic_descendants` (`Dynamic`): selecting a parent keeps its whole subtree selected. Child pages discovered on later refreshes are selected automatically as long as the parent remains selected.
+
+The row context menu action `Select Page and All Children` remains available for explicit one-time subtree selection regardless of the configured behavior.

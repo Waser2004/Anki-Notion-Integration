@@ -38,6 +38,12 @@ from ..modules.cards import (
     restore_default_card_templates,
 )
 from ..modules.db import Database
+from ..modules.pages import (
+    PAGE_SELECTION_BEHAVIORS,
+    PAGE_SELECTION_BEHAVIOR_DETAILS,
+    page_selection_behavior_description,
+    page_selection_behavior_tooltip,
+)
 from ..modules.settings import (
     SettingDefinition,
     SettingsError,
@@ -73,6 +79,7 @@ class SettingsPage(QWidget):
         self._store = SettingsStore(db, profile_name=profile_name, schema=self._schema)
 
         self._bindings: dict[str, _WidgetBinding] = {}
+        self._description_labels: dict[str, QLabel] = {}
         self._is_loading = False
 
         # build the UI
@@ -114,8 +121,16 @@ class SettingsPage(QWidget):
                 # add other input types
                 else:
                     label = QLabel(setting.name, group)
-                    label.setToolTip(setting.description)
+                    label.setToolTip(self._setting_tooltip(setting))
                     form_layout.addRow(label, input_widget)
+
+                    # add an extra description label for settings that need one
+                    if setting.key == "page_selection_behavior":
+                        description_label = QLabel("", group)
+                        description_label.setWordWrap(True)
+                        description_label.setStyleSheet("font-style: italic;")
+                        self._description_labels[setting.key] = description_label
+                        form_layout.addRow(description_label)
 
                 self._wire_autosave(setting.key, input_widget)
 
@@ -149,23 +164,32 @@ class SettingsPage(QWidget):
         """Return an input widget for a setting definition."""
         if setting.type in {"checkbox", "boolean"}:
             widget = QCheckBox(self)
-            widget.setToolTip(setting.description)
+            widget.setToolTip(self._setting_tooltip(setting))
 
             return widget
 
         if setting.type == "button":
             widget = QPushButton(setting.name, self)
-            widget.setToolTip(setting.description)
+            widget.setToolTip(self._setting_tooltip(setting))
             if setting.key == "restore_default_card_templates":
                 widget.setVisible(False)
             return widget
 
         if setting.type == "dropdown":
             widget = QComboBox(self)
-            widget.setToolTip(setting.description)
+            widget.setToolTip(self._setting_tooltip(setting))
             if setting.key == "default_card_type":
                 for card_type in DEFAULT_SELECTABLE_CARD_TYPES:
                     widget.addItem(card_type_label(card_type, abbreviation=False), card_type)
+            elif setting.key == "page_selection_behavior":
+                for behavior in PAGE_SELECTION_BEHAVIORS:
+                    name, _ = PAGE_SELECTION_BEHAVIOR_DETAILS[behavior]
+                    widget.addItem(name, behavior)
+                    widget.setItemData(
+                        widget.count() - 1,
+                        page_selection_behavior_tooltip(behavior),
+                        self._item_data_role_tooltip(),
+                    )
             elif setting.options:
                 widget.addItems(list(setting.options))
 
@@ -173,7 +197,7 @@ class SettingsPage(QWidget):
 
         if setting.type == "text":
             widget = QLineEdit(self)
-            widget.setToolTip(setting.description)
+            widget.setToolTip(self._setting_tooltip(setting))
 
             # Secrets are stored in keyring; keep the input masked by default.
             if setting.storage == "keyring":
@@ -189,6 +213,10 @@ class SettingsPage(QWidget):
         fallback.setWordWrap(True)
         return fallback
 
+    def _setting_tooltip(self, setting: SettingDefinition) -> str:
+        """Return short hover text for a setting."""
+        return setting.tooltip or setting.description
+
     def showEvent(self, event: Any) -> None:
         """Reload values whenever the Settings tab becomes visible."""
         super().showEvent(event)
@@ -199,7 +227,7 @@ class SettingsPage(QWidget):
         if isinstance(widget, QCheckBox):
             widget.stateChanged.connect(lambda _state, k=key: self._autosave_setting(k))
         elif isinstance(widget, QComboBox):
-            widget.currentIndexChanged.connect(lambda _index, k=key: self._autosave_setting(k))
+            widget.currentIndexChanged.connect(lambda _index, k=key: self._on_dropdown_changed(k))
         elif isinstance(widget, QLineEdit):
             # Saving on every keystroke is noisy (and for secrets may be undesirable);
             # `editingFinished` persists when the user leaves the field or presses Enter.
@@ -237,11 +265,31 @@ class SettingsPage(QWidget):
                     if index < 0:
                         index = widget.findText(text)
                     widget.setCurrentIndex(index if index >= 0 else 0)
+                    self._refresh_setting_description(key)
                 elif isinstance(widget, QLineEdit):
                     widget.setText("" if value is None else str(value))
         finally:
             self._is_loading = False
         self._refresh_card_template_action()
+
+    def _on_dropdown_changed(self, key: str) -> None:
+        """Refresh dropdown-dependent UI text and persist the selected value."""
+        self._refresh_setting_description(key)
+        self._autosave_setting(key)
+
+    def _refresh_setting_description(self, key: str) -> None:
+        """Update the extra description label for settings that need one."""
+        description_label = self._description_labels.get(key)
+        binding = self._bindings.get(key)
+        if description_label is None or binding is None:
+            return
+
+        widget = binding.widget
+        if key != "page_selection_behavior" or not isinstance(widget, QComboBox):
+            return
+
+        selected_behavior = widget.currentData()
+        description_label.setText(page_selection_behavior_description(str(selected_behavior)))
 
     def _autosave_setting(self, key: str) -> None:
         """Persist a single setting based on its current widget value."""
@@ -287,6 +335,16 @@ class SettingsPage(QWidget):
             self._trigger_action(key)
         finally:
             QTimer.singleShot(0, button.clearFocus)
+
+    @staticmethod
+    def _item_data_role_tooltip() -> Any:
+        """Return the Qt tooltip role in a Qt-version-safe way."""
+        from aqt.qt import Qt
+
+        item_data_role = getattr(Qt, "ItemDataRole", None)
+        if item_data_role is not None and hasattr(item_data_role, "ToolTipRole"):
+            return getattr(item_data_role, "ToolTipRole")
+        return getattr(Qt, "ToolTipRole")
 
     def _restore_default_card_templates(self) -> None:
         """Reset Noteck note type templates after explicit user confirmation."""

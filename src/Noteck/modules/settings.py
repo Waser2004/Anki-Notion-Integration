@@ -22,6 +22,7 @@ class SettingDefinition:
     name: str
     description: str
     default: Any
+    tooltip: str | None = None
     options: tuple[str, ...] | None = None
     storage: str = "db"
 
@@ -116,6 +117,7 @@ def _parse_setting_definition(payload: Mapping[str, Any]) -> SettingDefinition:
     setting_type = payload.get("type")
     name         = payload.get("name")
     description  = payload.get("description", "")
+    tooltip      = payload.get("tooltip")
     default      = payload.get("default")
     options      = payload.get("options")
     storage      = payload.get("storage", "db")
@@ -138,6 +140,7 @@ def _parse_setting_definition(payload: Mapping[str, Any]) -> SettingDefinition:
         name=name,
         description=description,
         default=default,
+        tooltip=str(tooltip) if tooltip is not None else None,
         options=options_tuple,
         storage=storage,
     )
@@ -288,6 +291,7 @@ class SettingsStore:
             "type": setting.type,
             "name": setting.name,
             "description": setting.description,
+            "tooltip": setting.tooltip,
             "default": setting.default,
             "value": self.get_value(setting.key),
         }

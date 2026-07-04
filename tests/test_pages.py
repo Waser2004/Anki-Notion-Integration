@@ -12,6 +12,11 @@ sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 from Noteck.modules.db import Database
 from Noteck.modules.notion_client import NotionPage, PageNode
 from Noteck.modules.pages import (
+    DEFAULT_PAGE_SELECTION_BEHAVIOR,
+    PAGE_SELECTION_BEHAVIOR_DETAILS,
+    PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS,
+    PAGE_SELECTION_BEHAVIOR_EXISTING_DESCENDANTS,
+    PAGE_SELECTION_BEHAVIOR_MANUAL,
     PagesStore,
     apply_default_card_type_rule,
     apply_selection_rule,
@@ -19,6 +24,9 @@ from Noteck.modules.pages import (
     build_children_map_from_pages,
     build_deck_names,
     build_deck_names_from_pages,
+    normalize_page_selection_behavior,
+    page_selection_behavior_description,
+    page_selection_behavior_tooltip,
 )
 
 
@@ -55,7 +63,7 @@ def _page(
 
 
 class SelectionRuleTests(unittest.TestCase):
-    """Validate asymmetric parent/child selection behavior."""
+    """Validate configured parent/child selection behavior."""
 
     def setUp(self) -> None:
         grandchild = _node("grandchild", "Grandchild")
@@ -69,8 +77,29 @@ class SelectionRuleTests(unittest.TestCase):
             checked=True,
             selected_ids={"parent"},
             children_map=self._children_map,
+            behavior=PAGE_SELECTION_BEHAVIOR_EXISTING_DESCENDANTS,
         )
         self.assertEqual(selected, {"parent", "child", "grandchild"})
+
+    def test_manual_select_parent_only_selects_parent(self) -> None:
+        selected = apply_selection_rule(
+            "parent",
+            checked=True,
+            selected_ids={"parent"},
+            children_map=self._children_map,
+            behavior=PAGE_SELECTION_BEHAVIOR_MANUAL,
+        )
+        self.assertEqual(selected, {"parent"})
+
+    def test_manual_deselect_parent_only_deselects_parent(self) -> None:
+        selected = apply_selection_rule(
+            "parent",
+            checked=False,
+            selected_ids={"parent", "child", "grandchild"},
+            children_map=self._children_map,
+            behavior=PAGE_SELECTION_BEHAVIOR_MANUAL,
+        )
+        self.assertEqual(selected, {"child", "grandchild"})
 
     def test_select_parent_does_not_force_descendants_when_any_already_selected(self) -> None:
         selected = apply_selection_rule(
@@ -78,6 +107,7 @@ class SelectionRuleTests(unittest.TestCase):
             checked=True,
             selected_ids={"parent", "child"},
             children_map=self._children_map,
+            behavior=PAGE_SELECTION_BEHAVIOR_EXISTING_DESCENDANTS,
         )
         self.assertEqual(selected, {"parent", "child"})
 
@@ -89,6 +119,56 @@ class SelectionRuleTests(unittest.TestCase):
             children_map=self._children_map,
         )
         self.assertEqual(selected, {"child", "grandchild"})
+
+    def test_dynamic_select_parent_selects_all_known_descendants(self) -> None:
+        selected = apply_selection_rule(
+            "parent",
+            checked=True,
+            selected_ids={"parent", "child"},
+            children_map=self._children_map,
+            behavior=PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS,
+        )
+        self.assertEqual(selected, {"parent", "child", "grandchild"})
+
+    def test_dynamic_deselect_parent_deselects_descendants(self) -> None:
+        selected = apply_selection_rule(
+            "parent",
+            checked=False,
+            selected_ids={"parent", "child", "grandchild"},
+            children_map=self._children_map,
+            behavior=PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS,
+        )
+        self.assertEqual(selected, set())
+
+    def test_unknown_selection_behavior_uses_default(self) -> None:
+        self.assertEqual(
+            normalize_page_selection_behavior("unsupported"),
+            DEFAULT_PAGE_SELECTION_BEHAVIOR,
+        )
+
+    def test_selection_behavior_labels_are_short_setting_labels(self) -> None:
+        self.assertEqual(PAGE_SELECTION_BEHAVIOR_DETAILS[PAGE_SELECTION_BEHAVIOR_MANUAL][0], "Manual")
+        self.assertEqual(PAGE_SELECTION_BEHAVIOR_DETAILS[PAGE_SELECTION_BEHAVIOR_EXISTING_DESCENDANTS][0], "Smart")
+        self.assertEqual(PAGE_SELECTION_BEHAVIOR_DETAILS[PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS][0], "Dynamic")
+
+    def test_selection_behavior_descriptions_are_shared_by_behavior_key(self) -> None:
+        self.assertIn("only the page you click", page_selection_behavior_description(PAGE_SELECTION_BEHAVIOR_MANUAL))
+        self.assertIn("currently visible", page_selection_behavior_description(PAGE_SELECTION_BEHAVIOR_EXISTING_DESCENDANTS))
+        self.assertIn("later refreshes", page_selection_behavior_description(PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS))
+
+    def test_selection_behavior_tooltips_are_short_and_behavior_specific(self) -> None:
+        self.assertEqual(
+            page_selection_behavior_tooltip(PAGE_SELECTION_BEHAVIOR_MANUAL),
+            "Only toggle the clicked page.",
+        )
+        self.assertEqual(
+            page_selection_behavior_tooltip(PAGE_SELECTION_BEHAVIOR_EXISTING_DESCENDANTS),
+            "Include currently visible children when selecting a new parent.",
+        )
+        self.assertEqual(
+            page_selection_behavior_tooltip(PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS),
+            "Keep selected parent subtrees synced as new children appear.",
+        )
 
 
 class DefaultCardTypeRuleTests(unittest.TestCase):

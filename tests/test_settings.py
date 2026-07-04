@@ -61,6 +61,7 @@ class SettingsTests(unittest.TestCase):
         self.assertIsNone(self._db.get_setting("restore_default_card_templates"))
         self.assertEqual(self._db.get_setting("sync_with_anki_sync_button"), "0")
         self.assertEqual(self._db.get_setting("notion_to_anki_auto_sync"), "1")
+        self.assertEqual(self._db.get_setting("page_selection_behavior"), "existing_descendants")
         self.assertIsNone(self._db.get_setting("sync_notion_now"))
         self.assertIsNone(self._db.get_setting("notion_api_key"))
 
@@ -98,3 +99,23 @@ class SettingsTests(unittest.TestCase):
         store = SettingsStore(self._db, profile_name="test", schema=self._schema)
         with self.assertRaises(SettingsError):
             store.set_value("default_card_type", "unsupported")
+        with self.assertRaises(SettingsError):
+            store.set_value("page_selection_behavior", "unsupported")
+
+    def test_settings_schema_provides_custom_tooltips(self) -> None:
+        for setting in self._schema.settings():
+            self.assertIsNotNone(setting.tooltip, setting.key)
+            self.assertNotEqual(setting.tooltip, setting.description, setting.key)
+
+    def test_grouped_settings_include_custom_tooltips(self) -> None:
+        store = SettingsStore(self._db, profile_name="test", schema=self._schema)
+        grouped_settings = store.get_grouped_settings()
+        setting_payloads = {
+            setting["key"]: setting
+            for category in grouped_settings
+            for setting in category["settings"]
+        }
+        self.assertEqual(
+            setting_payloads["page_selection_behavior"]["tooltip"],
+            "Choose how parent and child page checkboxes behave.",
+        )

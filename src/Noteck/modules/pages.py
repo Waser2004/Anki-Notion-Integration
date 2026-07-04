@@ -10,6 +10,51 @@ from .card_types import normalize_default_selectable_card_type
 from .db import Database
 from .notion_client import NotionPage, PageNode
 
+PAGE_SELECTION_BEHAVIOR_MANUAL               = "manual"
+PAGE_SELECTION_BEHAVIOR_EXISTING_DESCENDANTS = "existing_descendants"
+PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS  = "dynamic_descendants"
+PAGE_SELECTION_BEHAVIORS = (
+    PAGE_SELECTION_BEHAVIOR_MANUAL,
+    PAGE_SELECTION_BEHAVIOR_EXISTING_DESCENDANTS,
+    PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS,
+)
+DEFAULT_PAGE_SELECTION_BEHAVIOR = PAGE_SELECTION_BEHAVIOR_EXISTING_DESCENDANTS
+PAGE_SELECTION_BEHAVIOR_DETAILS = {
+    PAGE_SELECTION_BEHAVIOR_MANUAL: (
+        "Manual",
+        "Checkboxes affect only the page you click. Parent pages and child pages stay independent. "
+        "Use this when you want precise control over exactly which Notion pages sync.",
+    ),
+    PAGE_SELECTION_BEHAVIOR_EXISTING_DESCENDANTS: (
+        "Smart",
+        "Selecting a parent with no already selected child pages also selects the child pages currently visible "
+        "in the Pages tab. New child pages created in Notion later are not selected automatically.",
+    ),
+    PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS: (
+        "Dynamic",
+        "Selecting a parent keeps its whole subtree selected. Child pages discovered on later refreshes are "
+        "selected automatically as long as the parent remains selected.",
+    ),
+}
+PAGE_SELECTION_BEHAVIOR_TOOLTIPS = {
+    PAGE_SELECTION_BEHAVIOR_MANUAL: "Only toggle the clicked page.",
+    PAGE_SELECTION_BEHAVIOR_EXISTING_DESCENDANTS: "Include currently visible children when selecting a new parent.",
+    PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS: "Keep selected parent subtrees synced as new children appear.",
+}
+
+
+def page_selection_behavior_description(behavior: str) -> str:
+    """Return reusable descriptive text for one page-selection behavior."""
+    normalized_behavior = normalize_page_selection_behavior(behavior)
+    _, description = PAGE_SELECTION_BEHAVIOR_DETAILS[normalized_behavior]
+    return description
+
+
+def page_selection_behavior_tooltip(behavior: str) -> str:
+    """Return short hover text for one page-selection behavior."""
+    normalized_behavior = normalize_page_selection_behavior(behavior)
+    return PAGE_SELECTION_BEHAVIOR_TOOLTIPS[normalized_behavior]
+
 
 @dataclass(frozen=True)
 class StoredPage:
@@ -91,26 +136,64 @@ def get_descendant_ids(page_id: str, children_map: Mapping[str, tuple[str, ...]]
     return descendants
 
 
+def normalize_page_selection_behavior(value: object) -> str:
+    """Return a supported page-selection behavior, falling back to the default."""
+    normalized = str(value or "").strip()
+    if normalized in PAGE_SELECTION_BEHAVIORS:
+        return normalized
+    return DEFAULT_PAGE_SELECTION_BEHAVIOR
+
+
 def apply_selection_rule(
     page_id: str,
     checked: bool,
     selected_ids: set[str],
     children_map: Mapping[str, tuple[str, ...]],
+    behavior: str = DEFAULT_PAGE_SELECTION_BEHAVIOR,
 ) -> set[str]:
-    """Apply the asymmetric selection behavior and return the updated selected set."""
+    """Apply the configured page-selection behavior and return selected page ids."""
     updated = set(selected_ids)
+    normalized_behavior = normalize_page_selection_behavior(behavior)
 
-    # Deselecting a page only deselects that page.
-    if not checked:
-        updated.discard(page_id)
+    # Manual mode intentionally changes only the row the user toggled.
+    if normalized_behavior == PAGE_SELECTION_BEHAVIOR_MANUAL:
+        if checked:
+            updated.add(page_id)
+        else:
+            updated.discard(page_id)
         return updated
 
-    # Selecting a page selects it and all its descendants, if all descendants are not already selected.
-    updated.add(page_id)
-    descendants = get_descendant_ids(page_id, children_map)
-    has_selected_descendant = any(descendant in selected_ids for descendant in descendants)
-    if not has_selected_descendant:
+    # Smart mode preserves the historical one-time subtree selection behavior.
+    if normalized_behavior == PAGE_SELECTION_BEHAVIOR_EXISTING_DESCENDANTS:
+        # Deselecting a page only deselects that page.
+        if not checked:
+            updated.discard(page_id)
+            return updated
+
+        # Selecting a page selects it and all its descendants, if all descendants are not already selected.
+        updated.add(page_id)
+        descendants = get_descendant_ids(page_id, children_map)
+        has_selected_descendant = any(descendant in selected_ids for descendant in descendants)
+        if not has_selected_descendant:
+            updated.update(descendants)
+
+        return updated
+    
+    # Dynamic mode treats a checked parent as an ongoing subtree subscription.
+    if normalized_behavior == PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS:
+        # Deselecting a page deselects it and all its descendants.
+        if not checked:
+            updated.discard(page_id)
+            descendants = get_descendant_ids(page_id, children_map)
+            updated.difference_update(descendants)
+            return updated
+
+        # Selecting a page selects it and all its descendants.
+        updated.add(page_id)
+        descendants = get_descendant_ids(page_id, children_map)
         updated.update(descendants)
+
+        return updated
 
     return updated
 

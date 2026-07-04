@@ -10,7 +10,7 @@ This document describes the Anki add-on architecture for Notion → Anki sync.
 ## Components
 
 ### UI
-- `Pages` tab: page tree, sync selection, per-page card type override, Image Occlusion shortcut.
+- `Pages` tab: page tree, sync selection with active selection-behavior status, per-page card type override, Image Occlusion shortcut.
 - `Cards` tab: per-page toggle list with exclusion control and override reset actions.
 - `Image Occlusion` tab: page-scoped image candidates and IOE launcher.
 - `Settings` tab: schema-driven settings editor.
@@ -19,6 +19,7 @@ This document describes the Anki add-on architecture for Notion → Anki sync.
 - Global default card type: `basic`, `basic_reversed`, `input`.
 - Feature toggles: cloze parsing, image occlusion parsing.
 - Sync toggles: startup/manual sync triggers.
+- Page selection behavior: `manual` (`Manual`), `existing_descendants` (`Smart`), `dynamic_descendants` (`Dynamic`).
 
 ### Parser / Renderer
 - Toggle cards: `basic`, `basic_reversed`, `input`.
@@ -34,5 +35,5 @@ This document describes the Anki add-on architecture for Notion → Anki sync.
 ### Persistence
 - `pages`: selection, deck mapping, hierarchy metadata, optional `default_card_type` override.
 - `cards`: Notion block → note mapping, `card_type`, content hash, sync metadata.
-- `settings`: DB-backed schema values + keyring secrets.
+- `settings`: DB-backed schema values + keyring secrets, including page-selection behavior and dynamic subtree-selection roots.
 - `card_type_overrides`: optional per-toggle card-type overrides with page linkage.

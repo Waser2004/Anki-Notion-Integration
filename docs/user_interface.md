@@ -27,9 +27,12 @@ The **Pages** tab provides a hierarchical tree of accessible Notion pages.
 
 **Selection behavior** remains asymmetric:
 
-- Selecting a parent selects descendants only when none of its descendants are already selected.
-- Deselecting a parent affects only that parent.
-- Child toggles do not change parent selection.
+- The active behavior is shown in the Pages tab status label.
+- The behavior is configured in Settings under Sync as **Pages tab selection behavior**.
+- **Manual**: checking a page affects only that page.
+- **Smart**: default compatibility mode; checking a parent with no selected child pages also selects the currently visible child pages.
+- **Dynamic**: checking a parent keeps its subtree selected, including child pages discovered on later refreshes.
+- The context menu action **Select Page and All Children** remains available for explicit one-time subtree selection.
 
 ---
 
