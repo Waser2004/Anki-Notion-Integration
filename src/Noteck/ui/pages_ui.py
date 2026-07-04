@@ -941,22 +941,9 @@ class PagesPage(QWidget):
         )
 
     def _selection_behavior_label_background(self) -> str:
-        """Sample the rendered group-box title surface beside the status label."""
-        if self._groupbox.width() <= 0 or self._groupbox.height() <= 0:
-            return self._groupbox.palette().alternateBase().color().name()
-
-        label_rect = self._selection_behavior_label.geometry()
-        sample_x = max(0, label_rect.x() - 8)
-        sample_y = min(
-            max(0, label_rect.y() + label_rect.height() // 2),
-            self._groupbox.height() - 1,
-        )
-
-        image = self._groupbox.grab().toImage()
-        if image.isNull() or sample_x >= image.width() or sample_y >= image.height():
-            return self._groupbox.palette().alternateBase().color().name()
-
-        return image.pixelColor(sample_x, sample_y).name()
+        """Return a background color that blends with the group box title area."""
+        palette = self._groupbox.palette()
+        return palette.color(self._groupbox.backgroundRole()).name()
 
     @staticmethod
     def _selection_behavior_status_name(name: str) -> str:
