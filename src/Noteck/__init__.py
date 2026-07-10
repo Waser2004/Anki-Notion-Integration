@@ -17,7 +17,6 @@ from .modules.sync import trigger_startup_sync, trigger_sync_with_anki_button
 from .modules.cards import ensure_notion_toggle_model
 from .modules.settings import create_default_settings
 from .modules.notion_client import NotionClient
-from .modules.dependency_installer import install_keyring_dependency_with_progress
 
 # This project is primarily an Anki add-on, but we also want the core modules to be
 # importable in plain Python test environments where `aqt` is not available.
@@ -52,9 +51,6 @@ def on_profile_did_open() -> None:
         ensure_notion_toggle_model(mw)
         if callable(initialize_ui):
             initialize_ui()
-
-        # Install keyring dependency if needed and surface progress in the UI.
-        install_keyring_dependency_with_progress(parent=mw)
 
         trigger_startup_sync(mw=mw, db_path=db_path)
         
