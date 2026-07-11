@@ -11,6 +11,9 @@ from .db import Database
 from .settings import SettingsStore
 
 
+NOTION_API_VERSION = "2026-03-11"
+
+
 class NotionApiError(RuntimeError):
     """Raised when the Notion API returns an error response."""
 
@@ -76,7 +79,7 @@ class NotionClient:
     def __init__(
         self,
         api_token: str,
-        notion_version: str = "2022-06-28",
+        notion_version: str = NOTION_API_VERSION,
         base_url: str = "https://api.notion.com/v1",
         timeout_seconds: float = 15.0,
         transport: Transport | None = None,
@@ -90,13 +93,14 @@ class NotionClient:
         self._timeout_seconds = timeout_seconds
         self._transport = transport or self._default_transport
         self._block_parent_page_cache: dict[str, str | None] = {}
+        self._page_parent_type_cache: dict[str, str | None] = {}
 
     @classmethod
     def from_settings(
         cls,
         db: Database,
         profile_name: str | None = None,
-        notion_version: str = "2022-06-28",
+        notion_version: str = NOTION_API_VERSION,
         base_url: str = "https://api.notion.com/v1",
         timeout_seconds: float = 15.0,
         transport: Transport | None = None,
@@ -127,7 +131,22 @@ class NotionClient:
 
         for page_payload in self._paginate_search(payload):
             page = self._normalize_page(page_payload)
-            if not include_database_pages and page.parent_type == "database_id":
+            raw_parent = page_payload.get("parent") or {}
+            raw_parent_type = raw_parent.get("type")
+            if raw_parent_type != "block_id":
+                self._page_parent_type_cache[page.page_id] = (
+                    str(raw_parent_type) if raw_parent_type else None
+                )
+
+            if not include_database_pages and page.parent_type in {"database_id", "data_source_id"}:
+                continue
+            if (
+                not include_database_pages
+                and raw_parent_type == "block_id"
+                and page.parent_type == "page_id"
+                and page.parent_id
+                and self._is_database_page(page.parent_id)
+            ):
                 continue
             yield page
 
@@ -360,6 +379,17 @@ class NotionClient:
         for visited_block_id in visited:
             self._block_parent_page_cache[visited_block_id] = None
         return None
+
+    def _is_database_page(self, page_id: str) -> bool:
+        """Return whether a page is a row in a database or data source."""
+        if page_id not in self._page_parent_type_cache:
+            payload     = self._request_json("GET", f"/pages/{page_id}", None)
+            parent      = payload.get("parent") or {}
+            parent_type = parent.get("type")
+            
+            self._page_parent_type_cache[page_id] = str(parent_type) if parent_type else None
+
+        return self._page_parent_type_cache[page_id] in {"database_id", "data_source_id"}
 
     def _extract_page_title(self, payload: dict[str, Any]) -> str:
         """Return the best-effort page title from Notion properties."""
