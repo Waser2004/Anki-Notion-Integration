@@ -9,6 +9,15 @@ Provide a small, testable wrapper around the Notion REST API that supports the M
 
 This module intentionally uses only the Python standard library (no extra HTTP dependencies).
 
+## Notion API version
+
+The client sends `Notion-Version: 2026-03-11` by default. The upgrade is
+compatible with the endpoints currently used by Noteck: search, page
+retrieval, block retrieval, and block-child operations. The 2026-03-11
+breaking changes (`after` → `position`, `archived` → `in_trash`, and
+`transcription` → `meeting_notes`) do not apply to any request or response
+fields used by this client.
+
 ## How authentication works
 
 `NotionClient.from_settings(db, profile_name=...)` reads the API token from `SettingsStore` using the `notion_api_key` setting (stored in the OS keychain via `keyring`).
@@ -35,7 +44,7 @@ The original API payload is always retained as `raw` for future feature growth.
 
 #### `list_pages(include_database_pages: bool = False) -> list[NotionPage]`
 - Uses the Notion `/search` endpoint and handles pagination.
-- Current default behavior excludes pages whose parent is a database (`parent.type == "database_id"`), because database navigation is not yet implemented.
+- Current default behavior excludes database rows whose parent is a database (`parent.type == "database_id"`) or data source (`parent.type == "data_source_id"`), and also excludes pages nested inside those rows (pages whose raw parent is a `block_id` that resolves to a database row), because database navigation is not yet implemented.
 - Returns a flat list of normalized pages with titles extracted from `properties[*].type == "title"`.
 
 #### `list_pages_tree(include_database_pages: bool = False) -> list[PageNode]`
