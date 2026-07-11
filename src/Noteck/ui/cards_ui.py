@@ -225,8 +225,9 @@ class CardsPage(QWidget):
             settings = SettingsStore(db, profile_name=self._resolve_profile_name(self._context))
             enable_cloze = bool(settings.get_value("enable_cloze_parsing"))
             enable_gray_toggle_cloze = bool(settings.get_value("enable_gray_toggle_cloze_parsing"))
+            cloze_marker_colors = list(settings.get_value("cloze_marker_colors"))
             blocks = client.get_page_blocks_shallow(page_id)
-            cloze_parser = ClozeCardParser()
+            cloze_parser = ClozeCardParser(cloze_marker_colors)
             cards: list[dict[str, str]] = []
             for block in blocks:
                 if block.block_type == "toggle":
@@ -247,7 +248,9 @@ class CardsPage(QWidget):
                         }
                     )
                     continue
-                if block.block_type == "paragraph" and self._paragraph_has_cloze_marker(block.raw):
+                if block.block_type == "paragraph" and self._paragraph_has_cloze_marker(
+                    block.raw, cloze_marker_colors
+                ):
                     cards.append(
                         {
                             "notion_block_id": block.block_id,
@@ -802,7 +805,7 @@ class CardsPage(QWidget):
         return "".join(parts)
 
     @staticmethod
-    def _paragraph_has_cloze_marker(raw_payload: dict[str, Any]) -> bool:
+    def _paragraph_has_cloze_marker(raw_payload: dict[str, Any], marker_colors: list[str]) -> bool:
         """Return whether one paragraph contains cloze-marker rich-text annotations."""
         paragraph_payload = raw_payload.get("paragraph")
         if not isinstance(paragraph_payload, dict):
@@ -820,8 +823,8 @@ class CardsPage(QWidget):
             color = str(annotations.get("color") or "").strip().lower()
             background_color = str(annotations.get("background_color") or "").strip().lower()
             # Paragraph clozes use the same marker palette as advanced toggle clozes.
-            marker_colors = {"yellow", "green", "blue", "purple", "pink", "orange", "red", "brown"}
-            if color.removesuffix("_background") in marker_colors or background_color.removesuffix("_background") in marker_colors:
+            selected_colors = set(marker_colors)
+            if color.removesuffix("_background") in selected_colors or background_color.removesuffix("_background") in selected_colors:
                 return True
         return False
 

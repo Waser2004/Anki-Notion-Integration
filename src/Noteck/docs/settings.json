@@ -51,6 +51,15 @@
           "default": true
         },
         {
+          "key": "cloze_marker_colors",
+          "type": "multiselect",
+          "name": "Cloze marker colors",
+          "description": "Choose which Notion background colors create cloze deletions. Unselected colors remain visual formatting.",
+          "tooltip": "Select the background colors that should be converted into cloze deletions.",
+          "default": ["yellow", "green", "blue", "purple"],
+          "options": ["yellow", "green", "blue", "purple", "pink", "orange", "red", "brown"]
+        },
+        {
           "key": "enable_image_occlusion_parsing",
           "type": "checkbox",
           "name": "Enable image occlusion parsing",

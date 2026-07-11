@@ -61,6 +61,7 @@ def parse_page_to_cards(
     card_type_overrides:      Mapping[str, str] | None = None,
     enable_cloze:             bool = False,
     enable_gray_toggle_cloze: bool = True,
+    cloze_marker_colors:      Collection[str] | None = None,
     include_block_ids:        Collection[str] | None = None,
 ) -> list[ToggleCardPayload]:
     """Coordinate the focused card parser services for one Notion page."""
@@ -76,7 +77,7 @@ def parse_page_to_cards(
         }
     
     basic_parser = BasicCardParser()
-    cloze_parser = ClozeCardParser()
+    cloze_parser = ClozeCardParser(cloze_marker_colors)
     payloads: list[ToggleCardPayload] = []
 
     # Parse top-level toggles

@@ -15,7 +15,7 @@ from urllib import request
 from urllib.parse import urlsplit
 
 from .card_types import BASIC, CLOZE, DEFAULT_SELECTABLE_CARD_TYPES, normalize_card_type, normalize_default_selectable_card_type
-from .parser.cloze_card_parser import ClozeCardParser
+from .parser.cloze_card_parser import CLOZE_MARKER_COLORS, ClozeCardParser
 from .card_type_overrides import CardTypeOverrideStore
 from .cards import MODEL_NAME_BASIC, ensure_notion_toggle_model
 from .db import Database
@@ -78,6 +78,7 @@ _HTTP_TIMEOUT_SECONDS = 20.0
 _CLOZE_REFRESH_REVISION_SETTING_KEY = "_internal_cloze_refresh_revision"
 _CLOZE_REFRESH_REVISION = "2026-07-paragraph-color-markers-v2"
 _GRAY_TOGGLE_CLOZE_ENABLED_SETTING_KEY = "_internal_gray_toggle_cloze_enabled"
+_CLOZE_MARKER_COLORS_SETTING_KEY = "_internal_cloze_marker_colors"
 
 
 def sync_notion_to_anki(
@@ -106,6 +107,10 @@ def sync_notion_to_anki(
     global_default_card_type = normalize_default_selectable_card_type(store.get_value("default_card_type"))
     enable_cloze = bool(store.get_value("enable_cloze_parsing"))
     enable_gray_toggle_cloze = bool(store.get_value("enable_gray_toggle_cloze_parsing"))
+    cloze_marker_colors = list(store.get_value("cloze_marker_colors"))
+    force_cloze_marker_colors_refresh = (
+        enable_cloze and _load_cloze_marker_colors(db) != cloze_marker_colors
+    )
     force_gray_toggle_cloze_refresh = (
         enable_cloze
         and _load_gray_toggle_cloze_enabled(db) != enable_gray_toggle_cloze
@@ -184,8 +189,10 @@ def sync_notion_to_anki(
                     card_type_overrides=page_card_type_overrides,
                     enable_cloze=enable_cloze,
                     enable_gray_toggle_cloze=enable_gray_toggle_cloze,
+                    cloze_marker_colors=cloze_marker_colors,
                     force_cloze_refresh=force_cloze_refresh,
                     force_gray_toggle_cloze_refresh=force_gray_toggle_cloze_refresh,
+                    force_cloze_marker_colors_refresh=force_cloze_marker_colors_refresh,
                     should_cancel=should_cancel,
                 )
             
@@ -202,6 +209,7 @@ def sync_notion_to_anki(
                     card_type_overrides=page_card_type_overrides,
                     enable_cloze=enable_cloze,
                     enable_gray_toggle_cloze=enable_gray_toggle_cloze,
+                    cloze_marker_colors=cloze_marker_colors,
                     should_cancel=should_cancel,
                 )
 
@@ -246,6 +254,7 @@ def sync_notion_to_anki(
         _set_cloze_refresh_revision(db, _CLOZE_REFRESH_REVISION)
     if enable_cloze:
         _set_gray_toggle_cloze_enabled(db, enable_gray_toggle_cloze)
+        _set_cloze_marker_colors(db, cloze_marker_colors)
 
     return SyncResult(
         ok=True,
@@ -449,6 +458,7 @@ def _sync_changed_page_fast(
     card_type_overrides: dict[str, str],
     enable_cloze: bool,
     enable_gray_toggle_cloze: bool,
+    cloze_marker_colors: list[str],
     should_cancel: SyncCancelCheck | None = None,
 ) -> tuple[SyncStats, list[str], bool]:
     """Sync a page by expanding only toggles that are new/changed/missing locally."""
@@ -459,7 +469,7 @@ def _sync_changed_page_fast(
     # Shallow fetch: direct children only (no recursion).
     blocks = client.get_page_blocks_shallow(page_id)
     toggles = [block for block in blocks if block.block_type == "toggle"]
-    cloze_parser = ClozeCardParser()
+    cloze_parser = ClozeCardParser(cloze_marker_colors)
 
     for toggle in toggles:
         if _is_sync_cancelled(should_cancel):
@@ -492,6 +502,7 @@ def _sync_changed_page_fast(
                 card_type_overrides=card_type_overrides,
                 enable_cloze=is_advanced_cloze_toggle,
                 enable_gray_toggle_cloze=enable_gray_toggle_cloze,
+                cloze_marker_colors=cloze_marker_colors,
             )
         )
 
@@ -536,6 +547,7 @@ def _sync_changed_page_fast(
                     card_type_overrides=card_type_overrides,
                     enable_cloze=True,
                     enable_gray_toggle_cloze=enable_gray_toggle_cloze,
+                    cloze_marker_colors=cloze_marker_colors,
                     include_block_ids=cloze_candidate_block_ids,
                 )
                 if payload.card_type == CLOZE
@@ -572,8 +584,10 @@ def _repair_missing_notes_for_unchanged_page(
     card_type_overrides: dict[str, str],
     enable_cloze: bool,
     enable_gray_toggle_cloze: bool,
+    cloze_marker_colors: list[str],
     force_cloze_refresh: bool = False,
     force_gray_toggle_cloze_refresh: bool = False,
+    force_cloze_marker_colors_refresh: bool = False,
     should_cancel: SyncCancelCheck | None = None,
 ) -> tuple[SyncStats, list[str], bool]:
     """Recreate local Anki notes that are missing even though the Notion page is unchanged."""
@@ -593,6 +607,10 @@ def _repair_missing_notes_for_unchanged_page(
             continue
         if force_gray_toggle_cloze_refresh:
             # The setting changes a block's card type, so re-parse every mapped block.
+            schedule_resync(block_id)
+            continue
+        if force_cloze_marker_colors_refresh and normalize_card_type(mapping["card_type"], default=BASIC) == CLOZE:
+            # Re-render existing cloze notes when a color becomes formatting or a marker.
             schedule_resync(block_id)
             continue
         note_id = mapping["anki_note_id"]
@@ -631,6 +649,7 @@ def _repair_missing_notes_for_unchanged_page(
         card_type_overrides=card_type_overrides,
         enable_cloze=enable_cloze,
         enable_gray_toggle_cloze=enable_gray_toggle_cloze,
+        cloze_marker_colors=cloze_marker_colors,
         include_block_ids=blocks_needing_resync,
     )
     payloads_by_block_id = {payload.notion_block_id: payload for payload in payloads}
@@ -681,6 +700,18 @@ def _load_gray_toggle_cloze_enabled(db: Database) -> bool:
 def _set_gray_toggle_cloze_enabled(db: Database, enabled: bool) -> None:
     """Persist the gray-toggle cloze option used by the last successful sync."""
     db.set_setting(_GRAY_TOGGLE_CLOZE_ENABLED_SETTING_KEY, "1" if enabled else "0")
+
+
+def _load_cloze_marker_colors(db: Database) -> list[str] | None:
+    """Return the marker-color selection used by the last successful sync."""
+    raw_value = db.get_setting(_CLOZE_MARKER_COLORS_SETTING_KEY)
+    # Existing installations predate this snapshot and behaved as if every color was enabled.
+    return raw_value.split(",") if raw_value is not None else list(CLOZE_MARKER_COLORS)
+
+
+def _set_cloze_marker_colors(db: Database, colors: list[str]) -> None:
+    """Remember the marker-color selection for local parser-change detection."""
+    db.set_setting(_CLOZE_MARKER_COLORS_SETTING_KEY, ",".join(colors))
 
 
 def _card_type_needs_default_conversion(current_card_type: str, default_card_type: str) -> bool:
@@ -782,6 +813,8 @@ def _sync_one_payload(
         prepared_payload = _prepare_payload_media(collection, payload)
         _apply_payload_to_note(note, prepared_payload)
         _update_note(collection, note)
+        if payload.card_type == CLOZE:
+            _remove_empty_cards_for_note(collection, note_id)
         _upsert_card_mapping(db, prepared_payload, note_id, page_id)
         return _replace_stats(stats, cards_updated=stats.cards_updated + 1), [], False
     except Exception as exc:
@@ -1380,6 +1413,24 @@ def _card_ids_for_note(collection: Any, note_id: int) -> list[int]:
             rows = all_rows("SELECT id FROM cards WHERE nid = ?", (note_id,))
         return [int(row[0]) for row in rows]
     return []
+
+
+def _remove_empty_cards_for_note(collection: Any, note_id: int) -> None:
+    """Delete generated empty cards for one updated cloze note only."""
+    get_empty_cards = getattr(collection, "get_empty_cards", None)
+    remove_cards    = getattr(collection, "remove_cards_and_orphaned_notes", None)
+    if not callable(get_empty_cards) or not callable(remove_cards):
+        return
+
+    report = get_empty_cards()
+    empty_card_ids = [
+        int(card_id)
+        for empty_note in getattr(report, "notes", ())
+        if int(getattr(empty_note, "note_id", 0)) == note_id
+        for card_id in getattr(empty_note, "card_ids", ())
+    ]
+    if empty_card_ids:
+        remove_cards(empty_card_ids)
 
 
 def _update_note(collection: Any, note: Any) -> None:

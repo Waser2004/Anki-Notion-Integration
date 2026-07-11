@@ -24,7 +24,10 @@ from aqt.qt import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QStandardItem,
+    QStandardItemModel,
     QTimer,
+    Qt,
     QVBoxLayout,
     QWidget,
 )
@@ -61,6 +64,94 @@ class _WidgetBinding:
 
     definition: SettingDefinition
     widget: QWidget
+
+
+class _MultiSelectDropdown(QComboBox):
+    """Native combo box whose popup contains independently checkable options."""
+
+    def __init__(self, options: tuple[str, ...], parent: QWidget) -> None:
+        super().__init__(parent)
+        self._options = options
+        self._callbacks: list[Any] = []
+        self._keep_popup_open = False
+        model = QStandardItemModel(self)
+        self.setModel(model)
+        for option in options:
+            item = QStandardItem(option.title())
+            item.setData(option, Qt.ItemDataRole.UserRole)
+            item.setCheckable(True)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            model.appendRow(item)
+
+        self.view().pressed.connect(self._toggle_index)
+        # Reset the combo's transient current item after Qt processes a popup click.
+        self.activated.connect(lambda _index: QTimer.singleShot(0, self._refresh_text))
+        self._refresh_text()
+
+    def _toggle_index(self, index: Any) -> None:
+        """Toggle one popup row and keep the popup open for further choices."""
+        item = self.model().itemFromIndex(index)
+        if item is None:
+            return
+        checked = item.checkState() == Qt.CheckState.Checked
+        item.setCheckState(Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked)
+        self._keep_popup_open = True
+        self._refresh_text()
+        for callback in self._callbacks:
+            callback()
+
+    def hidePopup(self) -> None:
+        """Do not close the popup immediately after toggling an option."""
+        if self._keep_popup_open:
+            self._keep_popup_open = False
+            return
+        super().hidePopup()
+
+    def showPopup(self) -> None:
+        """Keep the popup at least as wide as the native combo box."""
+        longest_label = max(
+            (self.fontMetrics().horizontalAdvance(option.title()) for option in self._options),
+            default=0,
+        )
+        self.view().setMinimumWidth(max(self.width(), longest_label + 58))
+        super().showPopup()
+
+    def selected_values(self) -> list[str]:
+        """Return checked values in schema order."""
+        model = self.model()
+        return [
+            str(model.item(row).data(Qt.ItemDataRole.UserRole))
+            for row in range(model.rowCount())
+            if model.item(row).checkState() == Qt.CheckState.Checked
+        ]
+
+    def set_selected_values(self, values: Any) -> None:
+        """Apply a stored selection without depending on menu display labels."""
+        selected = {str(value) for value in values} if isinstance(values, (list, tuple, set)) else set()
+        model = self.model()
+        for row in range(model.rowCount()):
+            item = model.item(row)
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if str(item.data(Qt.ItemDataRole.UserRole)) in selected
+                else Qt.CheckState.Unchecked
+            )
+        self._refresh_text()
+
+    def connect_changed(self, callback: Any) -> None:
+        """Invoke callback after any option is toggled."""
+        self._callbacks.append(callback)
+
+    def _refresh_text(self, _checked: bool = False) -> None:
+        selected = self.selected_values()
+        if not selected:
+            text = "No colors selected"
+        elif len(selected) == len(self._options):
+            text = "All colors"
+        else:
+            text = ", ".join(value.title() for value in selected)
+        self.setPlaceholderText(text)
+        self.setCurrentIndex(-1)
 
 
 class SettingsPage(QWidget):
@@ -195,6 +286,11 @@ class SettingsPage(QWidget):
 
             return widget
 
+        if setting.type == "multiselect":
+            widget = _MultiSelectDropdown(setting.options or (), self)
+            widget.setToolTip(self._setting_tooltip(setting))
+            return widget
+
         if setting.type == "text":
             widget = QLineEdit(self)
             widget.setToolTip(self._setting_tooltip(setting))
@@ -226,6 +322,8 @@ class SettingsPage(QWidget):
         """Connect widget change signals to auto-save the updated value."""
         if isinstance(widget, QCheckBox):
             widget.stateChanged.connect(lambda _state, k=key: self._autosave_setting(k))
+        elif isinstance(widget, _MultiSelectDropdown):
+            widget.connect_changed(lambda k=key: self._autosave_setting(k))
         elif isinstance(widget, QComboBox):
             widget.currentIndexChanged.connect(lambda _index, k=key: self._on_dropdown_changed(k))
         elif isinstance(widget, QLineEdit):
@@ -254,6 +352,8 @@ class SettingsPage(QWidget):
 
                 if isinstance(widget, QCheckBox):
                     widget.setChecked(bool(value))
+                elif isinstance(widget, _MultiSelectDropdown):
+                    widget.set_selected_values(value)
                 elif isinstance(widget, QComboBox):
                     # If the stored value is invalid/missing, fall back to the default option.
                     text = str(value) if value is not None else str(setting.default or "")
@@ -304,6 +404,8 @@ class SettingsPage(QWidget):
         widget = binding.widget
         if isinstance(widget, QCheckBox):
             new_value: Any = bool(widget.isChecked())
+        elif isinstance(widget, _MultiSelectDropdown):
+            new_value = widget.selected_values()
         elif isinstance(widget, QComboBox):
             selected_data = widget.currentData()
             new_value = selected_data if selected_data is not None else widget.currentText()

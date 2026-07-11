@@ -701,6 +701,29 @@ class ParserTests(unittest.TestCase):
         self.assertIn("{{c1::Paris}}", payloads[0].fields["Text"])
         self.assertEqual(payloads[0].fields["Extra"], "")
 
+    def test_paragraph_cloze_renders_unselected_background_colors(self) -> None:
+        """Excluded marker colors remain visible as ordinary text backgrounds."""
+        cloze_paragraph = _block(
+            "paragraph-cloze",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item("Answer", annotations=_annotations(background_color="yellow")),
+                    _text_item(" Context", annotations=_annotations(background_color="blue")),
+                ]
+            },
+        )
+
+        payload = parse_page_to_cards(
+            "page-1",
+            [cloze_paragraph],
+            enable_cloze=True,
+            cloze_marker_colors=["yellow"],
+        )[0]
+
+        self.assertIn("{{c1::Answer}}", payload.fields["Text"])
+        self.assertIn('class="highlight-blue_background"', payload.fields["Text"])
+
     def test_parse_page_to_cards_cloze_preserves_non_highlighted_inline_math(self) -> None:
         cloze_paragraph = _block(
             "paragraph-cloze",
@@ -1235,6 +1258,37 @@ class ParserTests(unittest.TestCase):
             start=1,
         ):
             self.assertIn(f"{{{{c{number}::{color_name}}}}}", text)
+
+    def test_advanced_cloze_excluded_color_remains_background_formatting(self) -> None:
+        """A color excluded from marker parsing remains ordinary rendered styling."""
+        advanced_toggle = _block(
+            "toggle-colors",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] Colors")]},
+            children=(
+                _block(
+                    "paragraph-colors",
+                    "paragraph",
+                    {
+                        "rich_text": [
+                            _text_item("Answer", annotations=_annotations(background_color="yellow")),
+                            _text_item(" Styled", annotations=_annotations(background_color="blue")),
+                        ]
+                    },
+                ),
+            ),
+        )
+
+        payload = parse_page_to_cards(
+            "page-1",
+            [advanced_toggle],
+            enable_cloze=True,
+            cloze_marker_colors=["yellow"],
+        )[0]
+
+        self.assertIn("{{c1::Answer}}", payload.fields["Text"])
+        self.assertIn('class="highlight-blue_background"', payload.fields["Text"])
+        self.assertNotIn("{{c3::", payload.fields["Text"])
 
     def test_advanced_cloze_allows_repeated_and_skipped_cloze_numbers(self) -> None:
         advanced_toggle = _block(

@@ -27,6 +27,7 @@ _CLOZE_NUMBERS = {
     "red":    7,
     "brown":  8
 }
+CLOZE_MARKER_COLORS = tuple(_CLOZE_NUMBERS)
 
 _CLOZE_START_RE    = re.compile(r"\{\{c([1-9]\d*)::")
 _HTML_TAG_RE       = re.compile(r"<[^>]*>")
@@ -42,6 +43,11 @@ class ClozeValidationResult:
 
 class ClozeCardParser:
     """Build normal and advanced cloze payloads from Notion blocks."""
+
+    def __init__(self, marker_colors: Iterable[str] | None = None) -> None:
+        """Limit cloze conversion to the selected marker colors."""
+        selected = CLOZE_MARKER_COLORS if marker_colors is None else marker_colors
+        self._marker_colors = {str(color).lower().removesuffix("_background") for color in selected}
 
     # Normal paragraph clozes -------------------------------------------------
 
@@ -94,11 +100,14 @@ class ClozeCardParser:
                 run.clear()
 
         for item in rich_text:
-            fragment = self._cloze_fragment(item)
+            item_number = self._cloze_number(item)
+            fragment = (
+                self._cloze_fragment(item)
+                if item_number is not None or item.get("type") == "equation"
+                else _render_rich_text_item(item)
+            )
             if not fragment:
                 continue
-
-            item_number = self._cloze_number(item)
             if run and number != item_number:
                 flush()
 
@@ -261,8 +270,7 @@ class ClozeCardParser:
         
         return replace(block, raw=raw)
 
-    @staticmethod
-    def _cloze_number(item: Any) -> int | None:
+    def _cloze_number(self, item: Any) -> int | None:
         annotations = item.get("annotations") if isinstance(item, dict) else None
         if not isinstance(annotations, dict):
             return None
@@ -270,13 +278,14 @@ class ClozeCardParser:
         # get item color annotation and convert it to the corresponding cloze number
         color = str(annotations.get("color") or "").lower()
         if color.endswith("_background"):
-            number = _CLOZE_NUMBERS.get(color.removesuffix("_background"))
+            marker_color = color.removesuffix("_background")
+            number = _CLOZE_NUMBERS.get(marker_color) if marker_color in self._marker_colors else None
             if number is not None:
                 return number
         
         # get item background color annotation and convert it to the corresponding cloze number
         background = str(annotations.get("background_color") or "").lower().removesuffix("_background")
-        return _CLOZE_NUMBERS.get(background)
+        return _CLOZE_NUMBERS.get(background) if background in self._marker_colors else None
 
     @staticmethod
     def _cloze_fragment(item: dict[str, Any]) -> str:
@@ -285,18 +294,17 @@ class ClozeCardParser:
             return f"\\({html.escape(str(expression).strip())}\\)" if str(expression).strip() else ""
         return html.escape(str(item.get("text", {}).get("content") or item.get("plain_text") or ""))
 
-    @staticmethod
-    def _remove_marker_color(item: dict[str, Any]) -> dict[str, Any]:
+    def _remove_marker_color(self, item: dict[str, Any]) -> dict[str, Any]:
         result      = dict(item)
         annotations = dict(item.get("annotations") or {})
 
         # Set color annotation to default for cloze color 
         color = str(annotations.get("color") or "").lower()
-        if color.endswith("_background") and color.removesuffix("_background") in _CLOZE_NUMBERS:
+        if color.endswith("_background") and color.removesuffix("_background") in self._marker_colors:
             annotations["color"] = "default"
 
         # Set background_color annotation to default for cloze background color
-        if str(annotations.get("background_color") or "").lower().removesuffix("_background") in _CLOZE_NUMBERS:
+        if str(annotations.get("background_color") or "").lower().removesuffix("_background") in self._marker_colors:
             annotations["background_color"] = "default"
 
         result["annotations"] = annotations

@@ -6,6 +6,7 @@ import base64
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -120,6 +121,8 @@ class _FakeCollection:
         self._next_note_id = 1000
         self.notes: dict[int, _FakeNote] = {}
         self.media = _FakeMedia(media_dir) if media_dir is not None else None
+        self.empty_cards_report = SimpleNamespace(notes=[])
+        self.removed_card_ids: list[int] = []
 
     def new_note(self, model: dict[str, str]) -> _FakeNote:
         _ = model
@@ -138,6 +141,12 @@ class _FakeCollection:
         if note.id is None:
             raise RuntimeError("note id missing")
         self.notes[note.id] = note
+
+    def get_empty_cards(self) -> SimpleNamespace:
+        return self.empty_cards_report
+
+    def remove_cards_and_orphaned_notes(self, card_ids: list[int]) -> None:
+        self.removed_card_ids.extend(card_ids)
 
 
 class _FakeMw:
@@ -1226,6 +1235,58 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(result.stats.cards_updated, 0)
         self.assertEqual(result.stats.cards_created, 0)
 
+    def test_sync_removes_only_empty_cards_from_an_updated_cloze_note(self) -> None:
+        """Removing one cloze marker must not delete cards from other notes."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        existing_note = collection.new_note({"name": "Notion (Cloze)"})
+        collection.add_note(existing_note, deck_id=1)
+        collection.empty_cards_report = SimpleNamespace(
+            notes=[
+                SimpleNamespace(note_id=existing_note.id, card_ids=[101, 102]),
+                SimpleNamespace(note_id=9999, card_ids=[201]),
+            ]
+        )
+
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                INSERT INTO cards (
+                    notion_block_id, notion_page_id, anki_note_id, card_type, content_hash
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("block-1", "page-1", existing_note.id, "cloze", "old-hash"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        cloze_payload = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="block-1",
+            card_type="cloze",
+            model_name="Notion (Cloze)",
+            fields={
+                "Text": "{{c1::Current deletion}}",
+                "Extra": "",
+                "Notion Block ID": "block-1",
+            },
+            content_hash="new-hash",
+        )
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(_SYNC_MODULE, "parse_page_to_cards", return_value=[cloze_payload]):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_updated, 1)
+        self.assertEqual(collection.removed_card_ids, [101, 102])
+
     def test_changed_page_rechecks_toggle_children_when_parent_timestamp_is_unchanged(self) -> None:
         """A child edit must not be hidden by the stable parent-toggle timestamp."""
         collection = _FakeCollection()
@@ -1635,6 +1696,10 @@ class SyncTests(unittest.TestCase):
         existing_note = collection.new_note({"name": "Notion (Cloze)"})
         collection.add_note(existing_note, deck_id=1)
         self._db.set_setting("enable_cloze_parsing", "1")
+        self._db.set_setting(
+            _SYNC_MODULE._CLOZE_MARKER_COLORS_SETTING_KEY,
+            "yellow,green,blue,purple",
+        )
         self._db.set_setting(
             _SYNC_MODULE._CLOZE_REFRESH_REVISION_SETTING_KEY,
             _SYNC_MODULE._CLOZE_REFRESH_REVISION,

@@ -149,7 +149,7 @@ Toggle-based cloze behavior:
 - Child blocks render into `Text` with cloze-aware rich-text parsing.
 - Direct child paragraphs starting with `Extra:` render into `Extra`; `[extra]` toggles are rendered normally in `Text`.
 - Marker background colors map to fixed cloze numbers: yellow -> c1, green -> c2, blue -> c3, purple -> c4, pink -> c5, orange -> c6, red -> c7, brown -> c8.
-- Marker background colors are removed from exported HTML while normal formatting is preserved.
+- Selected marker background colors are removed from exported HTML while normal formatting is preserved; colors excluded in Settings remain background styling.
 - Advanced containers without marker colors remain deterministic cloze payloads and do not fall back to another card type.
 
 ## 7. Image Occlusion candidate rules

@@ -58,6 +58,10 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(self._db.get_setting("default_card_type"), "basic")
         self.assertEqual(self._db.get_setting("enable_cloze_parsing"), "1")
         self.assertEqual(self._db.get_setting("enable_gray_toggle_cloze_parsing"), "1")
+        self.assertEqual(
+            self._db.get_setting("cloze_marker_colors"),
+            '["yellow","green","blue","purple","pink","orange","red","brown"]',
+        )
         self.assertEqual(self._db.get_setting("enable_image_occlusion_parsing"), "0")
         self.assertIsNone(self._db.get_setting("restore_default_card_templates"))
         self.assertEqual(self._db.get_setting("sync_with_anki_sync_button"), "0")
@@ -107,6 +111,14 @@ class SettingsTests(unittest.TestCase):
         for setting in self._schema.settings():
             self.assertIsNotNone(setting.tooltip, setting.key)
             self.assertNotEqual(setting.tooltip, setting.description, setting.key)
+
+    def test_cloze_marker_colors_round_trip_and_validate(self) -> None:
+        """Multi-select settings retain valid selections and reject unknown colors."""
+        store = SettingsStore(self._db, profile_name="test", schema=self._schema)
+        store.set_value("cloze_marker_colors", ["blue", "yellow"])
+        self.assertEqual(store.get_value("cloze_marker_colors"), ["yellow", "blue"])
+        with self.assertRaises(SettingsError):
+            store.set_value("cloze_marker_colors", ["yellow", "gray"])
 
     def test_grouped_settings_include_custom_tooltips(self) -> None:
         store = SettingsStore(self._db, profile_name="test", schema=self._schema)
