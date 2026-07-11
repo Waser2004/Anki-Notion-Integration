@@ -338,6 +338,33 @@ class PagesStoreTests(unittest.TestCase):
         self.assertEqual(pages["page-a"].parent_type, "page_id")
         self.assertIsNone(pages["page-a"].default_card_type)
 
+    def test_get_pages_hides_cached_database_rows(self) -> None:
+        connection = self._db.connect()
+        try:
+            connection.executemany(
+                """
+                INSERT INTO pages (
+                    notion_page_id,
+                    anki_deck_name,
+                    parent_id,
+                    parent_type
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    ("regular-page", "Notion::Regular", None, None),
+                    ("legacy-row", "Notion::Legacy", "database", "database_id"),
+                    ("data-source-row", "Notion::Data source", "data-source", "data_source_id"),
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        pages = self._store.get_pages()
+
+        self.assertEqual(set(pages), {"regular-page"})
+
     def test_upsert_page_selection_persists_parent_metadata_from_pages(self) -> None:
         parent = _page("parent", "Parent")
         child = _page("child", "Child", parent_id="parent")

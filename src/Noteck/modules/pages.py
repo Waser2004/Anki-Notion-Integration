@@ -314,6 +314,8 @@ class PagesStore:
                     parent_type,
                     default_card_type
                 FROM pages
+                WHERE parent_type IS NULL
+                   OR parent_type NOT IN ('database_id', 'data_source_id')
                 """
             ).fetchall()
         finally:
