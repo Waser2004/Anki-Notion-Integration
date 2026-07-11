@@ -32,6 +32,8 @@ from ..modules.cards_store import CardsStore
 from ..modules.db import Database
 from ..modules.notion_client import NotionClient
 from ..modules.pages import PagesStore, StoredPage
+from ..modules.parser.cloze_card_parser import ClozeCardParser
+from ..modules.settings import SettingsStore
 from .context_menu_schema import ContextMenuEntry, load_context_menu_schema
 from .ui import UiContext
 
@@ -220,15 +222,28 @@ class CardsPage(QWidget):
         try:
             db = Database(self._context.db_path)
             client = NotionClient.from_settings(db, profile_name=self._resolve_profile_name(self._context))
+            settings = SettingsStore(db, profile_name=self._resolve_profile_name(self._context))
+            enable_cloze = bool(settings.get_value("enable_cloze_parsing"))
+            enable_gray_toggle_cloze = bool(settings.get_value("enable_gray_toggle_cloze_parsing"))
             blocks = client.get_page_blocks_shallow(page_id)
+            cloze_parser = ClozeCardParser()
             cards: list[dict[str, str]] = []
             for block in blocks:
                 if block.block_type == "toggle":
+                    card_kind = (
+                        "cloze"
+                        if enable_cloze
+                        and cloze_parser.is_advanced_container(
+                            block,
+                            enable_gray_toggle_cloze=enable_gray_toggle_cloze,
+                        )
+                        else "toggle"
+                    )
                     cards.append(
                         {
                             "notion_block_id": block.block_id,
                             "front_text": self._toggle_front_plain_text(block.raw),
-                            "card_kind": "toggle",
+                            "card_kind": card_kind,
                         }
                     )
                     continue
@@ -804,7 +819,9 @@ class CardsPage(QWidget):
                 continue
             color = str(annotations.get("color") or "").strip().lower()
             background_color = str(annotations.get("background_color") or "").strip().lower()
-            if color == "yellow_background" or background_color == "yellow":
+            # Paragraph clozes use the same marker palette as advanced toggle clozes.
+            marker_colors = {"yellow", "green", "blue", "purple", "pink", "orange", "red", "brown"}
+            if color.removesuffix("_background") in marker_colors or background_color.removesuffix("_background") in marker_colors:
                 return True
         return False
 

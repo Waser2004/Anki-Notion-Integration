@@ -39,9 +39,9 @@ Setup flow:
 
 ### Cards
 
-- Shows toggle-derived cards for the selected page.
+- Shows toggle-derived and paragraph-cloze cards for the selected page.
 - Lets you exclude individual cards from sync.
-- Lets you reset card-type overrides back to default behavior.
+- Lets you reset card-type overrides for selectable toggle cards back to default behavior.
 
 ### Image Occlusion
 
@@ -122,13 +122,13 @@ Unsupported or unknown block types are ignored in rendered card content.
 
 ## 6. Cloze parsing rules
 
-Cloze cards are generated only when cloze parsing is enabled.
+Cloze cards, including toggle-based cloze cards, are generated only when cloze parsing is enabled.
 
 Rules:
 
 - Source scope: top-level paragraph blocks only.
-- A paragraph must contain highlighted cloze markers (yellow highlight).
-- Only highlighted text becomes `{{c1::...}}`.
+- A paragraph must contain a supported highlighted cloze marker (yellow, green, blue, purple, pink, orange, red, or brown).
+- Only highlighted text becomes cloze markup, using the marker color's fixed `c1` through `c8` number.
 - Non-highlighted text remains normal text.
 
 Optional `Extra` behavior:
@@ -140,6 +140,17 @@ Optional `Extra` behavior:
 - This extra paragraph is consumed and not turned into another cloze card.
 
 Nested cloze-like content inside toggles is ignored for cloze card generation.
+
+Toggle-based cloze behavior:
+
+- Uses the same cloze parsing option as paragraph cloze cards.
+- Top-level toggles whose title starts with `[cloze]` become cloze cards.
+- Top-level toggles with a gray background (`gray_background`) become cloze cards only when gray-toggle cloze parsing is enabled; gray text color alone does not qualify.
+- Child blocks render into `Text` with cloze-aware rich-text parsing.
+- Direct child paragraphs starting with `Extra:` render into `Extra`; `[extra]` toggles are rendered normally in `Text`.
+- Marker background colors map to fixed cloze numbers: yellow -> c1, green -> c2, blue -> c3, purple -> c4, pink -> c5, orange -> c6, red -> c7, brown -> c8.
+- Marker background colors are removed from exported HTML while normal formatting is preserved.
+- Advanced containers without marker colors remain deterministic cloze payloads and do not fall back to another card type.
 
 ## 7. Image Occlusion candidate rules
 
@@ -177,5 +188,5 @@ If sync does not work as expected:
 3. Confirm the page is selected in `Pages`.
 4. Run manual sync again.
 5. Check that your content uses supported Notion blocks.
-6. For cloze cards, confirm yellow highlight markers are present.
+6. For cloze cards, confirm a supported marker color is present; toggle clozes may use a `[cloze]` title or, when enabled, a gray block background.
 7. For image occlusion, confirm images are outside toggles.

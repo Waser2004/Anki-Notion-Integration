@@ -38,8 +38,16 @@
           "key": "enable_cloze_parsing",
           "type": "checkbox",
           "name": "Enable cloze parsing",
-          "description": "Convert top-level paragraphs with yellow highlight markers to cloze cards.",
-          "tooltip": "Turn yellow-highlighted top-level paragraphs into cloze cards.",
+          "description": "Convert marked top-level paragraphs and cloze toggles to numbered cloze cards.",
+          "tooltip": "Enable paragraph and toggle cloze card parsing.",
+          "default": true
+        },
+        {
+          "key": "enable_gray_toggle_cloze_parsing",
+          "type": "checkbox",
+          "name": "Convert gray toggles to cloze cards",
+          "description": "Treat top-level gray toggles as cloze cards when cloze parsing is enabled.",
+          "tooltip": "Turn gray top-level toggles into advanced cloze cards.",
           "default": true
         },
         {

@@ -9,6 +9,7 @@ import unittest
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from Noteck.modules.notion_client import NotionBlock
+from Noteck.modules.parser.cloze_card_parser import ClozeCardParser
 from Noteck.modules.parser import (
     collect_image_occlusion_candidates,
     normalize_typed_answer,
@@ -89,8 +90,61 @@ def _equation_item(
     }
 
 
+def _annotations(
+    *,
+    color: str = "default",
+    background_color: str = "default",
+    bold: bool = False,
+    italic: bool = False,
+    strikethrough: bool = False,
+    underline: bool = False,
+    code: bool = False,
+) -> dict:
+    """Create a Notion annotations payload for parser tests."""
+    return {
+        "bold": bold,
+        "italic": italic,
+        "strikethrough": strikethrough,
+        "underline": underline,
+        "code": code,
+        "color": color,
+        "background_color": background_color,
+    }
+
+
 class ParserTests(unittest.TestCase):
     """Validate parser rendering and toggle-card extraction rules."""
+
+    def test_cloze_validator_accepts_valid_anki_cloze_markup(self) -> None:
+        """A cloze note with a positive index and hidden text is valid for Anki."""
+        payload = parse_page_to_cards(
+            "page-1",
+            [_block("cloze", "paragraph", {"rich_text": [_text_item("Answer", annotations=_annotations(color="yellow_background"))]})],
+            enable_cloze=True,
+        )[0]
+
+        result = ClozeCardParser().validate(payload)
+
+        self.assertTrue(result.is_valid)
+        self.assertEqual(result.errors, ())
+
+    def test_cloze_validator_rejects_invalid_or_empty_deletions(self) -> None:
+        """Malformed markup cannot reach Anki's cloze card generator."""
+        from Noteck.modules.parser import ToggleCardPayload
+
+        payload = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="cloze",
+            card_type="cloze",
+            model_name="Notion (Cloze)",
+            fields={"Text": "{{c0::}} {{c1::}}", "Extra": "", "Notion Block ID": "cloze"},
+        )
+
+        result = ClozeCardParser().validate(payload)
+
+        self.assertFalse(result.is_valid)
+        self.assertTrue(any("positive integer" in error for error in result.errors))
+        self.assertTrue(any("non-empty text" in error for error in result.errors))
 
     def test_parse_page_to_cards_only_emits_root_toggles(self) -> None:
         nested_toggle = _block(
@@ -1124,6 +1178,351 @@ class ParserTests(unittest.TestCase):
         )
 
         self.assertEqual(payloads, [])
+
+    def test_cloze_setting_enables_toggle_cloze_parsing(self) -> None:
+        advanced_toggle = _block(
+            "advanced-toggle",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] Concept")]},
+            children=(
+                _block(
+                    "advanced-p",
+                    "paragraph",
+                    {
+                        "rich_text": [
+                            _text_item("Marked", annotations=_annotations(background_color="yellow")),
+                        ]
+                    },
+                ),
+            ),
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [advanced_toggle],
+            enable_cloze=True,
+        )
+
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0].card_type, "cloze")
+        self.assertEqual(payloads[0].fields["Text"], "<p>{{c1::Marked}}</p>")
+
+    def test_advanced_cloze_maps_background_colors_to_fixed_numbers(self) -> None:
+        color_items = []
+        for color_name in ["yellow", "green", "blue", "purple", "pink", "orange", "red", "brown"]:
+            color_items.extend(
+                [
+                    _text_item(color_name, annotations=_annotations(background_color=color_name)),
+                    _text_item(" "),
+                ]
+            )
+        advanced_toggle = _block(
+            "advanced-toggle",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] Colors")]},
+            children=(_block("colors-p", "paragraph", {"rich_text": color_items}),),
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [advanced_toggle],
+            enable_cloze=True,
+        )
+
+        text = payloads[0].fields["Text"]
+        for number, color_name in enumerate(
+            ["yellow", "green", "blue", "purple", "pink", "orange", "red", "brown"],
+            start=1,
+        ):
+            self.assertIn(f"{{{{c{number}::{color_name}}}}}", text)
+
+    def test_advanced_cloze_allows_repeated_and_skipped_cloze_numbers(self) -> None:
+        advanced_toggle = _block(
+            "advanced-toggle",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] Repeats")]},
+            children=(
+                _block(
+                    "repeats-p",
+                    "paragraph",
+                    {
+                        "rich_text": [
+                            _text_item("Alpha", annotations=_annotations(background_color="yellow")),
+                            _text_item(" / "),
+                            _text_item("Beta", annotations=_annotations(background_color="yellow")),
+                            _text_item(" / "),
+                            _text_item("Gamma", annotations=_annotations(background_color="blue")),
+                        ]
+                    },
+                ),
+            ),
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [advanced_toggle],
+            enable_cloze=True,
+        )
+
+        text = payloads[0].fields["Text"]
+        self.assertEqual(text.count("{{c1::"), 2)
+        self.assertIn("{{c3::Gamma}}", text)
+        self.assertNotIn("{{c2::", text)
+
+    def test_advanced_cloze_parses_cloze_title_toggle_as_cloze_card(self) -> None:
+        advanced_toggle = _block(
+            "advanced-toggle",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] Biology")]},
+            children=(
+                _block(
+                    "body-p",
+                    "paragraph",
+                    {"rich_text": [_text_item("Cell", annotations=_annotations(background_color="green"))]},
+                ),
+            ),
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [advanced_toggle],
+            enable_cloze=True,
+        )
+
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0].notion_block_id, "advanced-toggle")
+        self.assertEqual(payloads[0].card_type, "cloze")
+        self.assertEqual(payloads[0].fields["Text"], "<p>{{c2::Cell}}</p>")
+        self.assertNotIn("Front", payloads[0].fields)
+
+    def test_advanced_cloze_parses_gray_top_level_toggle_as_cloze_card(self) -> None:
+        gray_toggle = _block(
+            "gray-toggle",
+            "toggle",
+            {"rich_text": [_text_item("Gray container")], "color": "gray_background"},
+            children=(
+                _block(
+                    "body-p",
+                    "paragraph",
+                    {"rich_text": [_text_item("Sky", annotations=_annotations(background_color="blue"))]},
+                ),
+            ),
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [gray_toggle],
+            enable_cloze=True,
+        )
+
+        self.assertEqual(payloads[0].card_type, "cloze")
+        self.assertEqual(payloads[0].fields["Text"], "<p>{{c3::Sky}}</p>")
+
+    def test_gray_toggle_cloze_setting_disabled_preserves_toggle_behavior(self) -> None:
+        gray_toggle = _block(
+            "gray-toggle",
+            "toggle",
+            {"rich_text": [_text_item("Gray container")], "color": "gray_background"},
+            children=(
+                _block(
+                    "body-p",
+                    "paragraph",
+                    {"rich_text": [_text_item("Sky", annotations=_annotations(background_color="blue"))]},
+                ),
+            ),
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [gray_toggle],
+            enable_cloze=True,
+            enable_gray_toggle_cloze=False,
+        )
+
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0].card_type, "basic")
+        self.assertIn("Front", payloads[0].fields)
+        self.assertIn('class="highlight-blue_background"', payloads[0].back_html)
+
+    def test_advanced_cloze_direct_extra_paragraph_populates_extra_field(self) -> None:
+        """A direct child ``Extra:`` paragraph is rendered without its prefix."""
+        extra_paragraph = _block(
+            "extra-p",
+            "paragraph",
+            {"rich_text": [_text_item("  eXtRa: Shown on back")]},
+        )
+        advanced_toggle = _block(
+            "advanced-toggle",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] With extra")]},
+            children=(
+                _block(
+                    "text-p",
+                    "paragraph",
+                    {"rich_text": [_text_item("Front", annotations=_annotations(background_color="yellow"))]},
+                ),
+                extra_paragraph,
+            ),
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [advanced_toggle],
+            enable_cloze=True,
+        )
+
+        self.assertEqual(payloads[0].fields["Text"], "<p>{{c1::Front}}</p>")
+        self.assertEqual(payloads[0].fields["Extra"], "<p>Shown on back</p>")
+        self.assertNotIn("Shown on back", payloads[0].fields["Text"])
+
+    def test_advanced_cloze_extra_toggle_is_rendered_normally(self) -> None:
+        """The obsolete ``[extra]`` toggle convention no longer populates Extra."""
+        extra_toggle = _block(
+            "extra-toggle",
+            "toggle",
+            {"rich_text": [_text_item("[extra] Details")]},
+            children=(_block("extra-body", "paragraph", {"rich_text": [_text_item("Toggle body")]}),),
+        )
+        advanced_toggle = _block(
+            "advanced-toggle",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] Toggle is text")]},
+            children=(extra_toggle,),
+        )
+
+        payload = parse_page_to_cards("page-1", [advanced_toggle], enable_cloze=True)[0]
+
+        self.assertEqual(payload.fields["Extra"], "")
+        self.assertIn("<summary>[extra] Details</summary>", payload.fields["Text"])
+        self.assertIn("<p>Toggle body</p>", payload.fields["Text"])
+
+    def test_advanced_cloze_nested_extra_toggle_is_rendered_normally(self) -> None:
+        nested_extra = _block(
+            "nested-extra",
+            "toggle",
+            {"rich_text": [_text_item("[extra] Nested")]},
+            children=(_block("nested-p", "paragraph", {"rich_text": [_text_item("Nested body")]}),),
+        )
+        wrapper_toggle = _block(
+            "wrapper-toggle",
+            "toggle",
+            {"rich_text": [_text_item("Wrapper")]},
+            children=(nested_extra,),
+        )
+        advanced_toggle = _block(
+            "advanced-toggle",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] Nested extra")]},
+            children=(wrapper_toggle,),
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [advanced_toggle],
+            enable_cloze=True,
+        )
+
+        self.assertIn("<summary>Wrapper</summary>", payloads[0].fields["Text"])
+        self.assertIn("<summary>[extra] Nested</summary>", payloads[0].fields["Text"])
+        self.assertIn("<p>Nested body</p>", payloads[0].fields["Text"])
+        self.assertEqual(payloads[0].fields["Extra"], "")
+
+    def test_paragraph_cloze_maps_all_marker_colors_to_toggle_cloze_numbers(self) -> None:
+        """Normal paragraphs use the same fixed color-to-number mapping as toggles."""
+        rich_text = []
+        colors = ["yellow", "green", "blue", "purple", "pink", "orange", "red", "brown"]
+        for index, color in enumerate(colors):
+            # Exercise both annotation formats returned by supported Notion sources.
+            annotations = (
+                _annotations(color=f"{color}_background")
+                if index % 2 == 0
+                else _annotations(background_color=color)
+            )
+            rich_text.extend([_text_item(color, annotations=annotations), _text_item(" / ")])
+
+        paragraph = _block("paragraph-colors", "paragraph", {"rich_text": rich_text})
+        payloads = parse_page_to_cards("page-1", [paragraph], enable_cloze=True)
+
+        self.assertEqual(len(payloads), 1)
+        for number, color in enumerate(colors, start=1):
+            self.assertIn(f"{{{{c{number}::{color}}}}}", payloads[0].fields["Text"])
+
+    def test_advanced_cloze_preserves_formatting_and_removes_marker_backgrounds(self) -> None:
+        advanced_toggle = _block(
+            "advanced-toggle",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] Formatting")]},
+            children=(
+                _block(
+                    "format-p",
+                    "paragraph",
+                    {
+                        "rich_text": [
+                            _text_item(
+                                "Term",
+                                href="https://example.com",
+                                annotations=_annotations(
+                                    color="yellow_background",
+                                    bold=True,
+                                    italic=True,
+                                ),
+                            ),
+                            _text_item(" "),
+                            _text_item("blue", annotations=_annotations(color="blue")),
+                        ]
+                    },
+                ),
+            ),
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [advanced_toggle],
+            enable_cloze=True,
+        )
+
+        text = payloads[0].fields["Text"]
+        self.assertIn('{{c1::<a href="https://example.com"><em><strong>Term</strong></em></a>}}', text)
+        self.assertIn('<span class="highlight-blue">blue</span>', text)
+        self.assertNotIn("highlight-yellow_background", text)
+
+    def test_advanced_cloze_container_without_markers_remains_cloze_payload(self) -> None:
+        advanced_toggle = _block(
+            "advanced-toggle",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] No markers")]},
+            children=(_block("plain-p", "paragraph", {"rich_text": [_text_item("Plain text")]}),),
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [advanced_toggle],
+            enable_cloze=True,
+        )
+
+        self.assertEqual(payloads[0].card_type, "cloze")
+        self.assertEqual(payloads[0].fields["Text"], "<p>Plain text</p>")
+
+    def test_existing_top_level_paragraph_cloze_still_works_with_advanced_enabled(self) -> None:
+        cloze_paragraph = _block(
+            "paragraph-cloze",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item("Capital is "),
+                    _text_item("Paris", annotations=_annotations(color="yellow_background")),
+                ]
+            },
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [cloze_paragraph],
+            enable_cloze=True,
+        )
+
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0].fields["Text"], "Capital is {{c1::Paris}}")
 
     def test_collect_image_occlusion_candidates_ignores_images_inside_toggles(self) -> None:
         outside = _block(

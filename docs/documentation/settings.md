@@ -13,6 +13,7 @@ Each setting can provide both:
 - `cards`:
   - `default_card_type` (`basic`, `basic_reversed`, `input`)
   - `enable_cloze_parsing` (bool)
+  - `enable_gray_toggle_cloze_parsing` (bool; enabled by default; applies only to toggles with `gray_background`)
   - `enable_image_occlusion_parsing` (bool)
   - `restore_default_card_templates` (button action)
 - `sync`:

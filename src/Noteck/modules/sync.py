@@ -15,6 +15,7 @@ from urllib import request
 from urllib.parse import urlsplit
 
 from .card_types import BASIC, CLOZE, DEFAULT_SELECTABLE_CARD_TYPES, normalize_card_type, normalize_default_selectable_card_type
+from .parser.cloze_card_parser import ClozeCardParser
 from .card_type_overrides import CardTypeOverrideStore
 from .cards import MODEL_NAME_BASIC, ensure_notion_toggle_model
 from .db import Database
@@ -75,7 +76,8 @@ _MERMAID_FIGURE_RE = re.compile(
 )
 _HTTP_TIMEOUT_SECONDS = 20.0
 _CLOZE_REFRESH_REVISION_SETTING_KEY = "_internal_cloze_refresh_revision"
-_CLOZE_REFRESH_REVISION = "2026-02-cloze-inline-math-v1"
+_CLOZE_REFRESH_REVISION = "2026-07-paragraph-color-markers-v2"
+_GRAY_TOGGLE_CLOZE_ENABLED_SETTING_KEY = "_internal_gray_toggle_cloze_enabled"
 
 
 def sync_notion_to_anki(
@@ -103,6 +105,11 @@ def sync_notion_to_anki(
     card_type_override_store = CardTypeOverrideStore(db)
     global_default_card_type = normalize_default_selectable_card_type(store.get_value("default_card_type"))
     enable_cloze = bool(store.get_value("enable_cloze_parsing"))
+    enable_gray_toggle_cloze = bool(store.get_value("enable_gray_toggle_cloze_parsing"))
+    force_gray_toggle_cloze_refresh = (
+        enable_cloze
+        and _load_gray_toggle_cloze_enabled(db) != enable_gray_toggle_cloze
+    )
     force_cloze_refresh = (
         enable_cloze
         and _load_cloze_refresh_revision(db) != _CLOZE_REFRESH_REVISION
@@ -176,7 +183,9 @@ def sync_notion_to_anki(
                     default_card_type=page_default_card_type,
                     card_type_overrides=page_card_type_overrides,
                     enable_cloze=enable_cloze,
+                    enable_gray_toggle_cloze=enable_gray_toggle_cloze,
                     force_cloze_refresh=force_cloze_refresh,
+                    force_gray_toggle_cloze_refresh=force_gray_toggle_cloze_refresh,
                     should_cancel=should_cancel,
                 )
             
@@ -192,6 +201,7 @@ def sync_notion_to_anki(
                     default_card_type=page_default_card_type,
                     card_type_overrides=page_card_type_overrides,
                     enable_cloze=enable_cloze,
+                    enable_gray_toggle_cloze=enable_gray_toggle_cloze,
                     should_cancel=should_cancel,
                 )
 
@@ -234,6 +244,8 @@ def sync_notion_to_anki(
 
     if force_cloze_refresh:
         _set_cloze_refresh_revision(db, _CLOZE_REFRESH_REVISION)
+    if enable_cloze:
+        _set_gray_toggle_cloze_enabled(db, enable_gray_toggle_cloze)
 
     return SyncResult(
         ok=True,
@@ -436,6 +448,7 @@ def _sync_changed_page_fast(
     default_card_type: str,
     card_type_overrides: dict[str, str],
     enable_cloze: bool,
+    enable_gray_toggle_cloze: bool,
     should_cancel: SyncCancelCheck | None = None,
 ) -> tuple[SyncStats, list[str], bool]:
     """Sync a page by expanding only toggles that are new/changed/missing locally."""
@@ -446,6 +459,7 @@ def _sync_changed_page_fast(
     # Shallow fetch: direct children only (no recursion).
     blocks = client.get_page_blocks_shallow(page_id)
     toggles = [block for block in blocks if block.block_type == "toggle"]
+    cloze_parser = ClozeCardParser()
 
     for toggle in toggles:
         if _is_sync_cancelled(should_cancel):
@@ -460,30 +474,13 @@ def _sync_changed_page_fast(
             stats = _replace_stats(stats, cards_skipped=stats.cards_skipped + 1)
             continue
 
-        effective_card_type = _effective_card_type_for_block(
-            toggle.block_id,
-            default_card_type=default_card_type,
-            card_type_overrides=card_type_overrides,
+        is_advanced_cloze_toggle = (
+            enable_cloze
+            and cloze_parser.is_advanced_container(
+                toggle,
+                enable_gray_toggle_cloze=enable_gray_toggle_cloze,
+            )
         )
-        toggle_last_edited_time = _as_optional_string(toggle.raw.get("last_edited_time"))
-        can_skip = False
-        if mapping is not None:
-            note_id = mapping["anki_note_id"]
-            if (
-                note_id is not None
-                and mapping["last_seen_notion_edit_time"]
-                and mapping["last_seen_notion_edit_time"] == toggle_last_edited_time
-                and mapping["card_type"] == effective_card_type
-            ):
-                # Only skip when the local note still exists. If it is missing, we must
-                # re-fetch content from Notion to recreate it.
-                can_skip = _get_note(collection, note_id) is not None
-
-        if can_skip:
-            stats = _replace_stats(stats, cards_unchanged=stats.cards_unchanged + 1)
-            continue
-
-        # Expand only the toggles we need to sync (recursive).
         # Avoid an extra API call when Notion indicates there are no child blocks.
         children = client.get_block_children_recursive(toggle.block_id) if toggle.has_children else []
         expanded_toggle = _with_children(toggle, children)
@@ -493,7 +490,8 @@ def _sync_changed_page_fast(
                 [expanded_toggle],
                 default_card_type=default_card_type,
                 card_type_overrides=card_type_overrides,
-                enable_cloze=False,
+                enable_cloze=is_advanced_cloze_toggle,
+                enable_gray_toggle_cloze=enable_gray_toggle_cloze,
             )
         )
 
@@ -537,6 +535,7 @@ def _sync_changed_page_fast(
                     default_card_type=default_card_type,
                     card_type_overrides=card_type_overrides,
                     enable_cloze=True,
+                    enable_gray_toggle_cloze=enable_gray_toggle_cloze,
                     include_block_ids=cloze_candidate_block_ids,
                 )
                 if payload.card_type == CLOZE
@@ -572,7 +571,9 @@ def _repair_missing_notes_for_unchanged_page(
     default_card_type: str,
     card_type_overrides: dict[str, str],
     enable_cloze: bool,
+    enable_gray_toggle_cloze: bool,
     force_cloze_refresh: bool = False,
+    force_gray_toggle_cloze_refresh: bool = False,
     should_cancel: SyncCancelCheck | None = None,
 ) -> tuple[SyncStats, list[str], bool]:
     """Recreate local Anki notes that are missing even though the Notion page is unchanged."""
@@ -589,6 +590,10 @@ def _repair_missing_notes_for_unchanged_page(
 
     for block_id, mapping in existing_cards.items():
         if mapping["excluded"]:
+            continue
+        if force_gray_toggle_cloze_refresh:
+            # The setting changes a block's card type, so re-parse every mapped block.
+            schedule_resync(block_id)
             continue
         note_id = mapping["anki_note_id"]
         if note_id is None:
@@ -625,6 +630,7 @@ def _repair_missing_notes_for_unchanged_page(
         default_card_type=default_card_type,
         card_type_overrides=card_type_overrides,
         enable_cloze=enable_cloze,
+        enable_gray_toggle_cloze=enable_gray_toggle_cloze,
         include_block_ids=blocks_needing_resync,
     )
     payloads_by_block_id = {payload.notion_block_id: payload for payload in payloads}
@@ -661,6 +667,20 @@ def _load_cloze_refresh_revision(db: Database) -> str | None:
 def _set_cloze_refresh_revision(db: Database, value: str) -> None:
     """Persist the latest completed internal cloze-refresh revision."""
     db.set_setting(_CLOZE_REFRESH_REVISION_SETTING_KEY, value)
+
+
+def _load_gray_toggle_cloze_enabled(db: Database) -> bool:
+    """Return the last gray-toggle cloze option, defaulting to disabled."""
+    raw_value = db.get_setting(_GRAY_TOGGLE_CLOZE_ENABLED_SETTING_KEY)
+    if raw_value is None:
+        return False
+    
+    return raw_value == "1"
+
+
+def _set_gray_toggle_cloze_enabled(db: Database, enabled: bool) -> None:
+    """Persist the gray-toggle cloze option used by the last successful sync."""
+    db.set_setting(_GRAY_TOGGLE_CLOZE_ENABLED_SETTING_KEY, "1" if enabled else "0")
 
 
 def _card_type_needs_default_conversion(current_card_type: str, default_card_type: str) -> bool:
@@ -701,6 +721,13 @@ def _sync_one_payload(
     mapping = existing_cards.get(payload.notion_block_id)
     if mapping is not None and mapping["excluded"]:
         return _replace_stats(stats, cards_skipped=stats.cards_skipped + 1), [], False
+
+    # Validate immediately before touching Anki so every create/update path is protected.
+    if payload.card_type == CLOZE:
+        validation = ClozeCardParser().validate(payload)
+        if not validation.is_valid:
+            message = "; ".join(validation.errors)
+            return stats, [f"Block {payload.notion_block_id}: invalid cloze card: {message}"], False
 
     try:
         model_name = payload.model_name or MODEL_NAME_BASIC

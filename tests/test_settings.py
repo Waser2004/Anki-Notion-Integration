@@ -57,6 +57,7 @@ class SettingsTests(unittest.TestCase):
         create_default_settings(self._db, self._schema)
         self.assertEqual(self._db.get_setting("default_card_type"), "basic")
         self.assertEqual(self._db.get_setting("enable_cloze_parsing"), "1")
+        self.assertEqual(self._db.get_setting("enable_gray_toggle_cloze_parsing"), "1")
         self.assertEqual(self._db.get_setting("enable_image_occlusion_parsing"), "0")
         self.assertIsNone(self._db.get_setting("restore_default_card_templates"))
         self.assertEqual(self._db.get_setting("sync_with_anki_sync_button"), "0")

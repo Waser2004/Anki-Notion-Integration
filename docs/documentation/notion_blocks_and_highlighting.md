@@ -26,8 +26,8 @@ The renderer supports these block types:
 Notes:
 
 - Unknown/unsupported block types are ignored by the renderer.
-- Card extraction itself is based on top-level `toggle` blocks.
-- Optional cloze extraction is based on top-level `paragraph` blocks with yellow markers.
+- Basic, Basic+Reversed, and Input card extraction is based on top-level `toggle` blocks.
+- Optional cloze extraction is based on top-level marked `paragraph` blocks and recognized top-level cloze toggles.
 
 ## Supported rich-text formatting and highlights
 
@@ -60,13 +60,18 @@ These values have explicit CSS styles in the bundled card stylesheet:
 - text colors: `default`, `gray`, `brown`, `orange`, `yellow`, `green`, `blue`, `purple`, `pink`, `red`
 - background colors: `gray_background`, `brown_background`, `orange_background`, `yellow_background`, `green_background`, `blue_background`, `purple_background`, `pink_background`, `red_background`
 
+For advanced cloze toggle detection, only the toggle block background color `gray_background` qualifies. A toggle with the `gray` text color is not converted to a cloze card for this reason.
+
 ## Cloze marker highlighting
 
 Cloze parsing treats text as a cloze marker when either condition is true:
 
-- `annotations.color == "yellow_background"`
-- `annotations.background_color == "yellow"`
+- `annotations.color == "<color>_background"`
+- `annotations.background_color == "<color>"`
 
-Only marked segments are converted into `{{c1::...}}`.
+The supported colors are yellow, green, blue, purple, pink, orange, red, and
+brown, mapped to cloze numbers `c1` through `c8` respectively.
+
+Only marked segments are converted into cloze markup with the color's fixed number.
 Consecutive marked rich-text fragments are merged into one cloze, even when Notion splits inline math into separate `equation` items.
 Inline equations inside the cloze field are rendered with Anki MathJax inline delimiters (`\(...\)`).
