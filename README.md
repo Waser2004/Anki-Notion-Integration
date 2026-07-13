@@ -35,3 +35,11 @@ From repository root:
 ```bash
 ./.venv/Scripts/python.exe -m unittest discover -s tests
 ```
+
+## Diagnostic logs
+
+Noteck records detailed sync diagnostics (page decisions, excluded cards, card creation,
+updates, recreation after a missing Anki note, type-change invalidation, and errors) in the
+active Anki profile at `Noteck/logs/noteck.log`. The file rotates at 1 MB and keeps four
+backups, limiting storage to roughly 5 MB per profile. Logs intentionally contain identifiers
+and sync metadata, but never the Notion API key or card field content.
