@@ -6,6 +6,7 @@ import base64
 from dataclasses import dataclass, field
 import hashlib
 import html
+import logging
 from pathlib import Path
 import re
 import sqlite3
@@ -19,6 +20,7 @@ from .parser.cloze_card_parser import CLOZE_MARKER_COLORS, ClozeCardParser
 from .card_type_overrides import CardTypeOverrideStore
 from .cards import MODEL_NAME_BASIC, ensure_notion_toggle_model
 from .db import Database
+from .logging_utils import configure_file_logging, log_file_path
 from .notion_client import NotionBlock, NotionClient
 from .parser import ToggleCardPayload, parse_page_to_cards
 from .settings import SettingsStore, create_default_settings
@@ -65,6 +67,7 @@ SyncDoneCallback = Callable[[SyncResult], None]
 SyncProgressCallback = Callable[[str], None]
 SyncCancelCheck = Callable[[], bool]
 _sync_is_running = False
+_LOG = logging.getLogger("noteck.sync")
 _IMAGE_TAG_RE = re.compile(r'<img(?P<before>[^>]*?)\ssrc="(?P<src>[^"]+)"(?P<after>[^>]*)>', re.IGNORECASE)
 # Match Mermaid placeholders even if attributes or whitespace shift slightly during HTML processing.
 _MERMAID_FIGURE_RE = re.compile(
@@ -88,18 +91,27 @@ def sync_notion_to_anki(
     should_cancel: SyncCancelCheck | None = None,
 ) -> SyncResult:
     """Run a blocking Notion → Anki sync."""
+    global _LOG
+    try:
+        _LOG = configure_file_logging(db_path).getChild("sync")
+    except OSError:
+        # A read-only or full profile directory must not make syncing impossible.
+        _LOG = logging.getLogger("noteck.sync")
+    _LOG.info("Sync started. database=%s log=%s", db_path, log_file_path(db_path))
     db = Database(db_path)
     _ensure_db_ready(db)
     ensure_notion_toggle_model(mw)
 
     enabled_pages = _load_enabled_pages(db)
     if not enabled_pages:
+        _LOG.info("Sync finished without work: no enabled pages.")
         return SyncResult(ok=True, message="No enabled pages to sync.", stats=SyncStats())
 
     profile_name = _resolve_profile_name(mw)
     try:
         client = NotionClient.from_settings(db, profile_name=profile_name)
     except Exception as exc:
+        _LOG.exception("Sync aborted while creating the Notion client.")
         return SyncResult(ok=False, message=f"Sync failed: {exc}", errors=(str(exc),))
 
     store = SettingsStore(db, profile_name=profile_name)
@@ -125,7 +137,13 @@ def sync_notion_to_anki(
     collection = _collection_from_mw(mw)
     if collection is None:
         message = "Anki collection is not available."
+        _LOG.error("Sync aborted: %s", message)
         return SyncResult(ok=False, message=f"Sync failed: {message}", errors=(message,))
+
+    _LOG.info(
+        "Sync configured. pages=%d default_card_type=%s cloze_enabled=%s force_cloze_refresh=%s",
+        len(enabled_pages), global_default_card_type, enable_cloze, force_cloze_refresh,
+    )
 
     _publish_progress(
         callback=progress_callback,
@@ -135,6 +153,7 @@ def sync_notion_to_anki(
     # Iterate over enabled Notion pages and sync their content
     for page in enabled_pages:
         if _is_sync_cancelled(should_cancel):
+            _LOG.warning("Sync cancelled before page %s.", page.notion_page_id)
             return _build_cancelled_result(stats)
 
         _publish_progress(
@@ -150,6 +169,11 @@ def sync_notion_to_anki(
                 global_default=global_default_card_type,
             )
             page_card_type_overrides = card_type_override_store.get_card_type_overrides_for_page(page_id)
+            _LOG.info(
+                "Processing page. page_id=%s stored_deck=%s stored_deck_id=%s default_card_type=%s overrides=%d",
+                page_id, page.anki_deck_name, page.anki_deck_id, page_default_card_type,
+                len(page_card_type_overrides),
+            )
             # Check if the page has changed since last sync
             deck_id, resolved_deck_name = _resolve_page_deck(
                 collection=collection,
@@ -157,6 +181,7 @@ def sync_notion_to_anki(
                 stored_deck_id=page.anki_deck_id,
             )
             if page.anki_deck_id != deck_id or page.anki_deck_name != resolved_deck_name:
+                _LOG.info("Updating page deck reference. page_id=%s deck_id=%s deck_name=%s", page_id, deck_id, resolved_deck_name)
                 _set_page_deck_reference(
                     db=db,
                     page_id=page_id,
@@ -169,6 +194,10 @@ def sync_notion_to_anki(
                 page_last_edited_time is not None
                 and stored_page_edit_time is not None
                 and page_last_edited_time == stored_page_edit_time
+            )
+            _LOG.info(
+                "Page edit check. page_id=%s notion_edit=%s stored_edit=%s unchanged=%s",
+                page_id, page_last_edited_time, stored_page_edit_time, page_is_unchanged,
             )
 
             before_writes = stats.cards_created + stats.cards_updated
@@ -214,6 +243,7 @@ def sync_notion_to_anki(
                 )
 
             if cancelled:
+                _LOG.warning("Sync cancelled while processing page %s.", page_id)
                 return _build_cancelled_result(stats)
 
             errors.extend(page_errors)
@@ -226,11 +256,16 @@ def sync_notion_to_anki(
                 and page_last_edited_time != stored_page_edit_time
             ):
                 _set_page_last_seen_notion_edit_time(db, page_id, page_last_edited_time)
+                _LOG.debug("Stored page edit timestamp. page_id=%s value=%s", page_id, page_last_edited_time)
 
             # Only mark the page as synced when we actually wrote changes to Anki.
             after_writes = stats.cards_created + stats.cards_updated
             if after_writes > before_writes:
                 _mark_page_synced(db, page_id)
+            _LOG.info(
+                "Page complete. page_id=%s writes=%d errors=%d stats=%s",
+                page_id, after_writes - before_writes, len(page_errors), stats,
+            )
             
             _publish_progress(
                 callback=progress_callback,
@@ -238,11 +273,13 @@ def sync_notion_to_anki(
             )
         
         except Exception as exc:
+            _LOG.exception("Page sync failed. page_id=%s", page_id)
             errors.append(f"Page {page_id}: {exc}")
 
     _reset_mw_if_available(mw)
     
     if errors:
+        _LOG.error("Sync completed with errors. count=%d stats=%s", len(errors), stats)
         return SyncResult(
             ok=False,
             message=f"Sync completed with {len(errors)} error(s).",
@@ -252,10 +289,13 @@ def sync_notion_to_anki(
 
     if force_cloze_refresh:
         _set_cloze_refresh_revision(db, _CLOZE_REFRESH_REVISION)
+        _LOG.info("Recorded completed cloze refresh revision %s.", _CLOZE_REFRESH_REVISION)
+
     if enable_cloze:
         _set_gray_toggle_cloze_enabled(db, enable_gray_toggle_cloze)
         _set_cloze_marker_colors(db, cloze_marker_colors)
 
+    _LOG.info("Sync completed successfully. stats=%s", stats)
     return SyncResult(
         ok=True,
         message="Sync completed.",
@@ -471,6 +511,8 @@ def _sync_changed_page_fast(
     toggles = [block for block in blocks if block.block_type == "toggle"]
     cloze_parser = ClozeCardParser(cloze_marker_colors)
 
+    _LOG.debug("Fetched shallow page blocks. page_id=%s blocks=%d toggles=%d", page_id, len(blocks), len(toggles))
+
     for toggle in toggles:
         if _is_sync_cancelled(should_cancel):
             return stats, errors, True
@@ -481,6 +523,7 @@ def _sync_changed_page_fast(
         mapping = existing_cards.get(toggle.block_id)
         if mapping is not None and mapping["excluded"]:
             # Excluded cards must be skipped before expansion/parsing.
+            _LOG.info("Card skipped because it is excluded. page_id=%s block_id=%s", page_id, toggle.block_id)
             stats = _replace_stats(stats, cards_skipped=stats.cards_skipped + 1)
             continue
 
@@ -493,6 +536,7 @@ def _sync_changed_page_fast(
         )
         # Avoid an extra API call when Notion indicates there are no child blocks.
         children = client.get_block_children_recursive(toggle.block_id) if toggle.has_children else []
+        _LOG.debug("Expanding toggle for sync. page_id=%s block_id=%s children=%d card_type=%s", page_id, toggle.block_id, len(children), effective_card_type)
         expanded_toggle = _with_children(toggle, children)
         toggle_payloads.extend(
             parse_page_to_cards(
@@ -533,6 +577,7 @@ def _sync_changed_page_fast(
             mapping = existing_cards.get(block.block_id)
             if mapping is not None and mapping["excluded"]:
                 # Keep excluded cloze cards out of parsing entirely.
+                _LOG.info("Cloze candidate skipped because it is excluded. page_id=%s block_id=%s", page_id, block.block_id)
                 stats = _replace_stats(stats, cards_skipped=stats.cards_skipped + 1)
                 continue
             cloze_candidate_block_ids.add(block.block_id)
@@ -553,6 +598,7 @@ def _sync_changed_page_fast(
                 if payload.card_type == CLOZE
             ]
         if cloze_payloads:
+            _LOG.debug("Parsed cloze payloads. page_id=%s payloads=%d", page_id, len(cloze_payloads))
             for payload in cloze_payloads:
                 if _is_sync_cancelled(should_cancel):
                     return stats, errors, True
@@ -636,11 +682,15 @@ def _repair_missing_notes_for_unchanged_page(
             schedule_resync(block_id)
 
     if not blocks_needing_resync:
+        _LOG.debug("Unchanged page has no missing notes or conversion work. page_id=%s", page_id)
         return stats, errors, False
+
+    _LOG.info("Repairing unchanged page blocks. page_id=%s block_ids=%s", page_id, blocks_needing_resync)
 
     try:
         blocks = client.get_page_content(page_id)
     except Exception as exc:
+        _LOG.exception("Could not fetch unchanged page for repair. page_id=%s", page_id)
         return stats, [f"Page {page_id}: {exc}"], False
     payloads = parse_page_to_cards(
         page_id,
@@ -660,6 +710,7 @@ def _repair_missing_notes_for_unchanged_page(
         stats = _replace_stats(stats, cards_seen=stats.cards_seen + 1)
         payload = payloads_by_block_id.get(block_id)
         if payload is None:
+            _LOG.error("Repair could not generate a payload. page_id=%s block_id=%s", page_id, block_id)
             errors.append(f"Block {block_id}: no payload could be generated during repair.")
             continue
         stats, payload_errors, cancelled = _sync_one_payload(
@@ -751,6 +802,7 @@ def _sync_one_payload(
     existing_cards = _load_existing_cards_for_page(db, page_id)
     mapping = existing_cards.get(payload.notion_block_id)
     if mapping is not None and mapping["excluded"]:
+        _LOG.info("Payload skipped because its mapping is excluded. page_id=%s block_id=%s", page_id, payload.notion_block_id)
         return _replace_stats(stats, cards_skipped=stats.cards_skipped + 1), [], False
 
     # Validate immediately before touching Anki so every create/update path is protected.
@@ -770,6 +822,7 @@ def _sync_one_payload(
             prepared_payload = _prepare_payload_media(collection, payload)
             note_id = _create_note(collection, model, deck_id, prepared_payload)
             _upsert_card_mapping(db, prepared_payload, note_id, page_id)
+            _LOG.info("Card created. page_id=%s block_id=%s note_id=%s card_type=%s reason=new_mapping", page_id, payload.notion_block_id, note_id, payload.card_type)
             return _replace_stats(stats, cards_created=stats.cards_created + 1), [], False
 
         note_id = mapping["anki_note_id"]
@@ -777,6 +830,7 @@ def _sync_one_payload(
             prepared_payload = _prepare_payload_media(collection, payload)
             note_id = _create_note(collection, model, deck_id, prepared_payload)
             _upsert_card_mapping(db, prepared_payload, note_id, page_id)
+            _LOG.warning("Card recreated. page_id=%s block_id=%s note_id=%s card_type=%s reason=mapping_without_note", page_id, payload.notion_block_id, note_id, payload.card_type)
             return _replace_stats(stats, cards_created=stats.cards_created + 1), [], False
 
         note = _get_note(collection, note_id)
@@ -785,13 +839,22 @@ def _sync_one_payload(
             prepared_payload = _prepare_payload_media(collection, payload)
             note_id = _create_note(collection, model, deck_id, prepared_payload)
             _upsert_card_mapping(db, prepared_payload, note_id, page_id)
+            _LOG.warning("Card recreated. page_id=%s block_id=%s previous_note_id=%s note_id=%s card_type=%s reason=missing_anki_note", page_id, payload.notion_block_id, mapping["anki_note_id"], note_id, payload.card_type)
             return _replace_stats(stats, cards_created=stats.cards_created + 1), [], False
 
         if mapping["card_type"] != payload.card_type:
+            _LOG.warning("Card invalidated and recreated due to type change. page_id=%s block_id=%s note_id=%s old_type=%s new_type=%s", page_id, payload.notion_block_id, note_id, mapping["card_type"], payload.card_type)
             _delete_note(collection, note_id)
             prepared_payload = _prepare_payload_media(collection, payload)
             recreated_note_id = _create_note(collection, model, deck_id, prepared_payload)
             _upsert_card_mapping(db, prepared_payload, recreated_note_id, page_id)
+            _LOG.info(
+                "Card recreation completed. page_id=%s block_id=%s previous_note_id=%s note_id=%s",
+                page_id,
+                payload.notion_block_id,
+                note_id,
+                recreated_note_id,
+            )
             return _replace_stats(stats, cards_updated=stats.cards_updated + 1), [], False
 
         _ensure_note_cards_in_deck(collection, note_id, deck_id)
@@ -801,13 +864,16 @@ def _sync_one_payload(
                 _apply_payload_to_note(note, prepared_payload)
                 _update_note(collection, note)
                 _upsert_card_mapping(db, prepared_payload, note_id, page_id)
+                _LOG.info("Card updated. page_id=%s block_id=%s note_id=%s reason=mermaid_theme_upgrade", page_id, payload.notion_block_id, note_id)
                 return _replace_stats(stats, cards_updated=stats.cards_updated + 1), [], False
             # Backfill older notes that still contain sync-time media placeholders.
             if _note_back_contains_pending_media(note):
                 note["Back"] = _prepare_back_html_media(collection, _safe_note_field(note, "Back"))
                 _update_note(collection, note)
                 _upsert_card_mapping(db, payload, note_id, page_id)
+                _LOG.info("Card updated. page_id=%s block_id=%s note_id=%s reason=pending_media_backfill", page_id, payload.notion_block_id, note_id)
                 return _replace_stats(stats, cards_updated=stats.cards_updated + 1), [], False
+            _LOG.debug("Card unchanged. page_id=%s block_id=%s note_id=%s card_type=%s", page_id, payload.notion_block_id, note_id, payload.card_type)
             return _replace_stats(stats, cards_unchanged=stats.cards_unchanged + 1), [], False
 
         prepared_payload = _prepare_payload_media(collection, payload)
@@ -816,8 +882,10 @@ def _sync_one_payload(
         if payload.card_type == CLOZE:
             _remove_empty_cards_for_note(collection, note_id)
         _upsert_card_mapping(db, prepared_payload, note_id, page_id)
+        _LOG.info("Card updated. page_id=%s block_id=%s note_id=%s reason=content_changed", page_id, payload.notion_block_id, note_id)
         return _replace_stats(stats, cards_updated=stats.cards_updated + 1), [], False
     except Exception as exc:
+        _LOG.exception("Card sync failed. page_id=%s block_id=%s", page_id, payload.notion_block_id)
         return stats, [f"Block {payload.notion_block_id}: {exc}"], False
 
 

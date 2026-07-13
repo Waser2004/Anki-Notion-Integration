@@ -25,7 +25,7 @@ The deployment script mirrors `src/Noteck` to:
 
 - `keyring` is required for secure storage of the Notion API key.
 - The deployment scripts install Python dependencies into the add-on `_vendor` folder.
-- At startup, the add-on only checks whether `keyring` is importable and asks you to redeploy if it is missing.
+- The settings layer reports a clear error if `keyring` is unavailable at runtime.
 - The current Python requirement is `keyring>=25.7.0` (see `requirements.txt`).
 
 ## Running tests
@@ -35,3 +35,11 @@ From repository root:
 ```bash
 ./.venv/Scripts/python.exe -m unittest discover -s tests
 ```
+
+## Diagnostic logs
+
+Noteck records detailed sync diagnostics (page decisions, excluded cards, card creation,
+updates, recreation after a missing Anki note, type-change invalidation, and errors) in the
+active Anki profile at `Noteck/logs/noteck.log`. The file rotates at 1 MB and keeps four
+backups, limiting storage to roughly 5 MB per profile. Logs intentionally contain identifiers
+and sync metadata, but never the Notion API key or card field content.

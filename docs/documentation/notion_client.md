@@ -44,7 +44,7 @@ The original API payload is always retained as `raw` for future feature growth.
 
 #### `list_pages(include_database_pages: bool = False) -> list[NotionPage]`
 - Uses the Notion `/search` endpoint and handles pagination.
-- Current default behavior excludes database rows whose parent is a database (`parent.type == "database_id"`) or data source (`parent.type == "data_source_id"`), because database navigation is not yet implemented.
+- Current default behavior excludes database rows whose parent is a database (`parent.type == "database_id"`) or data source (`parent.type == "data_source_id"`), and also excludes pages nested inside those rows (pages whose raw parent is a `block_id` that resolves to a database row), because database navigation is not yet implemented.
 - Returns a flat list of normalized pages with titles extracted from `properties[*].type == "title"`.
 
 #### `list_pages_tree(include_database_pages: bool = False) -> list[PageNode]`
