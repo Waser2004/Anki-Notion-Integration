@@ -5,6 +5,8 @@ $ScriptDir    = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot  = Split-Path -Parent $ScriptDir
 $Source       = Join-Path $ProjectRoot "src\Noteck"
 $Requirements = Join-Path $ProjectRoot "requirements.txt"
+$ReleaseNotes = Join-Path $ProjectRoot "CHANGELOG.md"
+$ReleaseNoteAssets = Join-Path $ProjectRoot "docs\release-notes-assets"
 
 # Keep the test add-on in a distinct Anki add-ons folder from production Noteck.
 $AddonName    = "NoteckTest"
@@ -85,6 +87,10 @@ if (!(Test-Path $Source)) {
   throw "Source folder not found: $Source"
 }
 
+if (!(Test-Path $ReleaseNotes)) {
+  throw "Release notes not found: $ReleaseNotes"
+}
+
 # Ensure destination exists (robocopy wants it)
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 
@@ -99,7 +105,19 @@ if ($LASTEXITCODE -ge 8) {
   throw "Robocopy failed with exit code $LASTEXITCODE"
 }
 
+# Bundle release content before applying the test add-on identity patches.
+Copy-Item -LiteralPath $ReleaseNotes -Destination (Join-Path $Dest "CHANGELOG.md") -Force
+if (Test-Path $ReleaseNoteAssets) {
+  $DestAssets = Join-Path $Dest "docs\release-notes-assets"
+  New-Item -ItemType Directory -Force -Path $DestAssets | Out-Null
+  Copy-Item -Path (Join-Path $ReleaseNoteAssets "*") -Destination $DestAssets -Recurse -Force
+}
+
 Patch-TestAddon -AddonPath $Dest
+
+# The deployed add-on consumes this marker only after opening the window successfully.
+$ReleaseNotesSentinel = Join-Path $Dest ".force_release_notes_on_startup"
+Set-Content -LiteralPath $ReleaseNotesSentinel -Value "Show on next test startup" -NoNewline
 
 if (Test-Path $Requirements) {
   if (Test-Path $Vendor) {

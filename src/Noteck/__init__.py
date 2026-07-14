@@ -24,12 +24,14 @@ try:
     from aqt import mw, gui_hooks  # type: ignore
     from aqt.qt import QTimer  # type: ignore
     from .ui.ui import initialize_ui
+    from .ui.release_notes_ui import show_release_notes_after_update
     from .ui.style_patcher import mirror_checkbox_indicator_to_tree_indicators
 except ModuleNotFoundError:
     mw = None
     gui_hooks = None
     QTimer = None
     initialize_ui = None
+    show_release_notes_after_update = None
     mirror_checkbox_indicator_to_tree_indicators = None
 
 __all__ = ["Database", "NotionClient", "create_default_settings"]
@@ -41,6 +43,7 @@ def on_profile_did_open() -> None:
 
     profile_folder = mw.pm.profileFolder()
     db_path = Path(profile_folder) / "Noteck" / "db" / "notion_integration.db"
+    database_existed = db_path.is_file()
 
     def work() -> None:       
         # initialize the database for the current profile
@@ -51,6 +54,13 @@ def on_profile_did_open() -> None:
         ensure_notion_toggle_model(mw)
         if callable(initialize_ui):
             initialize_ui()
+
+        if callable(show_release_notes_after_update):
+            show_release_notes_after_update(
+                mw,
+                db_path=db_path,
+                database_existed=database_existed,
+            )
 
         trigger_startup_sync(mw=mw, db_path=db_path)
         

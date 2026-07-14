@@ -1,0 +1,241 @@
+"""Qt dialog and startup orchestration for bundled Noteck release notes."""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any, Literal
+
+from aqt.qt import (
+    QDialog,
+    QDialogButtonBox,
+    QImage,
+    QMessageBox,
+    QTextBrowser,
+    QTextCursor,
+    QTimer,
+    QUrl,
+    QVBoxLayout,
+    QWidget,
+    Qt,
+)
+
+from ..modules.db import Database
+from ..modules.release_notes import (
+    FORCE_RELEASE_NOTES_SENTINEL,
+    ReleaseNotesError,
+    force_release_notes_requested,
+    load_release_notes,
+    mark_release_notes_seen,
+    release_notes_show_after_update,
+    set_release_notes_show_after_update,
+    startup_release_notes_required,
+)
+
+
+_LOG = logging.getLogger(__name__)
+_open_dialogs: set["ReleaseNotesDialog"] = set()
+_INITIAL_DIALOG_WIDTH = 520
+_INITIAL_DIALOG_HEIGHT = 620
+_IMAGE_DISPLAY_WIDTH = 450
+
+
+class ReleaseNotesDialog(QDialog):
+    """Modeless, scrollable Markdown viewer for Noteck release notes."""
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        markdown: str,
+        base_directory: Path,
+        db_path: str | Path | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Noteck Release Notes")
+        self.resize(_INITIAL_DIALOG_WIDTH, _INITIAL_DIALOG_HEIGHT)
+        self.setMinimumSize(520, 420)
+
+        browser = QTextBrowser(self)
+        browser.setOpenExternalLinks(True)
+        browser.document().setBaseUrl(QUrl.fromLocalFile(f"{base_directory.resolve()}/"))
+        browser.document().setDefaultStyleSheet(
+            "body { line-height: 1.35; }"
+            "h1 { font-size: 24px; margin-bottom: 14px; }"
+            "h2 { font-size: 19px; margin-top: 18px; margin-bottom: 8px; }"
+            "h3 { font-size: 16px; margin-top: 14px; margin-bottom: 6px; }"
+            "p, li { margin-bottom: 6px; }"
+            "a { text-decoration: none; }"
+            "img { max-width: 100%; }"
+        )
+        browser.setMarkdown(markdown)
+        self._fit_local_images(browser.document(), base_directory)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
+        buttons.rejected.connect(self.close)
+        if db_path is not None:
+            # Keep the update preference beside Close so it remains available even
+            # after automatic release notes have been disabled.
+            self._db = Database(db_path)
+            self._automatic_button = buttons.addButton(
+                "",
+                QDialogButtonBox.ButtonRole.ActionRole,
+            )
+            self._automatic_button.setAutoDefault(False)
+            self._automatic_button.setDefault(False)
+            self._automatic_button.clicked.connect(self._toggle_automatic_display)
+            self._update_automatic_button_text()
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(browser, 1)
+        layout.addWidget(buttons)
+
+    def _toggle_automatic_display(self, _checked: bool = False) -> None:
+        """Toggle whether future updates open their release notes automatically."""
+        enabled = not release_notes_show_after_update(self._db)
+        set_release_notes_show_after_update(self._db, enabled)
+        self._update_automatic_button_text()
+
+    def _update_automatic_button_text(self) -> None:
+        """Describe the action the preference button will perform when clicked."""
+        enabled = release_notes_show_after_update(self._db)
+        self._automatic_button.setText(
+            "Hide after updates" if enabled else "Show after updates"
+        )
+
+    @staticmethod
+    def _fit_local_images(document: Any, base_directory: Path) -> None:
+        """Scale bundled Markdown images to the standard 520-pixel display width."""
+        resolved_base = base_directory.resolve()
+        block = document.begin()
+        while block.isValid():
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment()
+                iterator += 1
+                if not fragment.isValid():
+                    continue
+
+                character_format = fragment.charFormat()
+                if not character_format.isImageFormat():
+                    continue
+
+                image_format = character_format.toImageFormat()
+                image_path = (resolved_base / image_format.name()).resolve()
+                try:
+                    image_path.relative_to(resolved_base)
+                except ValueError:
+                    # Do not read or resize images outside the bundled release folder.
+                    continue
+
+                image = QImage(str(image_path))
+                if image.isNull():
+                    continue
+
+                # Give every release image the same predictable presentation width,
+                # regardless of its original pixel dimensions.
+                display_width = _IMAGE_DISPLAY_WIDTH
+                display_height = round(image.height() * display_width / image.width())
+                image_format.setWidth(display_width)
+                image_format.setHeight(display_height)
+
+                cursor = QTextCursor(document)
+                cursor.setPosition(fragment.position())
+                move_mode = getattr(QTextCursor, "MoveMode", None)
+                keep_anchor = (
+                    move_mode.KeepAnchor
+                    if move_mode is not None
+                    else getattr(QTextCursor, "KeepAnchor")
+                )
+                cursor.setPosition(fragment.position() + fragment.length(), keep_anchor)
+                cursor.setCharFormat(image_format)
+
+                # Markdown images normally occupy their own paragraph. Center that
+                # paragraph so images are consistently positioned in the viewer.
+                block_format = cursor.blockFormat()
+                alignment_flag = getattr(Qt, "AlignmentFlag", None)
+                horizontal_center = (
+                    alignment_flag.AlignHCenter
+                    if alignment_flag is not None
+                    else getattr(Qt, "AlignHCenter")
+                )
+                block_format.setAlignment(horizontal_center)
+                cursor.setBlockFormat(block_format)
+            block = block.next()
+
+
+def show_release_notes(
+    parent: QWidget | None,
+    *,
+    content_mode: Literal["latest", "all"] = "all",
+    db_path: str | Path | None = None,
+) -> bool:
+    """Open a modeless release-notes window and retain it until it closes."""
+    try:
+        document = load_release_notes()
+    except ReleaseNotesError as exc:
+        QMessageBox.critical(parent, "Release notes", str(exc))
+        return False
+
+    markdown = document.latest_markdown if content_mode == "latest" else document.markdown
+    dialog = ReleaseNotesDialog(
+        parent,
+        markdown,
+        document.source_path.parent,
+        db_path=db_path,
+    )
+    _open_dialogs.add(dialog)
+    dialog.finished.connect(lambda _result, item=dialog: _open_dialogs.discard(item))
+    dialog.show()
+    # QTextDocument calculates its content size during the first event-loop pass.
+    # Reapply the intended opening dimensions afterwards so large images or long lines
+    # cannot determine the dialog width. The resize runs only once, leaving the user
+    # free to resize the window normally after it opens.
+    QTimer.singleShot(
+        0,
+        lambda item=dialog: item.resize(_INITIAL_DIALOG_WIDTH, _INITIAL_DIALOG_HEIGHT),
+    )
+    dialog.raise_()
+    dialog.activateWindow()
+    return True
+
+
+def show_release_notes_after_update(
+    parent: QWidget | None,
+    *,
+    db_path: str | Path,
+    database_existed: bool,
+    force_sentinel_path: str | Path | None = None,
+) -> bool:
+    """Show the latest notes once after an update and persist the seen release."""
+    try:
+        document = load_release_notes()
+        db = Database(db_path)
+        sentinel_path = Path(force_sentinel_path) if force_sentinel_path else (
+            document.source_path.parent / FORCE_RELEASE_NOTES_SENTINEL
+        )
+        forced = force_release_notes_requested(sentinel_path)
+
+        should_show = startup_release_notes_required(
+            db,
+            latest_release=document.latest.version,
+            database_existed=database_existed,
+            forced=forced,
+        )
+        if not should_show:
+            return False
+
+        if not show_release_notes(parent, content_mode="latest", db_path=db_path):
+            return False
+
+        # Mark as seen only after the window opened successfully. The test sentinel is
+        # consumed at the same point so a failed render is retried next startup.
+        mark_release_notes_seen(
+            db,
+            release=document.latest.version,
+            force_sentinel_path=sentinel_path if forced else None,
+        )
+        return True
+    except Exception:
+        # Release notes must never prevent a profile from opening or startup sync.
+        _LOG.exception("Failed to process release notes during startup.")
+        return False
