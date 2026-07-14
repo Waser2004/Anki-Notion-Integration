@@ -17,6 +17,7 @@ from aqt.qt import (
     QUrl,
     QVBoxLayout,
     QWidget,
+    Qt,
 )
 
 from ..modules.db import Database
@@ -32,9 +33,9 @@ from ..modules.release_notes import (
 
 _LOG = logging.getLogger(__name__)
 _open_dialogs: set["ReleaseNotesDialog"] = set()
-_INITIAL_DIALOG_WIDTH = 700
-_INITIAL_DIALOG_HEIGHT = 650
-_MAX_IMAGE_WIDTH = 620
+_INITIAL_DIALOG_WIDTH = 520
+_INITIAL_DIALOG_HEIGHT = 620
+_IMAGE_DISPLAY_WIDTH = 450
 
 
 class ReleaseNotesDialog(QDialog):
@@ -70,7 +71,7 @@ class ReleaseNotesDialog(QDialog):
 
     @staticmethod
     def _fit_local_images(document: Any, base_directory: Path) -> None:
-        """Scale bundled Markdown images to the default viewer width."""
+        """Scale bundled Markdown images to the standard 520-pixel display width."""
         resolved_base = base_directory.resolve()
         block = document.begin()
         while block.isValid():
@@ -94,10 +95,12 @@ class ReleaseNotesDialog(QDialog):
                     continue
 
                 image = QImage(str(image_path))
-                if image.isNull() or image.width() <= _MAX_IMAGE_WIDTH:
+                if image.isNull():
                     continue
 
-                display_width = _MAX_IMAGE_WIDTH
+                # Give every release image the same predictable presentation width,
+                # regardless of its original pixel dimensions.
+                display_width = _IMAGE_DISPLAY_WIDTH
                 display_height = round(image.height() * display_width / image.width())
                 image_format.setWidth(display_width)
                 image_format.setHeight(display_height)
@@ -112,6 +115,18 @@ class ReleaseNotesDialog(QDialog):
                 )
                 cursor.setPosition(fragment.position() + fragment.length(), keep_anchor)
                 cursor.setCharFormat(image_format)
+
+                # Markdown images normally occupy their own paragraph. Center that
+                # paragraph so images are consistently positioned in the viewer.
+                block_format = cursor.blockFormat()
+                alignment_flag = getattr(Qt, "AlignmentFlag", None)
+                horizontal_center = (
+                    alignment_flag.AlignHCenter
+                    if alignment_flag is not None
+                    else getattr(Qt, "AlignHCenter")
+                )
+                block_format.setAlignment(horizontal_center)
+                cursor.setBlockFormat(block_format)
             block = block.next()
 
 
