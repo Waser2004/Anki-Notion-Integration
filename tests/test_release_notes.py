@@ -167,6 +167,14 @@ class ReleaseNotesTests(unittest.TestCase):
     def test_repository_changelog_uses_supported_format(self) -> None:
         document = load_release_notes()
         self.assertEqual(document.latest.version, "1.3.0")
+        self.assertIn(
+            "docs/release-notes-assets/1.3.0-sample-flower.jpeg",
+            document.latest.markdown,
+        )
+        image_path = document.source_path.parent / "docs" / "release-notes-assets" / (
+            "1.3.0-sample-flower.jpeg"
+        )
+        self.assertTrue(image_path.is_file())
 
 
 class ReleaseNotesDeploymentTests(unittest.TestCase):

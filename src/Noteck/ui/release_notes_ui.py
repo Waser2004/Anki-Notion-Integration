@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from aqt.qt import (
     QDialog,
     QDialogButtonBox,
+    QImage,
     QMessageBox,
     QTextBrowser,
+    QTextCursor,
+    QTimer,
     QUrl,
     QVBoxLayout,
     QWidget,
@@ -29,6 +32,9 @@ from ..modules.release_notes import (
 
 _LOG = logging.getLogger(__name__)
 _open_dialogs: set["ReleaseNotesDialog"] = set()
+_INITIAL_DIALOG_WIDTH = 700
+_INITIAL_DIALOG_HEIGHT = 650
+_MAX_IMAGE_WIDTH = 620
 
 
 class ReleaseNotesDialog(QDialog):
@@ -37,7 +43,7 @@ class ReleaseNotesDialog(QDialog):
     def __init__(self, parent: QWidget | None, markdown: str, base_directory: Path) -> None:
         super().__init__(parent)
         self.setWindowTitle("Noteck Release Notes")
-        self.resize(700, 650)
+        self.resize(_INITIAL_DIALOG_WIDTH, _INITIAL_DIALOG_HEIGHT)
         self.setMinimumSize(520, 420)
 
         browser = QTextBrowser(self)
@@ -53,6 +59,7 @@ class ReleaseNotesDialog(QDialog):
             "img { max-width: 100%; }"
         )
         browser.setMarkdown(markdown)
+        self._fit_local_images(browser.document(), base_directory)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
         buttons.rejected.connect(self.close)
@@ -60,6 +67,52 @@ class ReleaseNotesDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(browser, 1)
         layout.addWidget(buttons)
+
+    @staticmethod
+    def _fit_local_images(document: Any, base_directory: Path) -> None:
+        """Scale bundled Markdown images to the default viewer width."""
+        resolved_base = base_directory.resolve()
+        block = document.begin()
+        while block.isValid():
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment()
+                iterator += 1
+                if not fragment.isValid():
+                    continue
+
+                character_format = fragment.charFormat()
+                if not character_format.isImageFormat():
+                    continue
+
+                image_format = character_format.toImageFormat()
+                image_path = (resolved_base / image_format.name()).resolve()
+                try:
+                    image_path.relative_to(resolved_base)
+                except ValueError:
+                    # Do not read or resize images outside the bundled release folder.
+                    continue
+
+                image = QImage(str(image_path))
+                if image.isNull() or image.width() <= _MAX_IMAGE_WIDTH:
+                    continue
+
+                display_width = _MAX_IMAGE_WIDTH
+                display_height = round(image.height() * display_width / image.width())
+                image_format.setWidth(display_width)
+                image_format.setHeight(display_height)
+
+                cursor = QTextCursor(document)
+                cursor.setPosition(fragment.position())
+                move_mode = getattr(QTextCursor, "MoveMode", None)
+                keep_anchor = (
+                    move_mode.KeepAnchor
+                    if move_mode is not None
+                    else getattr(QTextCursor, "KeepAnchor")
+                )
+                cursor.setPosition(fragment.position() + fragment.length(), keep_anchor)
+                cursor.setCharFormat(image_format)
+            block = block.next()
 
 
 def show_release_notes(
@@ -79,6 +132,14 @@ def show_release_notes(
     _open_dialogs.add(dialog)
     dialog.finished.connect(lambda _result, item=dialog: _open_dialogs.discard(item))
     dialog.show()
+    # QTextDocument calculates its content size during the first event-loop pass.
+    # Reapply the intended opening dimensions afterwards so large images or long lines
+    # cannot determine the dialog width. The resize runs only once, leaving the user
+    # free to resize the window normally after it opens.
+    QTimer.singleShot(
+        0,
+        lambda item=dialog: item.resize(_INITIAL_DIALOG_WIDTH, _INITIAL_DIALOG_HEIGHT),
+    )
     dialog.raise_()
     dialog.activateWindow()
     return True

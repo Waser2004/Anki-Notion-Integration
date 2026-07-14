@@ -4,6 +4,8 @@
 
 ### Release notes
 
+![Sample pink flower on a blue background](docs/release-notes-assets/1.3.0-sample-flower.jpeg)
+
 - Added a polished release-notes window that supports Markdown titles, sections, links, and optional bundled images.
 - Added a `Release Notes` button beside the main add-on window's close action.
 - Release notes now open once after an existing installation is updated, while fresh installations remain uninterrupted.
