@@ -10,7 +10,7 @@ import unittest
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
-from Noteck.ui.ui import UiSchemaError, load_ui_schema
+from Noteck.ui.ui_schema import UiSchemaError, load_ui_schema
 
 
 class UiSchemaTests(unittest.TestCase):

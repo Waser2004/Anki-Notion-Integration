@@ -63,3 +63,13 @@ The **Settings** tab is schema-driven and includes:
 - Notion authentication settings
 - Cards settings (`default_card_type`, cloze parsing toggle, image occlusion parsing toggle)
 - Sync settings (startup/manual hooks)
+
+### Release notes
+
+The footer of the main Noteck window includes a **Release Notes** button beside
+**Close**. It opens the complete bundled release history in a separate scrollable
+window. Release notes support Markdown titles, sections, lists, links, and optional
+offline images.
+
+After an existing installation is updated, Noteck opens only the newest release entry
+once on the next profile startup. Fresh installations do not show an automatic popup.

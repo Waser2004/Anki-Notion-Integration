@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.0 - 2026-07-14
+
+### Release notes
+
+- Added a polished release-notes window that supports Markdown titles, sections, links, and optional bundled images.
+- Added a `Release Notes` button beside the main add-on window's close action.
+- Release notes now open once after an existing installation is updated, while fresh installations remain uninterrupted.
+- Test deployments force the latest notes to appear once on the next Anki startup for straightforward manual verification.
+
 ## 1.2.0 - 2026-07-04
 
 - Added dynamic page-selection behavior so selecting or deselecting a parent page now keeps its descendant pages in sync.

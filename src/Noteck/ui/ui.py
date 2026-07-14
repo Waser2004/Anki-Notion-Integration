@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib
-import json
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 # Import Anki/Qt modules only when running inside Anki.
 from aqt import gui_hooks, mw
@@ -21,38 +20,9 @@ from aqt.qt import (
     QWidget,
 )
 
-class UiSchemaError(RuntimeError):
-    """Raised when ui.json cannot be loaded or validated."""
+from .release_notes_ui import show_release_notes
 
-
-@dataclass(frozen=True)
-class UiPageDefinition:
-    """Metadata describing one top-level UI page."""
-
-    key: str
-    name: str
-    module: str
-    factory: str
-
-
-class UiSchema:
-    """Parsed UI schema with lookup helpers."""
-
-    def __init__(self, pages: Iterable[UiPageDefinition]) -> None:
-        self._pages = tuple(pages)
-        self._pages_by_key = {page.key: page for page in self._pages}
-
-    @property
-    def pages(self) -> tuple[UiPageDefinition, ...]:
-        """Return the ordered list of UI pages."""
-        return self._pages
-
-    def get_page(self, key: str) -> UiPageDefinition:
-        """Return the page definition for the given key."""
-        try:
-            return self._pages_by_key[key]
-        except KeyError as exc:
-            raise UiSchemaError(f"Unknown page key: {key}") from exc
+from .ui_schema import UiPageDefinition, UiSchema, UiSchemaError, load_ui_schema
 
 
 @dataclass(frozen=True)
@@ -64,55 +34,8 @@ class UiContext:
     db_path: Path
 
 
-_DEFAULT_UI_PATH = Path(__file__).resolve().parents[1] / "docs" / "ui.json"
-_DEFAULT_FACTORY = "build_page"
 _initialized = False
 _window: "NotionWindow | None" = None
-
-
-def load_ui_schema(path: Path | None = None) -> UiSchema:
-    """Load and validate the UI schema from ui.json."""
-    schema_path = path or _DEFAULT_UI_PATH
-
-    if not schema_path.exists():
-        raise UiSchemaError(f"UI schema not found: {schema_path}")
-    
-    with schema_path.open("r", encoding="utf-8") as handle:
-        payload = json.load(handle)
-    pages_payload = payload.get("pages")
-
-    if not isinstance(pages_payload, list) or not pages_payload:
-        raise UiSchemaError("UI schema must include a non-empty 'pages' list.")
-    
-    pages: list[UiPageDefinition] = []
-    seen_keys: set[str] = set()
-    for page_payload in pages_payload:
-        if not isinstance(page_payload, dict):
-            raise UiSchemaError("Each page entry must be an object.")
-        
-        key     = page_payload.get("key")
-        name    = page_payload.get("name")
-        module  = page_payload.get("module")
-        factory = page_payload.get("factory", _DEFAULT_FACTORY)
-
-        if not key or not name or not module:
-            raise UiSchemaError("Each page requires 'key', 'name', and 'module'.")
-        if not isinstance(factory, str) or not factory:
-            raise UiSchemaError(f"Invalid factory for page '{key}'.")
-        if key in seen_keys:
-            raise UiSchemaError(f"Duplicate page key: {key}")
-        
-        seen_keys.add(key)
-        pages.append(
-            UiPageDefinition(
-                key=str(key),
-                name=str(name),
-                module=str(module),
-                factory=str(factory),
-            )
-        )
-    
-    return UiSchema(pages)
 
 
 def initialize_ui() -> None:
@@ -192,6 +115,18 @@ class NotionWindow(QDialog):
 
         # Bottom-right close button for users who prefer a visible "Close" action.
         button_row = QDialogButtonBox(self)
+
+        # Add this first because Qt displays action-role buttons in reverse insertion
+        # order on Windows; Refresh then appears to its left and Close to its right.
+        release_notes_button = button_row.addButton(
+            "Release Notes",
+            QDialogButtonBox.ButtonRole.ActionRole,
+        )
+        release_notes_button.setAutoDefault(False)
+        release_notes_button.setDefault(False)
+        release_notes_button.clicked.connect(
+            lambda _checked=False: show_release_notes(self, content_mode="all")
+        )
 
         # Refresh button for pages that support reloading.
         self._refresh_button = button_row.addButton("Refresh", QDialogButtonBox.ButtonRole.ActionRole)
