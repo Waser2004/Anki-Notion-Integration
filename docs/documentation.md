@@ -118,6 +118,19 @@ Rich-text formatting support includes:
 - Inline equations
 - Foreground and background highlight colors
 
+Block-level foreground and background colors are rendered for paragraphs, Heading 1–3,
+bulleted and numbered list items, quotes, callouts, and nested toggles. Colored list-item
+surfaces include their bullet or number, while quote backgrounds retain square corners.
+
+For toggle-derived cards, a background color on the top-level toggle colors the complete
+Notion card surface in Anki. A foreground-only toggle color applies to the card title instead.
+Child blocks with their own background color remain visible above the card surface.
+Code blocks, Mermaid diagrams, and tables use translucent surfaces on root-colored cards so
+the root backdrop remains visible; their normal uncolored-card appearance is unchanged.
+The managed `Notion Block ID` and `Notion Card Background` metadata fields are collapsed in Anki's note editor by default.
+After upgrading, Noteck performs one successful parser refresh of existing toggle-derived
+cards so color changes are applied even when their Notion edit timestamps have not changed.
+
 Unsupported or unknown block types are ignored in rendered card content.
 
 ## 6. Cloze parsing rules

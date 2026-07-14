@@ -267,6 +267,58 @@ class ParserTests(unittest.TestCase):
         self.assertIn("<li>One</li><li>Two</li>", rendered)
         self.assertIn("<li>Three</li><li>Four</li>", rendered)
 
+    def test_render_blocks_applies_foreground_and_background_colors_to_supported_blocks(self) -> None:
+        """Every currently supported color-capable semantic block receives safe classes."""
+        block_cases = (
+            ("paragraph", "p"),
+            ("heading_1", "h1"),
+            ("heading_2", "h2"),
+            ("heading_3", "h3"),
+            ("quote", "blockquote"),
+            ("callout", "div"),
+            ("toggle", "details"),
+        )
+        for block_type, tag_name in block_cases:
+            for color in ("blue", "red_background"):
+                with self.subTest(block_type=block_type, color=color):
+                    payload = {"rich_text": [_text_item("Colored")], "color": color}
+                    rendered = render_blocks([_block("colored", block_type, payload)])
+                    self.assertIn(f"<{tag_name}", rendered)
+                    self.assertIn(f"notion-block-color-{color}", rendered)
+                    if color.endswith("_background"):
+                        self.assertIn("notion-block-color-background", rendered)
+
+    def test_render_blocks_colors_list_items_without_splitting_list_sequences(self) -> None:
+        blocks = [
+            _block(
+                "b1",
+                "bulleted_list_item",
+                {"rich_text": [_text_item("Blue")], "color": "blue_background"},
+            ),
+            _block("b2", "bulleted_list_item", {"rich_text": [_text_item("Default")]}),
+            _block(
+                "n1",
+                "numbered_list_item",
+                {"rich_text": [_text_item("Purple")], "color": "purple_background"},
+            ),
+            _block("n2", "numbered_list_item", {"rich_text": [_text_item("Default")]}),
+        ]
+
+        rendered = render_blocks(blocks)
+
+        self.assertEqual(rendered.count("<ul>"), 1)
+        self.assertEqual(rendered.count("<ol>"), 1)
+        self.assertIn('<li class="notion-block-color notion-block-color-blue_background ', rendered)
+        self.assertIn('<li class="notion-block-color notion-block-color-purple_background ', rendered)
+        self.assertIn("<li>Default</li>", rendered)
+
+    def test_render_blocks_ignores_unknown_block_colors(self) -> None:
+        rendered = render_blocks(
+            [_block("p1", "paragraph", {"rich_text": [_text_item("Safe")], "color": "url(bad)"})]
+        )
+
+        self.assertEqual(rendered, "<p>Safe</p>")
+
     def test_render_blocks_handles_code_equation_quote_and_callout(self) -> None:
         blocks = [
             _block(
@@ -549,6 +601,47 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(payloads[0].card_type, "basic_reversed")
         self.assertIn("Front", payloads[0].fields)
         self.assertIn("Back", payloads[0].fields)
+
+    def test_parse_page_to_cards_uses_root_toggle_background_for_all_toggle_models(self) -> None:
+        """Root background colors become managed fields and affect content identity."""
+        root_toggle = _block(
+            "root-toggle",
+            "toggle",
+            {"rich_text": [_text_item("Root toggle")], "color": "brown_background"},
+            children=(_block("p1", "paragraph", {"rich_text": [_text_item("Body")]}),),
+        )
+
+        for card_type in ("basic", "basic_reversed", "input"):
+            with self.subTest(card_type=card_type):
+                payload = parse_page_to_cards(
+                    "page-1",
+                    [root_toggle],
+                    default_card_type=card_type,
+                )[0]
+                self.assertEqual(payload.fields["Notion Card Background"], "brown_background")
+                self.assertEqual(payload.front_html, "<p>Root toggle</p>")
+
+        default_toggle = _block(
+            "root-toggle",
+            "toggle",
+            {"rich_text": [_text_item("Root toggle")], "color": "default"},
+            children=root_toggle.children,
+        )
+        default_payload = parse_page_to_cards("page-1", [default_toggle])[0]
+        colored_payload = parse_page_to_cards("page-1", [root_toggle])[0]
+        self.assertNotEqual(default_payload.content_hash, colored_payload.content_hash)
+
+    def test_parse_page_to_cards_keeps_root_foreground_color_on_title_only(self) -> None:
+        root_toggle = _block(
+            "root-toggle",
+            "toggle",
+            {"rich_text": [_text_item("Blue title")], "color": "blue"},
+        )
+
+        payload = parse_page_to_cards("page-1", [root_toggle])[0]
+
+        self.assertEqual(payload.fields["Notion Card Background"], "")
+        self.assertIn("notion-block-color-blue", payload.front_html)
 
     def test_parse_page_to_cards_supports_input_default_type(self) -> None:
         root_toggle = _block(

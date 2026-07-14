@@ -12,7 +12,13 @@ from typing import Any, Collection, Iterable, Mapping
 from urllib.parse import urlsplit
 
 from .card_types import BASIC, BASIC_REVERSED, CLOZE, INPUT, normalize_default_selectable_card_type
-from .cards import MODEL_NAME_BASIC, MODEL_NAME_BASIC_REVERSED, MODEL_NAME_CLOZE, MODEL_NAME_INPUT
+from .cards import (
+    MODEL_NAME_BASIC,
+    MODEL_NAME_BASIC_REVERSED,
+    MODEL_NAME_CLOZE,
+    MODEL_NAME_INPUT,
+    NOTION_CARD_BACKGROUND_FIELD,
+)
 from .notion_client import NotionBlock
 
 _SAFE_COLOR_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz_")
@@ -23,6 +29,17 @@ _NUMBER_RE = re.compile(r"(?:0[xX][0-9A-Fa-f]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)")
 _OPERATOR_CHARS = frozenset("+-*/%=!<>|&^~?:")
 _PUNCTUATION_CHARS = frozenset("()[]{}.,;")
 _CLOZE_EXTRA_PREFIX_RE = re.compile(r"^\s*extra\s*:\s*", re.IGNORECASE)
+
+# Notion exposes the same fixed palette for every color-capable block type.
+_NOTION_BLOCK_FOREGROUND_COLORS = frozenset(
+    {"gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red"}
+)
+_NOTION_BLOCK_BACKGROUND_COLORS = frozenset(
+    f"{color}_background" for color in _NOTION_BLOCK_FOREGROUND_COLORS
+)
+_NOTION_BLOCK_COLORS = frozenset(
+    {"default", *_NOTION_BLOCK_FOREGROUND_COLORS, *_NOTION_BLOCK_BACKGROUND_COLORS}
+)
 
 # Canonical language labels and aliases for common Notion code-block values.
 _LANGUAGE_ALIASES = {
@@ -289,6 +306,7 @@ def parse_page_to_cards(
             back_html=back_html,
             back_blocks=block.children,
             card_type=resolved_card_type,
+            card_background=_block_background_color(block),
         )
         model_name = _model_name_for_card_type(resolved_card_type)
         content_hash = _compute_payload_content_hash(
@@ -396,7 +414,8 @@ def _render_column_with_width(block: NotionBlock, *, width_ratio: float | None) 
 def _render_paragraph(block: NotionBlock) -> str:
     """Render a paragraph block and any nested children."""
     text_html = render_rich_text(_block_rich_text(block))
-    body = f"<p>{text_html}</p>"
+    class_attr = _block_color_class_attribute(block)
+    body = f"<p{class_attr}>{text_html}</p>"
     children_html = render_blocks(block.children)
     return body + children_html
 
@@ -404,7 +423,8 @@ def _render_paragraph(block: NotionBlock) -> str:
 def _render_heading(block: NotionBlock, *, level: int) -> str:
     """Render a heading block (levels 1-3) and any nested children."""
     text_html = render_rich_text(_block_rich_text(block))
-    body = f"<h{level}>{text_html}</h{level}>"
+    class_attr = _block_color_class_attribute(block)
+    body = f"<h{level}{class_attr}>{text_html}</h{level}>"
     children_html = render_blocks(block.children)
     return body + children_html
 
@@ -414,7 +434,8 @@ def _render_quote(block: NotionBlock) -> str:
     text_html = render_rich_text(_block_rich_text(block))
     body = f"<p>{text_html}</p>" if text_html else ""
     children_html = render_blocks(block.children)
-    return f"<blockquote>{body}{children_html}</blockquote>"
+    class_attr = _block_color_class_attribute(block)
+    return f"<blockquote{class_attr}>{body}{children_html}</blockquote>"
 
 
 def _render_callout(block: NotionBlock) -> str:
@@ -424,7 +445,8 @@ def _render_callout(block: NotionBlock) -> str:
     text_html = render_rich_text(_block_rich_text(block))
     body = f"<p>{text_html}</p>" if text_html else ""
     children_html = render_blocks(block.children)
-    return f'<div class="callout">{icon_html}<div>{body}{children_html}</div></div>'
+    class_attr = _block_color_class_attribute(block, base_class="callout")
+    return f'<div{class_attr}>{icon_html}<div>{body}{children_html}</div></div>'
 
 
 def _render_callout_icon(icon_payload: Any) -> str:
@@ -444,7 +466,8 @@ def _render_toggle_inline(block: NotionBlock) -> str:
     """Render a nested toggle for inline display in parent cards."""
     title_html = render_rich_text(_block_rich_text(block))
     children_html = render_blocks(block.children)
-    return f'<details class="notion-toggle"><summary>{title_html}</summary>{children_html}</details>'
+    class_attr = _block_color_class_attribute(block, base_class="notion-toggle")
+    return f'<details{class_attr}><summary>{title_html}</summary>{children_html}</details>'
 
 
 def _render_code_block(block: NotionBlock) -> str:
@@ -483,7 +506,8 @@ def _render_list_sequence(
         block = blocks[index]
         text_html = render_rich_text(_block_rich_text(block))
         children_html = render_blocks(block.children)
-        items.append(f"<li>{text_html}{children_html}</li>")
+        class_attr = _block_color_class_attribute(block)
+        items.append(f"<li{class_attr}>{text_html}{children_html}</li>")
         index += 1
 
     return f"<{list_tag}>{''.join(items)}</{list_tag}>", index
@@ -742,6 +766,41 @@ def _block_rich_text(block: NotionBlock) -> list[dict[str, Any]]:
     return []
 
 
+def _block_color(block: NotionBlock) -> str:
+    """Return one documented Notion block color or the default value."""
+    color = _block_payload(block).get("color")
+    if not isinstance(color, str):
+        return "default"
+
+    normalized = color.strip().lower()
+    return normalized if normalized in _NOTION_BLOCK_COLORS else "default"
+
+
+def _block_background_color(block: NotionBlock) -> str:
+    """Return a root-card background only for Notion background variants."""
+    color = _block_color(block)
+    return color if color in _NOTION_BLOCK_BACKGROUND_COLORS else ""
+
+
+def _block_foreground_color(block: NotionBlock) -> str:
+    """Return a title color only for Notion foreground variants."""
+    color = _block_color(block)
+    return color if color in _NOTION_BLOCK_FOREGROUND_COLORS else "default"
+
+
+def _block_color_class_attribute(block: NotionBlock, *, base_class: str = "") -> str:
+    """Build safe semantic-element classes for one block-level color."""
+    classes = [base_class] if base_class else []
+    color = _block_color(block)
+    if color != "default":
+        classes.extend(("notion-block-color", f"notion-block-color-{color}"))
+        if color in _NOTION_BLOCK_BACKGROUND_COLORS:
+            classes.append("notion-block-color-background")
+    if not classes:
+        return ""
+    return f' class="{" ".join(classes)}"'
+
+
 def _render_toggle_front(block: NotionBlock) -> str:
     """Render a toggle title via `render_blocks` for consistent front/back parsing."""
     front_block = NotionBlock(
@@ -753,7 +812,11 @@ def _render_toggle_front(block: NotionBlock) -> str:
         raw={
             "id": block.block_id,
             "type": "paragraph",
-            "paragraph": {"rich_text": _block_rich_text(block)},
+            # Root backgrounds belong to the card surface; only foreground colors style its title.
+            "paragraph": {
+                "rich_text": _block_rich_text(block),
+                "color": _block_foreground_color(block),
+            },
         },
         children=(),
     )
@@ -767,6 +830,7 @@ def _build_toggle_fields(
     back_html: str,
     back_blocks: Iterable[NotionBlock],
     card_type: str,
+    card_background: str,
 ) -> dict[str, str]:
     """Build model fields for one parsed toggle block."""
     if card_type == INPUT:
@@ -775,11 +839,13 @@ def _build_toggle_fields(
             "Back": back_html,
             "Expected Answer": _raw_text_from_blocks(back_blocks),
             "Notion Block ID": block_id,
+            NOTION_CARD_BACKGROUND_FIELD: card_background,
         }
     return {
         "Front": front_html,
         "Back": back_html,
         "Notion Block ID": block_id,
+        NOTION_CARD_BACKGROUND_FIELD: card_background,
     }
 
 

@@ -328,6 +328,11 @@ class SyncTests(unittest.TestCase):
         self._media_dir.mkdir(parents=True, exist_ok=True)
         self._db = Database(self._db_path)
         self._db.initialize()
+        # Most tests exercise steady-state sync; dedicated tests override this upgrade marker.
+        self._db.set_setting(
+            _SYNC_MODULE._TOGGLE_REFRESH_REVISION_SETTING_KEY,
+            _SYNC_MODULE._TOGGLE_REFRESH_REVISION,
+        )
         # Reset module-level run lock so tests are independent.
         trigger_sync_with_anki_button.__globals__["_sync_is_running"] = False
         connection = self._db.connect()
@@ -1371,6 +1376,134 @@ class SyncTests(unittest.TestCase):
             connection.close()
         self.assertIsNotNone(row)
         self.assertIsNone(row["last_synced_at"])
+
+    def test_sync_unchanged_page_refreshes_toggle_once_after_parser_upgrade(self) -> None:
+        """Unchanged Notion timestamps must not prevent the block-color field migration."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        existing_note = collection.new_note({"name": "Notion (Basic)"})
+        existing_note["Front"] = "<p>Legacy title</p>"
+        existing_note["Back"] = "<p>Legacy back</p>"
+        existing_note["Notion Card Background"] = ""
+        collection.add_note(existing_note, deck_id=1)
+        self._db.set_setting(_SYNC_MODULE._TOGGLE_REFRESH_REVISION_SETTING_KEY, "legacy")
+
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                "UPDATE pages SET last_seen_notion_edit_time = ? WHERE notion_page_id = ?",
+                ("2026-02-04T00:00:00.000Z", "page-1"),
+            )
+            connection.execute(
+                """
+                INSERT INTO cards (
+                    notion_block_id, notion_page_id, anki_note_id, card_type,
+                    content_hash, last_seen_notion_edit_time
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "block-1", "page-1", existing_note.id, "basic",
+                    "legacy-hash", "2026-02-04T00:00:00.000Z",
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        refreshed_payload = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="block-1",
+            fields={
+                "Front": "<p>Colored title</p>",
+                "Back": "<p>Colored back</p>",
+                "Notion Block ID": "block-1",
+                "Notion Card Background": "brown_background",
+            },
+            content_hash="block-color-hash",
+            last_edited_time="2026-02-04T00:00:00.000Z",
+        )
+        fake_client = _FakeNotionClient(page_last_edited_time="2026-02-04T00:00:00.000Z")
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=fake_client,
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[refreshed_payload],
+        ) as parse_mock:
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_updated, 1)
+        self.assertEqual(existing_note["Notion Card Background"], "brown_background")
+        self.assertEqual(
+            self._db.get_setting(_SYNC_MODULE._TOGGLE_REFRESH_REVISION_SETTING_KEY),
+            _SYNC_MODULE._TOGGLE_REFRESH_REVISION,
+        )
+        self.assertEqual(
+            list(parse_mock.call_args.kwargs.get("include_block_ids")),
+            ["block-1"],
+        )
+
+    def test_sync_changed_page_does_not_fast_skip_toggle_during_parser_refresh(self) -> None:
+        """The one-time refresh also bypasses matching per-toggle edit timestamps."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        existing_note = collection.new_note({"name": "Notion (Basic)"})
+        collection.add_note(existing_note, deck_id=1)
+        self._db.set_setting(_SYNC_MODULE._TOGGLE_REFRESH_REVISION_SETTING_KEY, "legacy")
+
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                "UPDATE pages SET last_seen_notion_edit_time = ? WHERE notion_page_id = ?",
+                ("2026-02-03T00:00:00.000Z", "page-1"),
+            )
+            connection.execute(
+                """
+                INSERT INTO cards (
+                    notion_block_id, notion_page_id, anki_note_id, card_type,
+                    content_hash, last_seen_notion_edit_time
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "block-1", "page-1", existing_note.id, "basic",
+                    "legacy-hash", "2026-02-04T00:00:00.000Z",
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        refreshed_payload = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="block-1",
+            fields={
+                "Front": "<p>Colored title</p>",
+                "Back": "<p>Colored back</p>",
+                "Notion Block ID": "block-1",
+                "Notion Card Background": "brown_background",
+            },
+            content_hash="block-color-hash",
+            last_edited_time="2026-02-04T00:00:00.000Z",
+        )
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[refreshed_payload],
+        ) as parse_mock:
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_updated, 1)
+        parse_mock.assert_called_once()
 
     def test_sync_unchanged_page_reprocesses_existing_cloze_cards_after_parser_upgrade(self) -> None:
         collection = _FakeCollection()

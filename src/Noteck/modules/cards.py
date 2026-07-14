@@ -11,13 +11,21 @@ MODEL_NAME_BASIC = MODEL_NAME
 MODEL_NAME_BASIC_REVERSED = "Notion (Basic+Reversed)"
 MODEL_NAME_INPUT = "Notion (Input)"
 MODEL_NAME_CLOZE = "Notion (Cloze)"
+NOTION_BLOCK_ID_FIELD = "Notion Block ID"
+NOTION_CARD_BACKGROUND_FIELD = "Notion Card Background"
+
+# Keep sync metadata out of the way in Anki's note editor.
+_COLLAPSED_METADATA_FIELDS = frozenset(
+    (NOTION_BLOCK_ID_FIELD, NOTION_CARD_BACKGROUND_FIELD)
+)
 
 BASIC_CARD_NAME = "Notion (Basic)"
 REVERSED_CARD_NAME = "Notion (Reversed)"
 INPUT_CARD_NAME = "Notion (Input)"
 CLOZE_CARD_NAME = "Notion (Cloze)"
 
-CARD_TEMPLATE_VERSION = 1
+# Increment when bundled HTML or CSS changes so installed note types can offer an update.
+CARD_TEMPLATE_VERSION = 2
 CARD_TEMPLATE_STATUS_CURRENT = "current"
 CARD_TEMPLATE_STATUS_UPDATE_AVAILABLE = "update_available"
 CARD_TEMPLATE_STATUS_USER_MODIFIED = "user_modified"
@@ -51,17 +59,35 @@ def _with_template_version(html: str) -> str:
     return f"{HTML_VERSION_PREFIX} {CARD_TEMPLATE_VERSION} -->\n{html}"
 
 
+def _with_card_wrapper(html: str, *, use_background_field: bool = False) -> str:
+    """Keep the Notion surface inside a bounded, optionally colored card wrapper."""
+    color_class = (
+        f" notion-card-background-{{{{{NOTION_CARD_BACKGROUND_FIELD}}}}}"
+        if use_background_field
+        else ""
+    )
+    return f'<div class="notion-card{color_class}">{html}</div>'
+
+
 _MODEL_DEFINITIONS: tuple[ModelDefinition, ...] = (
     # Basic card type
     ModelDefinition(
         name=MODEL_NAME_BASIC,
-        fields=("Front", "Back", "Notion Block ID"),
+        fields=("Front", "Back", NOTION_BLOCK_ID_FIELD, NOTION_CARD_BACKGROUND_FIELD),
         templates=(
             ModelTemplate(
                 name=BASIC_CARD_NAME,
-                front=_with_template_version('<div class="notion-front">{{Front}}</div>'),
+                front=_with_template_version(
+                    _with_card_wrapper(
+                        '<div class="notion-front">{{Front}}</div>',
+                        use_background_field=True,
+                    )
+                ),
                 back=_with_template_version(
-                    '{{FrontSide}}<hr id="answer"><div class="notion-back">{{Back}}</div>'
+                    _with_card_wrapper(
+                        '{{FrontSide}}<hr id="answer"><div class="notion-back">{{Back}}</div>',
+                        use_background_field=True,
+                    )
                 ),
             ),
         ),
@@ -71,20 +97,36 @@ _MODEL_DEFINITIONS: tuple[ModelDefinition, ...] = (
     # Basic+Reversed card type
     ModelDefinition(
         name=MODEL_NAME_BASIC_REVERSED,
-        fields=("Front", "Back", "Notion Block ID"),
+        fields=("Front", "Back", NOTION_BLOCK_ID_FIELD, NOTION_CARD_BACKGROUND_FIELD),
         templates=(
             ModelTemplate(
                 name=BASIC_CARD_NAME,
-                front=_with_template_version('<div class="notion-front">{{Front}}</div>'),
+                front=_with_template_version(
+                    _with_card_wrapper(
+                        '<div class="notion-front">{{Front}}</div>',
+                        use_background_field=True,
+                    )
+                ),
                 back=_with_template_version(
-                    '{{FrontSide}}<hr id="answer"><div class="notion-back">{{Back}}</div>'
+                    _with_card_wrapper(
+                        '{{FrontSide}}<hr id="answer"><div class="notion-back">{{Back}}</div>',
+                        use_background_field=True,
+                    )
                 ),
             ),
             ModelTemplate(
                 name=REVERSED_CARD_NAME,
-                front=_with_template_version('<div class="notion-front">{{Back}}</div>'),
+                front=_with_template_version(
+                    _with_card_wrapper(
+                        '<div class="notion-front">{{Back}}</div>',
+                        use_background_field=True,
+                    )
+                ),
                 back=_with_template_version(
-                    '{{FrontSide}}<hr id="answer"><div class="notion-back">{{Front}}</div>'
+                    _with_card_wrapper(
+                        '{{FrontSide}}<hr id="answer"><div class="notion-back">{{Front}}</div>',
+                        use_background_field=True,
+                    )
                 ),
             ),
         ),
@@ -94,20 +136,28 @@ _MODEL_DEFINITIONS: tuple[ModelDefinition, ...] = (
     # Input card type
     ModelDefinition(
         name=MODEL_NAME_INPUT,
-        fields=("Front", "Back", "Expected Answer", "Notion Block ID"),
+        fields=(
+            "Front",
+            "Back",
+            "Expected Answer",
+            NOTION_BLOCK_ID_FIELD,
+            NOTION_CARD_BACKGROUND_FIELD,
+        ),
         templates=(
             ModelTemplate(
                 name=INPUT_CARD_NAME,
                 front=_with_template_version(
-                    (
+                    _with_card_wrapper(
                         '<div class="notion-front">{{Front}}</div>'
-                        '<div class="notion-input">{{type:Expected Answer}}</div>'
+                        '<div class="notion-input">{{type:Expected Answer}}</div>',
+                        use_background_field=True,
                     )
                 ),
                 back=_with_template_version(
-                    (
+                    _with_card_wrapper(
                         '{{FrontSide}}<hr id="answer">'
-                        '<div class="notion-back">{{Back}}</div>'
+                        '<div class="notion-back">{{Back}}</div>',
+                        use_background_field=True,
                     )
                 ),
             ),
@@ -118,13 +168,15 @@ _MODEL_DEFINITIONS: tuple[ModelDefinition, ...] = (
     # Cloze card type
     ModelDefinition(
         name=MODEL_NAME_CLOZE,
-        fields=("Text", "Extra", "Notion Block ID"),
+        fields=("Text", "Extra", NOTION_BLOCK_ID_FIELD),
         templates=(
             ModelTemplate(
                 name=CLOZE_CARD_NAME,
-                front=_with_template_version('<div class="notion-front">{{cloze:Text}}</div>'),
+                front=_with_template_version(
+                    _with_card_wrapper('<div class="notion-front">{{cloze:Text}}</div>')
+                ),
                 back=_with_template_version(
-                    (
+                    _with_card_wrapper(
                         '<div class="notion-front">{{cloze:Text}}</div>'
                         '<div class="notion-back" style="font-style: italic">{{Extra}}</div>'
                     )
@@ -223,6 +275,13 @@ def _ensure_model(
         if not _has_field(model, field_name):
             _add_field(models, model, field_name)
             changed = True
+
+        field = _field_by_name(model, field_name)
+        if field_name in _COLLAPSED_METADATA_FIELDS and field is not None:
+            # Reconcile existing note types as well as setting the new-field default.
+            if field.get("collapsed") is not True:
+                field["collapsed"] = True
+                changed = True
 
     # Add missing templates, but preserve existing user-customized HTML.
     for template in definition.templates:
@@ -336,6 +395,12 @@ def _has_field(model: dict[str, Any], name: str) -> bool:
     """Check whether a note type already includes a field."""
     fields = model.get("flds") or ()
     return any(field.get("name") == name for field in fields)
+
+
+def _field_by_name(model: dict[str, Any], name: str) -> dict[str, Any] | None:
+    """Return one field dictionary by its stable managed name."""
+    fields = model.get("flds") or ()
+    return next((field for field in fields if field.get("name") == name), None)
 
 
 def _add_field(models: Any, model: dict[str, Any], name: str) -> None:
