@@ -79,6 +79,8 @@ _MERMAID_FIGURE_RE = re.compile(
 _HTTP_TIMEOUT_SECONDS = 20.0
 _CLOZE_REFRESH_REVISION_SETTING_KEY = "_internal_cloze_refresh_revision"
 _CLOZE_REFRESH_REVISION = "2026-02-cloze-inline-math-v1"
+_TOGGLE_REFRESH_REVISION_SETTING_KEY = "_internal_toggle_refresh_revision"
+_TOGGLE_REFRESH_REVISION = "2026-07-block-colors-v1"
 
 
 def sync_notion_to_anki(
@@ -119,6 +121,8 @@ def sync_notion_to_anki(
         enable_cloze
         and _load_cloze_refresh_revision(db) != _CLOZE_REFRESH_REVISION
     )
+    # Parser-only changes do not alter Notion timestamps, so refresh toggle notes once.
+    force_toggle_refresh = _load_toggle_refresh_revision(db) != _TOGGLE_REFRESH_REVISION
 
     stats = SyncStats()
     errors: list[str] = []
@@ -129,8 +133,10 @@ def sync_notion_to_anki(
         return SyncResult(ok=False, message=f"Sync failed: {message}", errors=(message,))
 
     _LOG.info(
-        "Sync configured. pages=%d default_card_type=%s cloze_enabled=%s force_cloze_refresh=%s",
-        len(enabled_pages), global_default_card_type, enable_cloze, force_cloze_refresh,
+        "Sync configured. pages=%d default_card_type=%s cloze_enabled=%s "
+        "force_cloze_refresh=%s force_toggle_refresh=%s",
+        len(enabled_pages), global_default_card_type, enable_cloze,
+        force_cloze_refresh, force_toggle_refresh,
     )
 
     _publish_progress(
@@ -206,6 +212,7 @@ def sync_notion_to_anki(
                     card_type_overrides=page_card_type_overrides,
                     enable_cloze=enable_cloze,
                     force_cloze_refresh=force_cloze_refresh,
+                    force_toggle_refresh=force_toggle_refresh,
                     should_cancel=should_cancel,
                 )
             
@@ -221,6 +228,7 @@ def sync_notion_to_anki(
                     default_card_type=page_default_card_type,
                     card_type_overrides=page_card_type_overrides,
                     enable_cloze=enable_cloze,
+                    force_toggle_refresh=force_toggle_refresh,
                     should_cancel=should_cancel,
                 )
 
@@ -272,6 +280,10 @@ def sync_notion_to_anki(
     if force_cloze_refresh:
         _set_cloze_refresh_revision(db, _CLOZE_REFRESH_REVISION)
         _LOG.info("Recorded completed cloze refresh revision %s.", _CLOZE_REFRESH_REVISION)
+
+    if force_toggle_refresh:
+        _set_toggle_refresh_revision(db, _TOGGLE_REFRESH_REVISION)
+        _LOG.info("Recorded completed toggle refresh revision %s.", _TOGGLE_REFRESH_REVISION)
 
     _LOG.info("Sync completed successfully. stats=%s", stats)
     return SyncResult(
@@ -475,6 +487,7 @@ def _sync_changed_page_fast(
     default_card_type: str,
     card_type_overrides: dict[str, str],
     enable_cloze: bool,
+    force_toggle_refresh: bool = False,
     should_cancel: SyncCancelCheck | None = None,
 ) -> tuple[SyncStats, list[str], bool]:
     """Sync a page by expanding only toggles that are new/changed/missing locally."""
@@ -508,7 +521,7 @@ def _sync_changed_page_fast(
         )
         toggle_last_edited_time = _as_optional_string(toggle.raw.get("last_edited_time"))
         can_skip = False
-        if mapping is not None:
+        if mapping is not None and not force_toggle_refresh:
             note_id = mapping["anki_note_id"]
             if (
                 note_id is not None
@@ -618,6 +631,7 @@ def _repair_missing_notes_for_unchanged_page(
     card_type_overrides: dict[str, str],
     enable_cloze: bool,
     force_cloze_refresh: bool = False,
+    force_toggle_refresh: bool = False,
     should_cancel: SyncCancelCheck | None = None,
 ) -> tuple[SyncStats, list[str], bool]:
     """Recreate local Anki notes that are missing even though the Notion page is unchanged."""
@@ -650,6 +664,15 @@ def _repair_missing_notes_for_unchanged_page(
             card_type_overrides=card_type_overrides,
         )
         if _card_type_needs_default_conversion(mapping["card_type"], effective_card_type):
+            schedule_resync(block_id)
+            continue
+
+        # Existing toggle notes need one parser pass after block-color support is installed.
+        if (
+            force_toggle_refresh
+            and normalize_card_type(mapping["card_type"], default=BASIC)
+            in DEFAULT_SELECTABLE_CARD_TYPES
+        ):
             schedule_resync(block_id)
             continue
 
@@ -711,6 +734,16 @@ def _load_cloze_refresh_revision(db: Database) -> str | None:
 def _set_cloze_refresh_revision(db: Database, value: str) -> None:
     """Persist the latest completed internal cloze-refresh revision."""
     db.set_setting(_CLOZE_REFRESH_REVISION_SETTING_KEY, value)
+
+
+def _load_toggle_refresh_revision(db: Database) -> str | None:
+    """Return the last completed internal toggle-refresh revision, if any."""
+    return _as_optional_string(db.get_setting(_TOGGLE_REFRESH_REVISION_SETTING_KEY))
+
+
+def _set_toggle_refresh_revision(db: Database, value: str) -> None:
+    """Persist the latest completed internal toggle-refresh revision."""
+    db.set_setting(_TOGGLE_REFRESH_REVISION_SETTING_KEY, value)
 
 
 def _card_type_needs_default_conversion(current_card_type: str, default_card_type: str) -> bool:

@@ -128,6 +128,8 @@ Child blocks with their own background color remain visible above the card surfa
 Code blocks, Mermaid diagrams, and tables use translucent surfaces on root-colored cards so
 the root backdrop remains visible; their normal uncolored-card appearance is unchanged.
 The managed `Notion Block ID` and `Notion Card Background` metadata fields are collapsed in Anki's note editor by default.
+After upgrading, Noteck performs one successful parser refresh of existing toggle-derived
+cards so color changes are applied even when their Notion edit timestamps have not changed.
 
 Unsupported or unknown block types are ignored in rendered card content.
 
