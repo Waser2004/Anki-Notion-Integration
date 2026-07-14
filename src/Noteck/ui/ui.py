@@ -118,15 +118,20 @@ class NotionWindow(QDialog):
 
         # Add this first because Qt displays action-role buttons in reverse insertion
         # order on Windows; Refresh then appears to its left and Close to its right.
-        release_notes_button = button_row.addButton(
+        self._release_notes_button = button_row.addButton(
             "Release Notes",
             QDialogButtonBox.ButtonRole.ActionRole,
         )
-        release_notes_button.setAutoDefault(False)
-        release_notes_button.setDefault(False)
-        release_notes_button.clicked.connect(
-            lambda _checked=False: show_release_notes(self, content_mode="all")
+        self._release_notes_button.setAutoDefault(False)
+        self._release_notes_button.setDefault(False)
+        self._release_notes_button.clicked.connect(
+            lambda _checked=False: show_release_notes(
+                self,
+                content_mode="all",
+                db_path=self._context.db_path,
+            )
         )
+        self._release_notes_button.hide()
 
         # Refresh button for pages that support reloading.
         self._refresh_button = button_row.addButton("Refresh", QDialogButtonBox.ButtonRole.ActionRole)
@@ -201,7 +206,7 @@ class NotionWindow(QDialog):
             # Replace the placeholder widget with the real page widget.
             self._replace_tab(index, widget, page.name, placeholder)
 
-        self._update_refresh_button_visibility(page.key)
+        self._update_footer_button_visibility(page.key)
 
     def _refresh_current_page(self) -> None:
         """Call `reload` on the currently visible page widget."""
@@ -218,8 +223,8 @@ class NotionWindow(QDialog):
             self._refresh_button.setEnabled(True)
             self._tabs.setFocus()
 
-    def _update_refresh_button_visibility(self, page_key: str) -> None:
-        """Show the footer refresh button only when the target page exposes `reload`."""
+    def _update_footer_button_visibility(self, page_key: str) -> None:
+        """Show page-specific footer actions for the currently selected tab."""
         # check for reload capability
         widget = self._page_widgets.get(page_key)
         reload_action = getattr(widget, "reload", None)
@@ -229,6 +234,10 @@ class NotionWindow(QDialog):
         self._refresh_button.setVisible(visible)
         if visible:
             self._refresh_button.setEnabled(True)
+
+        # Release notes are a settings-level action and should not appear while the
+        # user works in Pages, Cards, or Image Occlusion.
+        self._release_notes_button.setVisible(page_key == "settings")
 
     def _load_page_widget(self, page: UiPageDefinition) -> QWidget:
         """Import the page module and build its widget."""

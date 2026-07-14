@@ -11,11 +11,14 @@ sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from Noteck.modules.release_notes import (
     LAST_SEEN_RELEASE_KEY,
+    SHOW_AFTER_UPDATE_KEY,
     ReleaseNotesError,
     clear_force_release_notes,
     force_release_notes_requested,
     load_release_notes,
     mark_release_notes_seen,
+    release_notes_show_after_update,
+    set_release_notes_show_after_update,
     should_show_release_notes,
     startup_release_notes_required,
 )
@@ -110,6 +113,55 @@ class ReleaseNotesTests(unittest.TestCase):
                 database_existed=True,
             )
         )
+
+    def test_disabled_automatic_display_suppresses_updates_but_not_test_force(self) -> None:
+        self.assertFalse(
+            should_show_release_notes(
+                latest_release="1.4.0",
+                last_seen_release="1.3.0",
+                database_existed=True,
+                show_after_update=False,
+            )
+        )
+        self.assertTrue(
+            should_show_release_notes(
+                latest_release="1.4.0",
+                last_seen_release="1.3.0",
+                database_existed=True,
+                show_after_update=False,
+                forced=True,
+            )
+        )
+
+    def test_automatic_display_preference_defaults_on_and_persists(self) -> None:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        db = Database(Path(temp_dir.name) / "noteck.db")
+        db.initialize()
+
+        self.assertTrue(release_notes_show_after_update(db))
+        set_release_notes_show_after_update(db, False)
+        self.assertFalse(release_notes_show_after_update(db))
+        self.assertEqual(db.get_setting(SHOW_AFTER_UPDATE_KEY), "0")
+        set_release_notes_show_after_update(db, True)
+        self.assertTrue(release_notes_show_after_update(db))
+
+    def test_suppressed_update_is_marked_seen_for_the_next_enabled_release(self) -> None:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        db = Database(Path(temp_dir.name) / "noteck.db")
+        db.initialize()
+        db.set_setting(LAST_SEEN_RELEASE_KEY, "1.3.0")
+        set_release_notes_show_after_update(db, False)
+
+        self.assertFalse(
+            startup_release_notes_required(
+                db,
+                latest_release="1.4.0",
+                database_existed=True,
+            )
+        )
+        self.assertEqual(db.get_setting(LAST_SEEN_RELEASE_KEY), "1.4.0")
 
     def test_force_marker_overrides_matching_release_and_is_consumable(self) -> None:
         temp_dir = tempfile.TemporaryDirectory()

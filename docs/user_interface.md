@@ -66,10 +66,14 @@ The **Settings** tab is schema-driven and includes:
 
 ### Release notes
 
-The footer of the main Noteck window includes a **Release Notes** button beside
-**Close**. It opens the complete bundled release history in a separate scrollable
-window. Release notes support Markdown titles, sections, lists, links, and optional
-offline images.
+The footer of the Noteck window includes a **Release Notes** button beside **Close**
+only while the **Settings** tab is active. It opens the complete bundled release
+history in a separate scrollable window. Release notes support Markdown titles,
+sections, lists, links, and optional offline images.
 
 After an existing installation is updated, Noteck opens only the newest release entry
 once on the next profile startup. Fresh installations do not show an automatic popup.
+The release-notes window includes a **Hide after updates** button beside **Close**.
+After automatic display is disabled, the same button becomes **Show after updates**
+so the preference can be re-enabled at any time. Test deployments still force their
+one-shot popup to keep the release QA workflow deterministic.

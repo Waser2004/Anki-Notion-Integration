@@ -27,6 +27,8 @@ from ..modules.release_notes import (
     force_release_notes_requested,
     load_release_notes,
     mark_release_notes_seen,
+    release_notes_show_after_update,
+    set_release_notes_show_after_update,
     startup_release_notes_required,
 )
 
@@ -41,7 +43,13 @@ _IMAGE_DISPLAY_WIDTH = 450
 class ReleaseNotesDialog(QDialog):
     """Modeless, scrollable Markdown viewer for Noteck release notes."""
 
-    def __init__(self, parent: QWidget | None, markdown: str, base_directory: Path) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None,
+        markdown: str,
+        base_directory: Path,
+        db_path: str | Path | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Noteck Release Notes")
         self.resize(_INITIAL_DIALOG_WIDTH, _INITIAL_DIALOG_HEIGHT)
@@ -64,10 +72,35 @@ class ReleaseNotesDialog(QDialog):
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
         buttons.rejected.connect(self.close)
+        if db_path is not None:
+            # Keep the update preference beside Close so it remains available even
+            # after automatic release notes have been disabled.
+            self._db = Database(db_path)
+            self._automatic_button = buttons.addButton(
+                "",
+                QDialogButtonBox.ButtonRole.ActionRole,
+            )
+            self._automatic_button.setAutoDefault(False)
+            self._automatic_button.setDefault(False)
+            self._automatic_button.clicked.connect(self._toggle_automatic_display)
+            self._update_automatic_button_text()
 
         layout = QVBoxLayout(self)
         layout.addWidget(browser, 1)
         layout.addWidget(buttons)
+
+    def _toggle_automatic_display(self, _checked: bool = False) -> None:
+        """Toggle whether future updates open their release notes automatically."""
+        enabled = not release_notes_show_after_update(self._db)
+        set_release_notes_show_after_update(self._db, enabled)
+        self._update_automatic_button_text()
+
+    def _update_automatic_button_text(self) -> None:
+        """Describe the action the preference button will perform when clicked."""
+        enabled = release_notes_show_after_update(self._db)
+        self._automatic_button.setText(
+            "Hide after updates" if enabled else "Show after updates"
+        )
 
     @staticmethod
     def _fit_local_images(document: Any, base_directory: Path) -> None:
@@ -134,6 +167,7 @@ def show_release_notes(
     parent: QWidget | None,
     *,
     content_mode: Literal["latest", "all"] = "all",
+    db_path: str | Path | None = None,
 ) -> bool:
     """Open a modeless release-notes window and retain it until it closes."""
     try:
@@ -143,7 +177,12 @@ def show_release_notes(
         return False
 
     markdown = document.latest_markdown if content_mode == "latest" else document.markdown
-    dialog = ReleaseNotesDialog(parent, markdown, document.source_path.parent)
+    dialog = ReleaseNotesDialog(
+        parent,
+        markdown,
+        document.source_path.parent,
+        db_path=db_path,
+    )
     _open_dialogs.add(dialog)
     dialog.finished.connect(lambda _result, item=dialog: _open_dialogs.discard(item))
     dialog.show()
@@ -185,7 +224,7 @@ def show_release_notes_after_update(
         if not should_show:
             return False
 
-        if not show_release_notes(parent, content_mode="latest"):
+        if not show_release_notes(parent, content_mode="latest", db_path=db_path):
             return False
 
         # Mark as seen only after the window opened successfully. The test sentinel is

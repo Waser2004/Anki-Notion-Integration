@@ -10,6 +10,7 @@ from .db import Database
 
 
 LAST_SEEN_RELEASE_KEY = "release_notes_last_seen"
+SHOW_AFTER_UPDATE_KEY = "release_notes_show_after_update"
 FORCE_RELEASE_NOTES_SENTINEL = ".force_release_notes_on_startup"
 
 _RELEASE_HEADING = re.compile(
@@ -111,11 +112,14 @@ def should_show_release_notes(
     latest_release: str,
     last_seen_release: str | None,
     database_existed: bool,
+    show_after_update: bool = True,
     forced: bool = False,
 ) -> bool:
     """Decide whether startup should show the newest release notes."""
     if forced:
         return True
+    if not show_after_update:
+        return False
     if last_seen_release is None:
         # Existing databases predate this feature and represent an add-on update.
         # A missing database represents a fresh installation, which stays quiet.
@@ -137,15 +141,30 @@ def startup_release_notes_required(
 ) -> bool:
     """Check persisted state and initialize a quiet fresh-install marker."""
     last_seen_release = db.get_setting(LAST_SEEN_RELEASE_KEY)
+    show_after_update = release_notes_show_after_update(db)
     should_show = should_show_release_notes(
         latest_release=latest_release,
         last_seen_release=last_seen_release,
         database_existed=database_existed,
+        show_after_update=show_after_update,
         forced=forced,
     )
-    if not should_show and last_seen_release is None:
+    if not should_show and (last_seen_release is None or not show_after_update):
+        # A suppressed release is considered handled. Re-enabling the preference
+        # therefore applies to the next update rather than reopening old notes.
         db.set_setting(LAST_SEEN_RELEASE_KEY, latest_release)
     return should_show
+
+
+def release_notes_show_after_update(db: Database) -> bool:
+    """Return the automatic-display preference, which defaults to enabled."""
+    value = db.get_setting(SHOW_AFTER_UPDATE_KEY)
+    return value is None or value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def set_release_notes_show_after_update(db: Database, enabled: bool) -> None:
+    """Persist whether future add-on updates should open release notes."""
+    db.set_setting(SHOW_AFTER_UPDATE_KEY, "1" if enabled else "0")
 
 
 def mark_release_notes_seen(

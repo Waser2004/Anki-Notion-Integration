@@ -7,8 +7,9 @@
 ![Sample pink flower on a blue background](docs/release-notes-assets/1.3.0-sample-flower.jpeg)
 
 - Added a polished release-notes window that supports Markdown titles, sections, links, and optional bundled images.
-- Added a `Release Notes` button beside the main add-on window's close action.
+- Added a `Release Notes` button beside the close action on the Settings page.
 - Release notes now open once after an existing installation is updated, while fresh installations remain uninterrupted.
+- Added an in-window preference to hide or re-enable automatic release notes after updates.
 - Test deployments force the latest notes to appear once on the next Anki startup for straightforward manual verification.
 
 ## 1.2.0 - 2026-07-04
