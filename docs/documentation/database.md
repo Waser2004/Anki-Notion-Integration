@@ -36,6 +36,8 @@ The add-on persists per-profile state in SQLite.
 - `last_synced_at` (TEXT, nullable)
 - `excluded` (INTEGER, NOT NULL)
 
+When a mapped source block is confirmed missing or no longer syncable, Noteck deletes the `cards` row and matching `card_type_overrides` row in one transaction. The associated Anki note is deliberately preserved and becomes unmanaged.
+
 ### `settings`
 
 - `key` (TEXT, PK)

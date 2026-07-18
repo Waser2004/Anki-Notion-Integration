@@ -21,7 +21,7 @@ from .cards import MODEL_NAME_BASIC, ensure_notion_toggle_model
 from .db import Database
 from .logging_utils import configure_file_logging, log_file_path
 from .notion_client import NotionBlock, NotionClient
-from .parser import ToggleCardPayload, parse_page_to_cards
+from .parser import CardParseResult, CardParseWarning, ToggleCardPayload, parse_page_to_cards
 from .settings import SettingsStore, create_default_settings
 
 
@@ -36,6 +36,18 @@ class SyncStats:
     cards_unchanged: int = 0
     cards_skipped: int = 0
     cards_missing_note: int = 0
+    cards_detached: int = 0
+    cards_warned: int = 0
+
+
+@dataclass(frozen=True)
+class SyncWarning:
+    """Describe one recoverable condition encountered during sync."""
+
+    code: str
+    message: str
+    page_id: str | None = None
+    block_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -46,6 +58,8 @@ class SyncResult:
     message: str
     stats: SyncStats = field(default_factory=SyncStats)
     errors: tuple[str, ...] = ()
+    warnings: tuple[SyncWarning, ...] = ()
+    cancelled: bool = False
 
 
 class SyncError(RuntimeError):
@@ -97,11 +111,15 @@ def sync_notion_to_anki(
         # A read-only or full profile directory must not make syncing impossible.
         _LOG = logging.getLogger("noteck.sync")
     _LOG.info("Sync started. database=%s log=%s", db_path, log_file_path(db_path))
-    db = Database(db_path)
-    _ensure_db_ready(db)
-    ensure_notion_toggle_model(mw)
-
-    enabled_pages = _load_enabled_pages(db)
+    
+    try:
+        db = Database(db_path)
+        _ensure_db_ready(db)
+        ensure_notion_toggle_model(mw)
+        enabled_pages = _load_enabled_pages(db)
+    except Exception as exc:
+        _LOG.exception("Sync aborted during local initialization.")
+        return SyncResult(ok=False, message=f"Sync failed: {exc}", errors=(str(exc),))
     if not enabled_pages:
         _LOG.info("Sync finished without work: no enabled pages.")
         return SyncResult(ok=True, message="No enabled pages to sync.", stats=SyncStats())
@@ -113,19 +131,24 @@ def sync_notion_to_anki(
         _LOG.exception("Sync aborted while creating the Notion client.")
         return SyncResult(ok=False, message=f"Sync failed: {exc}", errors=(str(exc),))
 
-    store = SettingsStore(db, profile_name=profile_name)
-    card_type_override_store = CardTypeOverrideStore(db)
-    global_default_card_type = normalize_default_selectable_card_type(store.get_value("default_card_type"))
-    enable_cloze = bool(store.get_value("enable_cloze_parsing"))
-    force_cloze_refresh = (
-        enable_cloze
-        and _load_cloze_refresh_revision(db) != _CLOZE_REFRESH_REVISION
-    )
-    # Parser-only changes do not alter Notion timestamps, so refresh toggle notes once.
-    force_toggle_refresh = _load_toggle_refresh_revision(db) != _TOGGLE_REFRESH_REVISION
+    try:
+        store = SettingsStore(db, profile_name=profile_name)
+        card_type_override_store = CardTypeOverrideStore(db)
+        global_default_card_type = normalize_default_selectable_card_type(store.get_value("default_card_type"))
+        enable_cloze = bool(store.get_value("enable_cloze_parsing"))
+        force_cloze_refresh = (
+            enable_cloze
+            and _load_cloze_refresh_revision(db) != _CLOZE_REFRESH_REVISION
+        )
+        # Parser-only changes do not alter Notion timestamps, so refresh toggle notes once.
+        force_toggle_refresh = _load_toggle_refresh_revision(db) != _TOGGLE_REFRESH_REVISION
+    except Exception as exc:
+        _LOG.exception("Sync aborted while loading local configuration.")
+        return SyncResult(ok=False, message=f"Sync failed: {exc}", errors=(str(exc),))
 
     stats = SyncStats()
     errors: list[str] = []
+    warnings: list[SyncWarning] = []
     collection = _collection_from_mw(mw)
     if collection is None:
         message = "Anki collection is not available."
@@ -156,6 +179,7 @@ def sync_notion_to_anki(
         )
         stats = _replace_stats(stats, pages_scanned=stats.pages_scanned + 1)
 
+        page_warnings: list[SyncWarning] = []
         try:
             page_id = page.notion_page_id
             page_default_card_type = _effective_default_card_type(
@@ -214,6 +238,7 @@ def sync_notion_to_anki(
                     force_cloze_refresh=force_cloze_refresh,
                     force_toggle_refresh=force_toggle_refresh,
                     should_cancel=should_cancel,
+                    warnings=page_warnings,
                 )
             
             else:
@@ -230,6 +255,7 @@ def sync_notion_to_anki(
                     enable_cloze=enable_cloze,
                     force_toggle_refresh=force_toggle_refresh,
                     should_cancel=should_cancel,
+                    warnings=page_warnings,
                 )
 
             if cancelled:
@@ -237,6 +263,7 @@ def sync_notion_to_anki(
                 return _build_cancelled_result(stats)
 
             errors.extend(page_errors)
+            warnings.extend(page_warnings)
 
             # Persist the last seen Notion edit time only when the page processed cleanly and
             # the value actually changed (avoid unnecessary DB writes on skipped pages).
@@ -253,8 +280,8 @@ def sync_notion_to_anki(
             if after_writes > before_writes:
                 _mark_page_synced(db, page_id)
             _LOG.info(
-                "Page complete. page_id=%s writes=%d errors=%d stats=%s",
-                page_id, after_writes - before_writes, len(page_errors), stats,
+                "Page complete. page_id=%s writes=%d errors=%d warnings=%d stats=%s",
+                page_id, after_writes - before_writes, len(page_errors), len(page_warnings), stats,
             )
             
             _publish_progress(
@@ -265,25 +292,50 @@ def sync_notion_to_anki(
         except Exception as exc:
             _LOG.exception("Page sync failed. page_id=%s", page_id)
             errors.append(f"Page {page_id}: {exc}")
+            warnings.extend(page_warnings)
 
-    _reset_mw_if_available(mw)
+    try:
+        _reset_mw_if_available(mw)
+    except Exception as exc:
+        _LOG.warning("Sync could not refresh the Anki UI: %s", exc)
+        warnings.append(f"Anki UI refresh: {exc}")
     
     if errors:
-        _LOG.error("Sync completed with errors. count=%d stats=%s", len(errors), stats)
+        _LOG.error("Sync completed with errors. count=%d warnings=%d stats=%s", len(errors), len(warnings), stats)
         return SyncResult(
             ok=False,
             message=f"Sync completed with {len(errors)} error(s).",
             stats=stats,
             errors=tuple(errors),
+            warnings=tuple(warnings),
         )
 
-    if force_cloze_refresh:
-        _set_cloze_refresh_revision(db, _CLOZE_REFRESH_REVISION)
-        _LOG.info("Recorded completed cloze refresh revision %s.", _CLOZE_REFRESH_REVISION)
+    try:
+        if force_cloze_refresh:
+            _set_cloze_refresh_revision(db, _CLOZE_REFRESH_REVISION)
+            _LOG.info("Recorded completed cloze refresh revision %s.", _CLOZE_REFRESH_REVISION)
 
-    if force_toggle_refresh:
-        _set_toggle_refresh_revision(db, _TOGGLE_REFRESH_REVISION)
-        _LOG.info("Recorded completed toggle refresh revision %s.", _TOGGLE_REFRESH_REVISION)
+        if force_toggle_refresh:
+            _set_toggle_refresh_revision(db, _TOGGLE_REFRESH_REVISION)
+            _LOG.info("Recorded completed toggle refresh revision %s.", _TOGGLE_REFRESH_REVISION)
+    except Exception as exc:
+        _LOG.exception("Sync could not record parser refresh completion.")
+        return SyncResult(
+            ok=False,
+            message=f"Sync failed: {exc}",
+            stats=stats,
+            errors=(str(exc),),
+            warnings=tuple(warnings),
+        )
+
+    if warnings:
+        _LOG.warning("Sync completed with warnings. count=%d stats=%s", len(warnings), stats)
+        return SyncResult(
+            ok=True,
+            message=f"Sync completed with {len(warnings)} warning(s).",
+            stats=stats,
+            warnings=tuple(warnings),
+        )
 
     _LOG.info("Sync completed successfully. stats=%s", stats)
     return SyncResult(
@@ -489,6 +541,7 @@ def _sync_changed_page_fast(
     enable_cloze: bool,
     force_toggle_refresh: bool = False,
     should_cancel: SyncCancelCheck | None = None,
+    warnings: list[SyncWarning] | None = None,
 ) -> tuple[SyncStats, list[str], bool]:
     """Sync a page by expanding only toggles that are new/changed/missing locally."""
     existing_cards = _load_existing_cards_for_page(db, page_id)
@@ -498,7 +551,25 @@ def _sync_changed_page_fast(
     # Shallow fetch: direct children only (no recursion).
     blocks = client.get_page_blocks_shallow(page_id)
     toggles = [block for block in blocks if block.block_type == "toggle"]
+    toggle_ids = {block.block_id for block in toggles}
     _LOG.debug("Fetched shallow page blocks. page_id=%s blocks=%d toggles=%d", page_id, len(blocks), len(toggles))
+
+    # Detach old mappings whose source is no longer eligible while preserving their Anki notes.
+    for block_id, mapping in existing_cards.items():
+        if mapping["excluded"]:
+            continue
+
+        normalized_type = normalize_card_type(mapping["card_type"], default=BASIC)
+        if normalized_type in DEFAULT_SELECTABLE_CARD_TYPES and block_id not in toggle_ids:
+            stats = _detach_mapping_with_warning(
+                db       = db,
+                stats    = stats,
+                warnings = warnings,
+                page_id  = page_id,
+                block_id = block_id,
+                code     = "source_no_longer_syncable",
+                message  = "Mapped toggle is missing or no longer a top-level toggle; its Anki note was preserved.",
+            )
 
     for toggle in toggles:
         if _is_sync_cancelled(should_cancel):
@@ -543,15 +614,19 @@ def _sync_changed_page_fast(
         children = client.get_block_children_recursive(toggle.block_id) if toggle.has_children else []
         _LOG.debug("Expanding toggle for sync. page_id=%s block_id=%s children=%d card_type=%s", page_id, toggle.block_id, len(children), effective_card_type)
         expanded_toggle = _with_children(toggle, children)
-        toggle_payloads.extend(
-            parse_page_to_cards(
-                page_id,
-                [expanded_toggle],
-                default_card_type=default_card_type,
-                card_type_overrides=card_type_overrides,
-                enable_cloze=False,
-            )
+        parse_result = _parse_cards_with_warnings(
+            page_id=page_id,
+            blocks=[expanded_toggle],
+            default_card_type=default_card_type,
+            card_type_overrides=card_type_overrides,
+            enable_cloze=False,
         )
+        stats = _record_parser_warnings(stats, warnings, page_id, parse_result.warnings)
+        toggle_payloads.extend(parse_result.payloads)
+
+        # If the parser produced no payloads but also no parse failures, detach the mapping to preserve the Anki note.
+        if not parse_result.payloads and parse_result.warnings and not _has_parse_failure(parse_result.warnings):
+            stats = _detach_mapping(db, stats, page_id, toggle.block_id)
 
     # Sync only the payloads we actually expanded.
     for payload in toggle_payloads:
@@ -565,6 +640,7 @@ def _sync_changed_page_fast(
             payload=payload,
             stats=stats,
             should_cancel=should_cancel,
+            warnings=warnings,
         )
         errors.extend(payload_errors)
         if cancelled:
@@ -586,18 +662,37 @@ def _sync_changed_page_fast(
             cloze_candidate_block_ids.add(block.block_id)
         cloze_payloads: list[ToggleCardPayload] = []
         if cloze_candidate_block_ids:
-            cloze_payloads = [
-                payload
-                for payload in parse_page_to_cards(
-                    page_id,
-                    blocks,
-                    default_card_type=default_card_type,
-                    card_type_overrides=card_type_overrides,
-                    enable_cloze=True,
-                    include_block_ids=cloze_candidate_block_ids,
-                )
-                if payload.card_type == CLOZE
-            ]
+            parse_result = _parse_cards_with_warnings(
+                page_id             = page_id,
+                blocks              = blocks,
+                default_card_type   = default_card_type,
+                card_type_overrides = card_type_overrides,
+                enable_cloze        = True,
+                include_block_ids   = cloze_candidate_block_ids,
+            )
+            stats = _record_parser_warnings(stats, warnings, page_id, parse_result.warnings)
+            
+            cloze_payloads = [payload for payload in parse_result.payloads if payload.card_type == CLOZE]
+            if not _has_parse_failure(parse_result.warnings):
+                current_cloze_ids = {payload.notion_block_id for payload in cloze_payloads}
+                for block_id, mapping in existing_cards.items():
+                    if mapping["excluded"]:
+                        continue
+                    if normalize_card_type(mapping["card_type"], default=BASIC) != CLOZE:
+                        continue
+                    if block_id in current_cloze_ids:
+                        continue
+
+                    stats = _detach_mapping_with_warning(
+                        db       = db,
+                        stats    = stats,
+                        warnings = warnings,
+                        page_id  = page_id,
+                        block_id = block_id,
+                        code     = "source_no_longer_syncable",
+                        message  = "Mapped cloze source is missing or no longer contains usable cloze text; its Anki note was preserved.",
+                    )
+
         if cloze_payloads:
             _LOG.debug("Parsed cloze payloads. page_id=%s payloads=%d", page_id, len(cloze_payloads))
             for payload in cloze_payloads:
@@ -612,6 +707,7 @@ def _sync_changed_page_fast(
                     payload=payload,
                     stats=stats,
                     should_cancel=should_cancel,
+                    warnings=warnings,
                 )
                 errors.extend(payload_errors)
                 if cancelled:
@@ -633,6 +729,7 @@ def _repair_missing_notes_for_unchanged_page(
     force_cloze_refresh: bool = False,
     force_toggle_refresh: bool = False,
     should_cancel: SyncCancelCheck | None = None,
+    warnings: list[SyncWarning] | None = None,
 ) -> tuple[SyncStats, list[str], bool]:
     """Recreate local Anki notes that are missing even though the Notion page is unchanged."""
     existing_cards = _load_existing_cards_for_page(db, page_id)
@@ -648,6 +745,9 @@ def _repair_missing_notes_for_unchanged_page(
 
     for block_id, mapping in existing_cards.items():
         if mapping["excluded"]:
+            continue
+        normalized_mapping_type = normalize_card_type(mapping["card_type"], default=BASIC)
+        if normalized_mapping_type == CLOZE and not enable_cloze:
             continue
         note_id = mapping["anki_note_id"]
         if note_id is None:
@@ -691,25 +791,65 @@ def _repair_missing_notes_for_unchanged_page(
     except Exception as exc:
         _LOG.exception("Could not fetch unchanged page for repair. page_id=%s", page_id)
         return stats, [f"Page {page_id}: {exc}"], False
-    payloads = parse_page_to_cards(
-        page_id,
-        blocks,
-        default_card_type=default_card_type,
-        card_type_overrides=card_type_overrides,
-        enable_cloze=enable_cloze,
-        include_block_ids=blocks_needing_resync,
-    )
-    payloads_by_block_id = {payload.notion_block_id: payload for payload in payloads}
+    top_level_blocks = {block.block_id: block for block in blocks}
 
     for block_id in blocks_needing_resync:
         if _is_sync_cancelled(should_cancel):
             return stats, errors, True
+        
         stats = _replace_stats(stats, cards_seen=stats.cards_seen + 1)
-        payload = payloads_by_block_id.get(block_id)
-        if payload is None:
-            _LOG.error("Repair could not generate a payload. page_id=%s block_id=%s", page_id, block_id)
-            errors.append(f"Block {block_id}: no payload could be generated during repair.")
+        mapping            = existing_cards[block_id]
+        source_block       = top_level_blocks.get(block_id)
+        normalized_type    = normalize_card_type(mapping["card_type"], default=BASIC)
+        source_is_eligible = source_block is not None and (
+            source_block.block_type == "toggle"
+            if normalized_type in DEFAULT_SELECTABLE_CARD_TYPES
+            else enable_cloze and normalized_type == CLOZE and source_block.block_type == "paragraph"
+        )
+
+        if not source_is_eligible:
+            stats = _detach_mapping_with_warning(
+                db       = db,
+                stats    = stats,
+                warnings = warnings,
+                page_id  = page_id,
+                block_id = block_id,
+                code     = "source_no_longer_syncable",
+                message  = "Mapped Notion block is missing or no longer eligible for its card type; its Anki note was preserved.",
+            )
             continue
+
+        parse_blocks = blocks if normalized_type == CLOZE else [source_block]
+        parse_result = _parse_cards_with_warnings(
+            page_id             = page_id,
+            blocks              = parse_blocks,
+            default_card_type   = default_card_type,
+            card_type_overrides = card_type_overrides,
+            enable_cloze        = enable_cloze and normalized_type == CLOZE,
+            include_block_ids   = {block_id},
+        )
+        stats = _record_parser_warnings(stats, warnings, page_id, parse_result.warnings)
+        payload = next(
+            (item for item in parse_result.payloads if item.notion_block_id == block_id),
+            None,
+        )
+
+        if payload is None:
+            if not _has_parse_failure(parse_result.warnings):
+                # Missing payloads with no parser exception are expected source drift
+                # (for example an empty toggle or a removed cloze marker).
+                if not parse_result.warnings:
+                    stats = _add_warning(
+                        stats,
+                        warnings,
+                        code="source_no_longer_syncable",
+                        message="Notion block no longer produces a usable card; its Anki note was preserved.",
+                        page_id=page_id,
+                        block_id=block_id,
+                    )
+                stats = _detach_mapping(db, stats, page_id, block_id)
+            continue
+
         stats, payload_errors, cancelled = _sync_one_payload(
             db=db,
             collection=collection,
@@ -718,12 +858,156 @@ def _repair_missing_notes_for_unchanged_page(
             payload=payload,
             stats=stats,
             should_cancel=should_cancel,
+            warnings=warnings,
         )
         errors.extend(payload_errors)
         if cancelled:
             return stats, errors, True
 
     return stats, errors, False
+
+
+def _parse_cards_with_warnings(
+    *,
+    page_id:             str,
+    blocks:              list[NotionBlock],
+    default_card_type:   str,
+    card_type_overrides: dict[str, str],
+    enable_cloze:        bool,
+    include_block_ids:   set[str] | None = None,
+) -> CardParseResult:
+    """Parse cards and convert unexpected parser exceptions into warnings."""
+    parse_warnings: list[CardParseWarning] = []
+    try:
+        payloads = parse_page_to_cards(
+            page_id,
+            blocks,
+            default_card_type   = default_card_type,
+            card_type_overrides = card_type_overrides,
+            enable_cloze        = enable_cloze,
+            include_block_ids   = include_block_ids,
+            warnings            = parse_warnings,
+        )
+    except Exception as exc:
+        target_ids = include_block_ids or {block.block_id for block in blocks}
+        target_id  = next(iter(target_ids), "")
+        parse_warnings.append(
+            CardParseWarning(
+                code            = "card_parse_failed",
+                message         = f"Card parsing failed and the existing mapping was preserved: {exc}",
+                notion_block_id = target_id,
+            )
+        )
+        payloads = []
+    
+    return CardParseResult(payloads=tuple(payloads), warnings=tuple(parse_warnings))
+
+
+def _record_parser_warnings(
+    stats: SyncStats,
+    warnings: list[SyncWarning] | None,
+    page_id: str,
+    parse_warnings: tuple[CardParseWarning, ...],
+) -> SyncStats:
+    """Promote parser diagnostics to sync warnings without failing the run."""
+    for warning in parse_warnings:
+        stats = _add_warning(
+            stats,
+            warnings,
+            code     = warning.code,
+            message  = warning.message,
+            page_id  = page_id,
+            block_id = warning.notion_block_id or None,
+        )
+    
+    return stats
+
+
+def _has_parse_failure(parse_warnings: tuple[CardParseWarning, ...]) -> bool:
+    """Return whether parsing raised unexpectedly and mappings must be preserved."""
+    return any(warning.code == "card_parse_failed" for warning in parse_warnings)
+
+
+def _add_warning(
+    stats: SyncStats,
+    warnings: list[SyncWarning] | None,
+    *,
+    code: str,
+    message: str,
+    page_id: str | None,
+    block_id: str | None,
+) -> SyncStats:
+    """Record one recoverable sync condition and increment warning statistics."""
+    warning = SyncWarning(
+        code     = code,
+        message  = message,
+        page_id  = page_id,
+        block_id = block_id,
+    )
+    if warnings is not None:
+        warnings.append(warning)
+    
+    _LOG.warning(
+        "Sync warning. code=%s page_id=%s block_id=%s message=%s",
+        code,
+        page_id,
+        block_id,
+        message,
+    )
+    return _replace_stats(stats, cards_warned=stats.cards_warned + 1)
+
+
+def _detach_mapping_with_warning(
+    *,
+    db:       Database,
+    stats:    SyncStats,
+    warnings: list[SyncWarning] | None,
+    page_id:  str,
+    block_id: str,
+    code:     str,
+    message:  str,
+) -> SyncStats:
+    """Warn and detach one stale mapping while preserving the Anki note."""
+    stats = _add_warning(
+        stats,
+        warnings,
+        code     = code,
+        message  = message,
+        page_id  = page_id,
+        block_id = block_id,
+    )
+
+    return _detach_mapping(db, stats, page_id, block_id)
+
+
+def _detach_mapping(db: Database, stats: SyncStats, page_id: str, block_id: str) -> SyncStats:
+    """Remove Noteck metadata for one block without deleting its Anki note."""
+    connection = db.connect()
+    try:
+        connection.execute(
+            "DELETE FROM card_type_overrides WHERE notion_block_id = ?",
+            (block_id,),
+        )
+        cursor = connection.execute(
+            "DELETE FROM cards WHERE notion_block_id = ? AND notion_page_id = ?",
+            (block_id, page_id),
+        )
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    
+    if cursor.rowcount <= 0:
+        return stats
+    
+    _LOG.info(
+        "Card detached. page_id=%s block_id=%s reason=source_no_longer_syncable",
+        page_id,
+        block_id,
+    )
+    return _replace_stats(stats, cards_detached=stats.cards_detached + 1)
 
 
 def _load_cloze_refresh_revision(db: Database) -> str | None:
@@ -775,6 +1059,7 @@ def _sync_one_payload(
     payload: ToggleCardPayload,
     stats: SyncStats,
     should_cancel: SyncCancelCheck | None = None,
+    warnings: list[SyncWarning] | None = None,
 ) -> tuple[SyncStats, list[str], bool]:
     """Sync a single card payload (small wrapper around the existing mapping logic)."""
     if _is_sync_cancelled(should_cancel):
@@ -793,7 +1078,7 @@ def _sync_one_payload(
             raise SyncError(f"Anki note type '{model_name}' is not available.")
 
         if mapping is None:
-            prepared_payload = _prepare_payload_media(collection, payload)
+            prepared_payload, stats = _prepare_payload_media_with_warnings(collection, payload, stats, warnings)
             note_id = _create_note(collection, model, deck_id, prepared_payload)
             _upsert_card_mapping(db, prepared_payload, note_id, page_id)
             _LOG.info("Card created. page_id=%s block_id=%s note_id=%s card_type=%s reason=new_mapping", page_id, payload.notion_block_id, note_id, payload.card_type)
@@ -801,25 +1086,41 @@ def _sync_one_payload(
 
         note_id = mapping["anki_note_id"]
         if note_id is None:
-            prepared_payload = _prepare_payload_media(collection, payload)
+            prepared_payload, stats = _prepare_payload_media_with_warnings(collection, payload, stats, warnings)
             note_id = _create_note(collection, model, deck_id, prepared_payload)
             _upsert_card_mapping(db, prepared_payload, note_id, page_id)
-            _LOG.warning("Card recreated. page_id=%s block_id=%s note_id=%s card_type=%s reason=mapping_without_note", page_id, payload.notion_block_id, note_id, payload.card_type)
+            _LOG.info("Card recreated. page_id=%s block_id=%s note_id=%s card_type=%s reason=mapping_without_note", page_id, payload.notion_block_id, note_id, payload.card_type)
+            stats = _add_warning(
+                stats,
+                warnings,
+                code="mapping_without_note",
+                message="Card mapping had no Anki note ID and the note was recreated.",
+                page_id=page_id,
+                block_id=payload.notion_block_id,
+            )
             return _replace_stats(stats, cards_created=stats.cards_created + 1), [], False
 
         note = _get_note(collection, note_id)
         if note is None:
             stats = _replace_stats(stats, cards_missing_note=stats.cards_missing_note + 1)
-            prepared_payload = _prepare_payload_media(collection, payload)
+            prepared_payload, stats = _prepare_payload_media_with_warnings(collection, payload, stats, warnings)
             note_id = _create_note(collection, model, deck_id, prepared_payload)
             _upsert_card_mapping(db, prepared_payload, note_id, page_id)
-            _LOG.warning("Card recreated. page_id=%s block_id=%s previous_note_id=%s note_id=%s card_type=%s reason=missing_anki_note", page_id, payload.notion_block_id, mapping["anki_note_id"], note_id, payload.card_type)
+            _LOG.info("Card recreated. page_id=%s block_id=%s previous_note_id=%s note_id=%s card_type=%s reason=missing_anki_note", page_id, payload.notion_block_id, mapping["anki_note_id"], note_id, payload.card_type)
+            stats = _add_warning(
+                stats,
+                warnings,
+                code="missing_anki_note",
+                message="Mapped Anki note was missing and was recreated.",
+                page_id=page_id,
+                block_id=payload.notion_block_id,
+            )
             return _replace_stats(stats, cards_created=stats.cards_created + 1), [], False
 
         if mapping["card_type"] != payload.card_type:
-            _LOG.warning("Card invalidated and recreated due to type change. page_id=%s block_id=%s note_id=%s old_type=%s new_type=%s", page_id, payload.notion_block_id, note_id, mapping["card_type"], payload.card_type)
+            _LOG.info("Card invalidated and recreated due to type change. page_id=%s block_id=%s note_id=%s old_type=%s new_type=%s", page_id, payload.notion_block_id, note_id, mapping["card_type"], payload.card_type)
             _delete_note(collection, note_id)
-            prepared_payload = _prepare_payload_media(collection, payload)
+            prepared_payload, stats = _prepare_payload_media_with_warnings(collection, payload, stats, warnings)
             recreated_note_id = _create_note(collection, model, deck_id, prepared_payload)
             _upsert_card_mapping(db, prepared_payload, recreated_note_id, page_id)
             _LOG.info(
@@ -834,7 +1135,7 @@ def _sync_one_payload(
         _ensure_note_cards_in_deck(collection, note_id, deck_id)
         if mapping["content_hash"] == payload.content_hash:
             if _note_back_needs_mermaid_theme_upgrade(note):
-                prepared_payload = _prepare_payload_media(collection, payload)
+                prepared_payload, stats = _prepare_payload_media_with_warnings(collection, payload, stats, warnings)
                 _apply_payload_to_note(note, prepared_payload)
                 _update_note(collection, note)
                 _upsert_card_mapping(db, prepared_payload, note_id, page_id)
@@ -850,7 +1151,7 @@ def _sync_one_payload(
             _LOG.debug("Card unchanged. page_id=%s block_id=%s note_id=%s card_type=%s", page_id, payload.notion_block_id, note_id, payload.card_type)
             return _replace_stats(stats, cards_unchanged=stats.cards_unchanged + 1), [], False
 
-        prepared_payload = _prepare_payload_media(collection, payload)
+        prepared_payload, stats = _prepare_payload_media_with_warnings(collection, payload, stats, warnings)
         _apply_payload_to_note(note, prepared_payload)
         _update_note(collection, note)
         _upsert_card_mapping(db, prepared_payload, note_id, page_id)
@@ -1134,6 +1435,45 @@ def _prepare_payload_media(collection: Any, payload: ToggleCardPayload) -> Toggl
         content_hash=payload.content_hash,
         last_edited_time=payload.last_edited_time,
     )
+
+
+def _prepare_payload_media_with_warnings(
+    collection: Any,
+    payload: ToggleCardPayload,
+    stats: SyncStats,
+    warnings: list[SyncWarning] | None,
+) -> tuple[ToggleCardPayload, SyncStats]:
+    """Prepare media and report recoverable localization fallbacks."""
+    prepared      = _prepare_payload_media(collection, payload)
+    original_back = payload.fields.get("Back", payload.back_html)
+    prepared_back = prepared.fields.get("Back", prepared.back_html)
+    if _contains_remote_image(original_back) and _contains_remote_image(prepared_back):
+        stats = _add_warning(
+            stats,
+            warnings,
+            code     = "media_localization_failed",
+            message  = "Remote image could not be localized; its original URL was retained.",
+            page_id  = payload.notion_page_id,
+            block_id = payload.notion_block_id,
+        )
+    if "data-mermaid=" in original_back and "data-mermaid=" in prepared_back:
+        stats = _add_warning(
+            stats,
+            warnings,
+            code     = "mermaid_render_failed",
+            message  = "Mermaid diagram could not be rendered; its source fallback was retained.",
+            page_id  = payload.notion_page_id,
+            block_id = payload.notion_block_id,
+        )
+    return prepared, stats
+
+
+def _contains_remote_image(value: str) -> bool:
+    """Return whether HTML still references an HTTP(S) image source."""
+    for match in _IMAGE_TAG_RE.finditer(value):
+        if _is_http_url(html.unescape(match.group("src")).strip()):
+            return True
+    return False
 
 
 def _prepare_back_html_media(collection: Any, back_html: str) -> str:
@@ -1618,6 +1958,8 @@ def _replace_stats(stats: SyncStats, **changes: int) -> SyncStats:
         "cards_unchanged": stats.cards_unchanged,
         "cards_skipped": stats.cards_skipped,
         "cards_missing_note": stats.cards_missing_note,
+        "cards_detached": stats.cards_detached,
+        "cards_warned": stats.cards_warned,
     }
     payload.update(changes)
     return SyncStats(**payload)
@@ -1649,5 +1991,6 @@ def _build_cancelled_result(stats: SyncStats) -> SyncResult:
         ok=False,
         message="Sync canceled.",
         stats=stats,
-        errors=("Canceled by user.",),
+        errors=(),
+        cancelled=True,
     )

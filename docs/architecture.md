@@ -31,6 +31,9 @@ This document describes the Anki add-on architecture for Notion → Anki sync.
 - Per-page effective card type = page override or global default.
 - Auto-convert mapped notes when card type changes.
 - Hash-based idempotency including card type and payload fields.
+- Card parsing and recoverable repairs produce structured warnings without failing sync.
+- Missing or no-longer-syncable sources detach Noteck metadata while preserving Anki notes.
+- Only source access, database, Anki write, or orchestration failures are sync errors.
 
 ### Persistence
 - `pages`: selection, deck mapping, hierarchy metadata, optional `default_card_type` override.
