@@ -10,6 +10,21 @@ Noteck reports four distinct outcomes:
 - **Canceled:** the user stopped the run. `cancelled=True`, `ok=False`, and
   `errors` remains empty.
 
+## Change detection
+
+Notion's page and block objects each expose their own `last_edited_time`. Noteck
+does not treat either timestamp as a revision for the object's entire descendant
+tree. On every sync it retrieves the selected page's direct children and
+recursively retrieves every non-excluded toggle's children. Parsed payload hashes
+then decide whether an Anki note actually needs to be created or updated.
+
+This follows Notion's API guidance that a complete block representation may
+require recursive child retrieval:
+
+- [Page object](https://developers.notion.com/reference/page)
+- [Block object](https://developers.notion.com/reference/block)
+- [Retrieve block children](https://developers.notion.com/reference/get-block-children)
+
 ## Warnings
 
 `SyncResult.warnings` contains structured `SyncWarning` entries with a stable code,

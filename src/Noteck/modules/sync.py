@@ -136,12 +136,13 @@ def sync_notion_to_anki(
         card_type_override_store = CardTypeOverrideStore(db)
         global_default_card_type = normalize_default_selectable_card_type(store.get_value("default_card_type"))
         enable_cloze = bool(store.get_value("enable_cloze_parsing"))
-        force_cloze_refresh = (
+        cloze_refresh_revision_pending = (
             enable_cloze
             and _load_cloze_refresh_revision(db) != _CLOZE_REFRESH_REVISION
         )
-        # Parser-only changes do not alter Notion timestamps, so refresh toggle notes once.
-        force_toggle_refresh = _load_toggle_refresh_revision(db) != _TOGGLE_REFRESH_REVISION
+        # Keep existing parser revision markers for upgrade bookkeeping. The full
+        # content scan now makes timestamp-specific refresh branches unnecessary.
+        toggle_refresh_revision_pending = _load_toggle_refresh_revision(db) != _TOGGLE_REFRESH_REVISION
     except Exception as exc:
         _LOG.exception("Sync aborted while loading local configuration.")
         return SyncResult(ok=False, message=f"Sync failed: {exc}", errors=(str(exc),))
@@ -157,9 +158,9 @@ def sync_notion_to_anki(
 
     _LOG.info(
         "Sync configured. pages=%d default_card_type=%s cloze_enabled=%s "
-        "force_cloze_refresh=%s force_toggle_refresh=%s",
+        "cloze_refresh_revision_pending=%s toggle_refresh_revision_pending=%s",
         len(enabled_pages), global_default_card_type, enable_cloze,
-        force_cloze_refresh, force_toggle_refresh,
+        cloze_refresh_revision_pending, toggle_refresh_revision_pending,
     )
 
     _publish_progress(
@@ -192,7 +193,6 @@ def sync_notion_to_anki(
                 page_id, page.anki_deck_name, page.anki_deck_id, page_default_card_type,
                 len(page_card_type_overrides),
             )
-            # Check if the page has changed since last sync
             deck_id, resolved_deck_name = _resolve_page_deck(
                 collection=collection,
                 stored_deck_name=page.anki_deck_name,
@@ -208,55 +208,30 @@ def sync_notion_to_anki(
                 )
             page_last_edited_time = client.get_page_last_edited_time(page_id)
             stored_page_edit_time = _load_page_last_seen_notion_edit_time(db, page_id)
-            page_is_unchanged = (
+            page_metadata_matches = (
                 page_last_edited_time is not None
                 and stored_page_edit_time is not None
                 and page_last_edited_time == stored_page_edit_time
             )
             _LOG.info(
-                "Page edit check. page_id=%s notion_edit=%s stored_edit=%s unchanged=%s",
-                page_id, page_last_edited_time, stored_page_edit_time, page_is_unchanged,
+                "Page metadata edit check. page_id=%s notion_edit=%s stored_edit=%s matches=%s",
+                page_id, page_last_edited_time, stored_page_edit_time, page_metadata_matches,
             )
 
             before_writes = stats.cards_created + stats.cards_updated
-            page_errors: list[str] = []
-            cancelled = False
-
-            if page_is_unchanged:
-                # Even when the page is unchanged in Notion, local Anki notes may be missing.
-                # We only contact Notion for those missing notes so we can recreate them.
-                stats, page_errors, cancelled = _repair_missing_notes_for_unchanged_page(
-                    db=db,
-                    collection=collection,
-                    page_id=page_id,
-                    deck_id=deck_id,
-                    client=client,
-                    stats=stats,
-                    default_card_type=page_default_card_type,
-                    card_type_overrides=page_card_type_overrides,
-                    enable_cloze=enable_cloze,
-                    force_cloze_refresh=force_cloze_refresh,
-                    force_toggle_refresh=force_toggle_refresh,
-                    should_cancel=should_cancel,
-                    warnings=page_warnings,
-                )
-            
-            else:
-                # Page changed: fetch only top-level blocks, then expand only the toggles that need work.
-                stats, page_errors, cancelled = _sync_changed_page_fast(
-                    db=db,
-                    collection=collection,
-                    page_id=page_id,
-                    deck_id=deck_id,
-                    client=client,
-                    stats=stats,
-                    default_card_type=page_default_card_type,
-                    card_type_overrides=page_card_type_overrides,
-                    enable_cloze=enable_cloze,
-                    force_toggle_refresh=force_toggle_refresh,
-                    should_cancel=should_cancel,
-                    warnings=page_warnings,
-                )
+            stats, page_errors, cancelled = _sync_page_content(
+                db=db,
+                collection=collection,
+                page_id=page_id,
+                deck_id=deck_id,
+                client=client,
+                stats=stats,
+                default_card_type=page_default_card_type,
+                card_type_overrides=page_card_type_overrides,
+                enable_cloze=enable_cloze,
+                should_cancel=should_cancel,
+                warnings=page_warnings,
+            )
 
             if cancelled:
                 _LOG.warning("Sync cancelled while processing page %s.", page_id)
@@ -311,11 +286,11 @@ def sync_notion_to_anki(
         )
 
     try:
-        if force_cloze_refresh:
+        if cloze_refresh_revision_pending:
             _set_cloze_refresh_revision(db, _CLOZE_REFRESH_REVISION)
             _LOG.info("Recorded completed cloze refresh revision %s.", _CLOZE_REFRESH_REVISION)
 
-        if force_toggle_refresh:
+        if toggle_refresh_revision_pending:
             _set_toggle_refresh_revision(db, _TOGGLE_REFRESH_REVISION)
             _LOG.info("Recorded completed toggle refresh revision %s.", _TOGGLE_REFRESH_REVISION)
     except Exception as exc:
@@ -529,7 +504,7 @@ def _resolve_profile_name(mw: Any) -> str | None:
     return None
 
 
-def _sync_changed_page_fast(
+def _sync_page_content(
     db: Database,
     collection: Any,
     page_id: str,
@@ -539,11 +514,10 @@ def _sync_changed_page_fast(
     default_card_type: str,
     card_type_overrides: dict[str, str],
     enable_cloze: bool,
-    force_toggle_refresh: bool = False,
     should_cancel: SyncCancelCheck | None = None,
     warnings: list[SyncWarning] | None = None,
 ) -> tuple[SyncStats, list[str], bool]:
-    """Sync a page by expanding only toggles that are new/changed/missing locally."""
+    """Sync a page by recursively inspecting every eligible toggle."""
     existing_cards = _load_existing_cards_for_page(db, page_id)
     toggle_payloads: list[ToggleCardPayload] = []
     errors: list[str] = []
@@ -590,27 +564,9 @@ def _sync_changed_page_fast(
             default_card_type=default_card_type,
             card_type_overrides=card_type_overrides,
         )
-        toggle_last_edited_time = _as_optional_string(toggle.raw.get("last_edited_time"))
-        can_skip = False
-        if mapping is not None and not force_toggle_refresh:
-            note_id = mapping["anki_note_id"]
-            if (
-                note_id is not None
-                and mapping["last_seen_notion_edit_time"]
-                and mapping["last_seen_notion_edit_time"] == toggle_last_edited_time
-                and mapping["card_type"] == effective_card_type
-            ):
-                # Only skip when the local note still exists. If it is missing, we must
-                # re-fetch content from Notion to recreate it.
-                can_skip = _get_note(collection, note_id) is not None
 
-        if can_skip:
-            _LOG.debug("Card unchanged; skipped Notion expansion. page_id=%s block_id=%s note_id=%s", page_id, toggle.block_id, mapping["anki_note_id"])
-            stats = _replace_stats(stats, cards_unchanged=stats.cards_unchanged + 1)
-            continue
-
-        # Expand only the toggles we need to sync (recursive).
-        # Avoid an extra API call when Notion indicates there are no child blocks.
+        # A child edit need not change the toggle object's own timestamp, so every
+        # non-excluded toggle with children must be expanded on every sync.
         children = client.get_block_children_recursive(toggle.block_id) if toggle.has_children else []
         _LOG.debug("Expanding toggle for sync. page_id=%s block_id=%s children=%d card_type=%s", page_id, toggle.block_id, len(children), effective_card_type)
         expanded_toggle = _with_children(toggle, children)
@@ -712,157 +668,6 @@ def _sync_changed_page_fast(
                 errors.extend(payload_errors)
                 if cancelled:
                     return stats, errors, True
-
-    return stats, errors, False
-
-
-def _repair_missing_notes_for_unchanged_page(
-    db: Database,
-    collection: Any,
-    page_id: str,
-    deck_id: int,
-    client: NotionClient,
-    stats: SyncStats,
-    default_card_type: str,
-    card_type_overrides: dict[str, str],
-    enable_cloze: bool,
-    force_cloze_refresh: bool = False,
-    force_toggle_refresh: bool = False,
-    should_cancel: SyncCancelCheck | None = None,
-    warnings: list[SyncWarning] | None = None,
-) -> tuple[SyncStats, list[str], bool]:
-    """Recreate local Anki notes that are missing even though the Notion page is unchanged."""
-    existing_cards = _load_existing_cards_for_page(db, page_id)
-    errors: list[str] = []
-
-    # Collect only blocks that need local repair so we avoid a full Notion page fetch.
-    blocks_needing_resync: list[str] = []
-
-    def schedule_resync(block_id: str) -> None:
-        """Queue one block for re-parse without duplicating work."""
-        if block_id not in blocks_needing_resync:
-            blocks_needing_resync.append(block_id)
-
-    for block_id, mapping in existing_cards.items():
-        if mapping["excluded"]:
-            continue
-        normalized_mapping_type = normalize_card_type(mapping["card_type"], default=BASIC)
-        if normalized_mapping_type == CLOZE and not enable_cloze:
-            continue
-        note_id = mapping["anki_note_id"]
-        if note_id is None:
-            schedule_resync(block_id)
-            continue
-        if _get_note(collection, note_id) is None:
-            schedule_resync(block_id)
-            continue
-
-        # Re-sync toggle notes when page default type changed without a Notion page edit.
-        effective_card_type = _effective_card_type_for_block(
-            block_id,
-            default_card_type=default_card_type,
-            card_type_overrides=card_type_overrides,
-        )
-        if _card_type_needs_default_conversion(mapping["card_type"], effective_card_type):
-            schedule_resync(block_id)
-            continue
-
-        # Existing toggle notes need one parser pass after block-color support is installed.
-        if (
-            force_toggle_refresh
-            and normalize_card_type(mapping["card_type"], default=BASIC)
-            in DEFAULT_SELECTABLE_CARD_TYPES
-        ):
-            schedule_resync(block_id)
-            continue
-
-        # Force one parser-refresh pass for existing cloze cards after parser upgrades.
-        if force_cloze_refresh and normalize_card_type(mapping["card_type"], default=BASIC) == CLOZE:
-            schedule_resync(block_id)
-
-    if not blocks_needing_resync:
-        _LOG.debug("Unchanged page has no missing notes or conversion work. page_id=%s", page_id)
-        return stats, errors, False
-
-    _LOG.info("Repairing unchanged page blocks. page_id=%s block_ids=%s", page_id, blocks_needing_resync)
-
-    try:
-        blocks = client.get_page_content(page_id)
-    except Exception as exc:
-        _LOG.exception("Could not fetch unchanged page for repair. page_id=%s", page_id)
-        return stats, [f"Page {page_id}: {exc}"], False
-    top_level_blocks = {block.block_id: block for block in blocks}
-
-    for block_id in blocks_needing_resync:
-        if _is_sync_cancelled(should_cancel):
-            return stats, errors, True
-        
-        stats = _replace_stats(stats, cards_seen=stats.cards_seen + 1)
-        mapping            = existing_cards[block_id]
-        source_block       = top_level_blocks.get(block_id)
-        normalized_type    = normalize_card_type(mapping["card_type"], default=BASIC)
-        source_is_eligible = source_block is not None and (
-            source_block.block_type == "toggle"
-            if normalized_type in DEFAULT_SELECTABLE_CARD_TYPES
-            else enable_cloze and normalized_type == CLOZE and source_block.block_type == "paragraph"
-        )
-
-        if not source_is_eligible:
-            stats = _detach_mapping_with_warning(
-                db       = db,
-                stats    = stats,
-                warnings = warnings,
-                page_id  = page_id,
-                block_id = block_id,
-                code     = "source_no_longer_syncable",
-                message  = "Mapped Notion block is missing or no longer eligible for its card type; its Anki note was preserved.",
-            )
-            continue
-
-        parse_blocks = blocks if normalized_type == CLOZE else [source_block]
-        parse_result = _parse_cards_with_warnings(
-            page_id             = page_id,
-            blocks              = parse_blocks,
-            default_card_type   = default_card_type,
-            card_type_overrides = card_type_overrides,
-            enable_cloze        = enable_cloze and normalized_type == CLOZE,
-            include_block_ids   = {block_id},
-        )
-        stats = _record_parser_warnings(stats, warnings, page_id, parse_result.warnings)
-        payload = next(
-            (item for item in parse_result.payloads if item.notion_block_id == block_id),
-            None,
-        )
-
-        if payload is None:
-            if not _has_parse_failure(parse_result.warnings):
-                # Missing payloads with no parser exception are expected source drift
-                # (for example an empty toggle or a removed cloze marker).
-                if not parse_result.warnings:
-                    stats = _add_warning(
-                        stats,
-                        warnings,
-                        code="source_no_longer_syncable",
-                        message="Notion block no longer produces a usable card; its Anki note was preserved.",
-                        page_id=page_id,
-                        block_id=block_id,
-                    )
-                stats = _detach_mapping(db, stats, page_id, block_id)
-            continue
-
-        stats, payload_errors, cancelled = _sync_one_payload(
-            db=db,
-            collection=collection,
-            page_id=page_id,
-            deck_id=deck_id,
-            payload=payload,
-            stats=stats,
-            should_cancel=should_cancel,
-            warnings=warnings,
-        )
-        errors.extend(payload_errors)
-        if cancelled:
-            return stats, errors, True
 
     return stats, errors, False
 
@@ -1028,15 +833,6 @@ def _load_toggle_refresh_revision(db: Database) -> str | None:
 def _set_toggle_refresh_revision(db: Database, value: str) -> None:
     """Persist the latest completed internal toggle-refresh revision."""
     db.set_setting(_TOGGLE_REFRESH_REVISION_SETTING_KEY, value)
-
-
-def _card_type_needs_default_conversion(current_card_type: str, default_card_type: str) -> bool:
-    """Return whether a selectable card type should be converted to the active page default."""
-    normalized_current = normalize_card_type(current_card_type, default=BASIC)
-    normalized_default = normalize_default_selectable_card_type(default_card_type)
-    if normalized_current not in DEFAULT_SELECTABLE_CARD_TYPES:
-        return False
-    return normalized_current != normalized_default
 
 
 def _effective_card_type_for_block(

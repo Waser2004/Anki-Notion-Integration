@@ -192,7 +192,7 @@ class NotionClient:
         return self._fetch_block_children_recursive(page_id)
 
     def get_page_last_edited_time(self, page_id: str) -> str | None:
-        """Return the page `last_edited_time` used for fast-sync decisions."""
+        """Return page-level edit metadata for sync diagnostics and persistence."""
         payload = self._request_json("GET", f"/pages/{page_id}", None)
         last_edited_time = payload.get("last_edited_time")
         if isinstance(last_edited_time, str) and last_edited_time:
