@@ -14,9 +14,9 @@ Noteck reports four distinct outcomes:
 
 Notion's page and block objects each expose their own `last_edited_time`. Noteck
 does not treat either timestamp as a revision for the object's entire descendant
-tree. On every sync it retrieves the selected page's direct children and
-recursively retrieves every non-excluded toggle's children. Parsed payload hashes
-then decide whether an Anki note actually needs to be created or updated.
+tree. On every sync it retrieves a complete selected-page tree with a bounded
+asynchronous worker queue. Parsed payload hashes then decide whether an Anki note
+actually needs to be created or updated.
 
 This follows Notion's API guidance that a complete block representation may
 require recursive child retrieval:

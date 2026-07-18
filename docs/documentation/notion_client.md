@@ -53,7 +53,13 @@ The original API payload is always retained as `raw` for future feature growth.
 - Cycles are guarded against (a repeated page id stops recursion for that branch).
 
 #### `get_page_content(page_id: str) -> list[NotionBlock]`
-- Fetches `/blocks/{page_id}/children` and recursively expands any blocks where `has_children == True`.
+- Fetches `/blocks/{page_id}/children` and expands every block where
+  `has_children == True` through a bounded asynchronous worker queue.
+- Uses four workers, a bounded eight-job pending queue, and `page_size=100` for
+  every block-children request.
+- All workers share one limiter that starts at most three requests per second.
+  HTTP 429 responses defer the shared limiter for the server-provided
+  `Retry-After` interval and are retried up to five times.
 - Returns a tree of `NotionBlock` instances.
 
 #### `update_toggle(block_id: str, title: str, body: str) -> None`
@@ -72,6 +78,14 @@ Per the current project decision, this is an **exact match** update strategy:
 ### Errors
 - `NotionApiError`: the Notion API returned an error (HTTP status ≥ 400) or required configuration is missing.
 - `NotionTransportError`: the HTTP layer failed before a response was received.
+
+The queue behavior follows Notion's official guidance to recursively retrieve
+children, request up to 100 results per page, average no more than three requests
+per second, and honor `Retry-After` after a 429 response:
+
+- [Retrieve block children](https://developers.notion.com/reference/get-block-children)
+- [Pagination](https://developers.notion.com/reference/pagination)
+- [Request limits](https://developers.notion.com/reference/request-limits)
 
 ### Testing
 The client accepts an injectable `transport` callable, which is how unit tests avoid real network calls.

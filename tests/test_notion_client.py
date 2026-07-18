@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 import json
 import sys
+import threading
+import time
 import unittest
+from unittest.mock import patch
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
-from Noteck.modules.notion_client import NotionClient, NotionResponse
+from Noteck.modules import notion_client as notion_client_module
+from Noteck.modules.notion_client import NotionApiError, NotionClient, NotionResponse
 
 
 class NotionClientPageParentResolutionTests(unittest.TestCase):
@@ -230,6 +235,136 @@ class NotionClientChildPageOrderTests(unittest.TestCase):
         self.assertEqual(order_map.get("parent"), ("child-b", "child-a", "child-c"))
 
 
+class NotionClientPageTreeQueueTests(unittest.TestCase):
+    """Verify complete trees use bounded concurrent workers and robust retries."""
+
+    def test_get_page_content_fetches_paginated_descendants_with_bounded_workers(self) -> None:
+        calls: list[str] = []
+        active_requests = 0
+        maximum_active_requests = 0
+        lock = threading.Lock()
+
+        def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> NotionResponse:
+            nonlocal active_requests, maximum_active_requests
+            _ = (method, headers, body, timeout)
+            calls.append(url)
+            with lock:
+                active_requests += 1
+                maximum_active_requests = max(maximum_active_requests, active_requests)
+            try:
+                if "/blocks/page-1/children?" in url and "start_cursor=" not in url:
+                    return _json_response(
+                        {
+                            "results": [
+                                _block_payload(f"parent-{index}", "toggle", has_children=True)
+                                for index in range(6)
+                            ],
+                            "has_more": True,
+                            "next_cursor": "next page",
+                        }
+                    )
+                if "/blocks/page-1/children?" in url:
+                    return _json_response(
+                        {
+                            "results": [_block_payload("root-leaf", "paragraph")],
+                            "has_more": False,
+                        }
+                    )
+                if "/blocks/parent-" in url:
+                    # Blocking transports execute in worker threads, allowing the
+                    # async pool's concurrency bound to be observed.
+                    time.sleep(0.03)
+                    parent_id = url.split("/blocks/", 1)[1].split("/", 1)[0]
+                    return _json_response(
+                        {
+                            "results": [_block_payload(f"{parent_id}-leaf", "paragraph")],
+                            "has_more": False,
+                        }
+                    )
+                self.fail(f"Unexpected URL: {url}")
+            finally:
+                with lock:
+                    active_requests -= 1
+
+        with patch.object(notion_client_module, "NOTION_REQUESTS_PER_SECOND", 1_000_000.0):
+            client = NotionClient(api_token="token", transport=transport)
+            blocks = client.get_page_content("page-1")
+
+        self.assertEqual(
+            [block.block_id for block in blocks],
+            [*(f"parent-{index}" for index in range(6)), "root-leaf"],
+        )
+        self.assertEqual(blocks[0].children[0].block_id, "parent-0-leaf")
+        self.assertGreaterEqual(maximum_active_requests, 2)
+        self.assertLessEqual(maximum_active_requests, notion_client_module.NOTION_TREE_WORKER_COUNT)
+        self.assertTrue(all("page_size=100" in url for url in calls))
+        self.assertTrue(any("start_cursor=next%20page" in url for url in calls))
+
+    def test_get_page_content_retries_429_after_retry_after(self) -> None:
+        attempts = 0
+
+        def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> NotionResponse:
+            nonlocal attempts
+            _ = (method, url, headers, body, timeout)
+            attempts += 1
+            if attempts == 1:
+                return NotionResponse(
+                    status=429,
+                    headers={"Retry-After": "0"},
+                    body=json.dumps({"message": "slow down"}).encode("utf-8"),
+                )
+            return _json_response({"results": [], "has_more": False})
+
+        with patch.object(notion_client_module, "NOTION_REQUESTS_PER_SECOND", 1_000_000.0):
+            client = NotionClient(api_token="token", transport=transport)
+            self.assertEqual(client.get_page_content("page-1"), [])
+
+        self.assertEqual(attempts, 2)
+
+    def test_get_page_content_raises_after_rate_limit_retries_are_exhausted(self) -> None:
+        def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> NotionResponse:
+            _ = (method, url, headers, body, timeout)
+            return NotionResponse(
+                status=429,
+                headers={"Retry-After": "0"},
+                body=json.dumps({"message": "slow down"}).encode("utf-8"),
+            )
+
+        with patch.object(notion_client_module, "NOTION_REQUESTS_PER_SECOND", 1_000_000.0), patch.object(
+            notion_client_module,
+            "NOTION_RATE_LIMIT_RETRIES",
+            1,
+        ):
+            client = NotionClient(api_token="token", transport=transport)
+            with self.assertRaises(NotionApiError) as raised:
+                client.get_page_content("page-1")
+
+        self.assertEqual(raised.exception.status, 429)
+
+    def test_default_transport_preserves_http_error_response_metadata(self) -> None:
+        client = NotionClient(api_token="token")
+        http_error = notion_client_module.error.HTTPError(
+            url="https://api.notion.com/v1/blocks/page-1/children",
+            code=429,
+            msg="Too Many Requests",
+            hdrs={"Retry-After": "2"},
+            fp=BytesIO(json.dumps({"message": "slow down"}).encode("utf-8")),
+        )
+
+        with patch.object(notion_client_module.request, "urlopen", side_effect=http_error):
+            response = client._default_transport(
+                "GET",
+                "https://api.notion.com/v1/blocks/page-1/children",
+                {},
+                None,
+                15.0,
+            )
+
+        self.assertEqual(response.status, 429)
+        self.assertEqual(response.headers["Retry-After"], "2")
+        self.assertIn(b"slow down", response.body)
+
+
 def _json_response(payload: dict[str, object]) -> NotionResponse:
     """Build a success JSON response payload for transport test doubles."""
     return NotionResponse(status=200, headers={}, body=json.dumps(payload).encode("utf-8"))
@@ -261,11 +396,16 @@ def _page_payload(
     }
 
 
-def _block_payload(block_id: str, block_type: str) -> dict[str, object]:
+def _block_payload(
+    block_id: str,
+    block_type: str,
+    *,
+    has_children: bool = False,
+) -> dict[str, object]:
     """Build one minimal block payload for `/blocks/.../children` responses."""
     return {
         "object": "block",
         "id": block_id,
         "type": block_type,
-        "has_children": False,
+        "has_children": has_children,
     }

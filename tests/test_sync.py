@@ -385,6 +385,21 @@ class _MutableToggleClient(_FakeNotionClient):
             )
         ]
 
+    def get_page_content(self, page_id: str) -> list[NotionBlock]:
+        """Return the fully expanded tree produced by the real client."""
+        toggle = self._toggle_block(parent_id=page_id)
+        return [
+            NotionBlock(
+                block_id=toggle.block_id,
+                block_type=toggle.block_type,
+                has_children=toggle.has_children,
+                parent_id=toggle.parent_id,
+                parent_type=toggle.parent_type,
+                raw=toggle.raw,
+                children=tuple(self.get_block_children_recursive(toggle.block_id)),
+            )
+        ]
+
 
 class SyncTests(unittest.TestCase):
     """Validate create/update/no-op sync behavior with mocked dependencies."""
@@ -679,7 +694,7 @@ class SyncTests(unittest.TestCase):
 
         client = Mock()
         client.get_page_last_edited_time.return_value = "2026-02-04T00:00:00.000Z"
-        client.get_page_blocks_shallow.return_value = []
+        client.get_page_content.return_value = []
         with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
             _SYNC_MODULE.NotionClient,
             "from_settings",
@@ -1561,7 +1576,7 @@ class SyncTests(unittest.TestCase):
 
         client = Mock()
         client.get_page_last_edited_time.return_value = "2026-02-04T00:00:00.000Z"
-        client.get_page_blocks_shallow.return_value = []
+        client.get_page_content.return_value = []
         with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
             _SYNC_MODULE.NotionClient,
             "from_settings",
@@ -1605,7 +1620,7 @@ class SyncTests(unittest.TestCase):
             return "2026-02-05T00:00:00.000Z"
 
         client.get_page_last_edited_time.side_effect = page_edit_time
-        client.get_page_blocks_shallow.return_value = []
+        client.get_page_content.return_value = []
         with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
             _SYNC_MODULE.NotionClient,
             "from_settings",

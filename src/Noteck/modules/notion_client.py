@@ -2,25 +2,40 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import json
+import threading
+import time
 from typing import Any, Callable, Iterable, Mapping, Optional
-from urllib import request, parse
+from urllib import error, parse, request
 
 from .db import Database
 from .settings import SettingsStore
 
 
 NOTION_API_VERSION = "2026-03-11"
+NOTION_BLOCK_PAGE_SIZE = 100
+NOTION_TREE_WORKER_COUNT = 4
+NOTION_TREE_QUEUE_SIZE = NOTION_TREE_WORKER_COUNT * 2
+NOTION_REQUESTS_PER_SECOND = 3.0
+NOTION_RATE_LIMIT_RETRIES = 5
 
 
 class NotionApiError(RuntimeError):
     """Raised when the Notion API returns an error response."""
 
-    def __init__(self, message: str, status: int | None = None, payload: Any | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        status:  int | None               = None,
+        payload: Any | None               = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.payload = payload
+        self.headers = dict(headers or {})
 
 
 class NotionTransportError(RuntimeError):
@@ -69,6 +84,51 @@ class NotionBlock:
     children: tuple["NotionBlock", ...] = ()
 
 
+@dataclass(frozen=True)
+class _BlockFetchJob:
+    """One page-tree queue item identifying a parent whose children are needed."""
+
+    page_id:         str
+    parent_block_id: str
+
+
+@dataclass(frozen=True)
+class _BlockFetchResult:
+    """One completed fetch plus jobs discovered while processing it."""
+
+    job:        _BlockFetchJob
+    child_jobs: tuple[_BlockFetchJob, ...]
+    error:      Exception | None = None
+
+
+class _AsyncRateLimiter:
+    """Serialize request starts to a shared average requests-per-second limit."""
+
+    def __init__(self, requests_per_second: float) -> None:
+        self._interval = 1.0 / requests_per_second
+        self._next_request_at = 0.0
+        
+        self._next_request_at_lock = threading.Lock()
+
+    async def acquire(self) -> None:
+        """Wait until the next request may start."""
+        while True:
+            with self._next_request_at_lock:
+                now = time.monotonic()
+                delay = self._next_request_at - now
+                if delay <= 0:
+                    self._next_request_at = now + self._interval
+                    return
+            
+            await asyncio.sleep(delay)
+
+    async def defer(self, delay_seconds: float) -> None:
+        """Prevent every worker from retrying before a shared server deadline."""
+        with self._next_request_at_lock:
+            retry_at              = time.monotonic() + max(0.0, delay_seconds)
+            self._next_request_at = max(self._next_request_at, retry_at)
+
+
 # Keep this alias Python 3.9-compatible because it is evaluated at import time.
 Transport = Callable[[str, str, dict[str, str], Optional[bytes], float], NotionResponse]
 
@@ -94,6 +154,7 @@ class NotionClient:
         self._transport = transport or self._default_transport
         self._block_parent_page_cache: dict[str, str | None] = {}
         self._page_parent_type_cache: dict[str, str | None] = {}
+        self._tree_rate_limiter = _AsyncRateLimiter(NOTION_REQUESTS_PER_SECOND)
 
     @classmethod
     def from_settings(
@@ -189,7 +250,7 @@ class NotionClient:
 
     def get_page_content(self, page_id: str) -> list[NotionBlock]:
         """Return the full block tree for a page."""
-        return self._fetch_block_children_recursive(page_id)
+        return asyncio.run(self._fetch_page_tree(page_id))
 
     def get_page_last_edited_time(self, page_id: str) -> str | None:
         """Return page-level edit metadata for sync diagnostics and persistence."""
@@ -213,7 +274,7 @@ class NotionClient:
 
     def get_block_children_recursive(self, block_id: str) -> list[NotionBlock]:
         """Return the full block tree under the given block id."""
-        return self._fetch_block_children_recursive(block_id)
+        return asyncio.run(self._fetch_page_tree(block_id))
 
     def update_toggle(self, block_id: str, title: str, body: str) -> None:
         """Update a toggle block title and replace its child blocks."""
@@ -409,29 +470,194 @@ class NotionClient:
         
         return icon_payload
 
-    def _fetch_block_children_recursive(self, block_id: str) -> list[NotionBlock]:
-        """Fetch blocks recursively starting from a parent block."""
-        blocks: list[NotionBlock] = []
+    async def _fetch_page_tree(self, page_id: str) -> list[NotionBlock]:
+        """Fetch a complete block tree with a bounded asynchronous worker queue."""
+        jobs:               asyncio.Queue[_BlockFetchJob]                  = asyncio.Queue(maxsize=NOTION_TREE_QUEUE_SIZE)
+        completed:          asyncio.Queue[_BlockFetchResult]               = asyncio.Queue()
+        children_by_parent: dict[tuple[str, str], tuple[NotionBlock, ...]] = {}
+        errors:             list[Exception]                                = []
 
-        # fetch child blocks of given parent block
-        for payload in self._fetch_block_children(block_id):
-            block = self._normalize_block(payload)
+        await jobs.put(_BlockFetchJob(page_id=page_id, parent_block_id=page_id))
 
-            # add children to NotionBlock if present
-            if block.has_children:
-                children = self._fetch_block_children_recursive(block.block_id)
-                block = NotionBlock(
-                    block_id     = block.block_id,
-                    block_type   = block.block_type,
-                    has_children = block.has_children,
-                    parent_id    = block.parent_id,
-                    parent_type  = block.parent_type,
-                    raw          = block.raw,
-                    children     = tuple(children),
+        async def worker() -> None:
+            """Fetch jobs and report their newly discovered child jobs."""
+            while True:
+                job = await jobs.get()
+
+                try:
+                    blocks = tuple(
+                        await self._fetch_block_children_async(
+                            job.parent_block_id,
+                            limiter=self._tree_rate_limiter,
+                        )
+                    )
+                    # Workers store shallow results before descendants are queued.
+                    children_by_parent[(job.page_id, job.parent_block_id)] = blocks
+                    child_jobs = tuple(
+                        _BlockFetchJob(
+                            page_id=job.page_id,
+                            parent_block_id=block.block_id,
+                        )
+                        for block in blocks
+                        if block.has_children
+                    )
+                    await completed.put(_BlockFetchResult(job=job, child_jobs=child_jobs))
+                except Exception as exc:
+                    await completed.put(_BlockFetchResult(job=job, child_jobs=(), error=exc))
+
+        async def enqueue_discovered_jobs() -> None:
+            """Feed descendants into the bounded queue and settle parent jobs."""
+            while True:
+                result = await completed.get()
+
+                try:
+                    if result.error is not None:
+                        errors.append(result.error)
+                    else:
+                        for child_job in result.child_jobs:
+                            await jobs.put(child_job)
+                finally:
+                    # A job remains unfinished until all descendants it discovered
+                    # have entered the queue, so queue.join() cannot return early.
+                    jobs.task_done()
+                    completed.task_done()
+
+        workers = [
+            asyncio.create_task(worker())
+            for _ in range(NOTION_TREE_WORKER_COUNT)
+        ]
+        enqueuer = asyncio.create_task(enqueue_discovered_jobs())
+
+        # Wait for all jobs to be processed
+        try:
+            await jobs.join()
+            await completed.join()
+        # Cancel workers and enqueuer if the caller cancels the operation
+        finally:
+            for task in workers:
+                task.cancel()
+            enqueuer.cancel()
+            await asyncio.gather(*workers, enqueuer, return_exceptions=True)
+
+        if errors:
+            raise errors[0]
+        return self._assemble_block_tree(
+            page_id=page_id,
+            parent_block_id=page_id,
+            children_by_parent=children_by_parent,
+        )
+
+    async def _fetch_block_children_async(
+        self,
+        block_id: str,
+        *,
+        limiter: _AsyncRateLimiter,
+    ) -> list[NotionBlock]:
+        """Return every direct child using page_size=100 and shared throttling."""
+        blocks:      list[NotionBlock] = []
+        next_cursor: str | None        = None
+
+        while True:
+            path = (
+                f"/blocks/{block_id}/children"
+                f"?page_size={NOTION_BLOCK_PAGE_SIZE}"
+            )
+            if next_cursor:
+                path = (
+                    f"{path}&start_cursor={parse.quote(next_cursor)}"
                 )
 
-            blocks.append(block)
-        
+            response = await self._request_json_with_rate_limit_retry(
+                "GET",
+                path,
+                None,
+                limiter=limiter,
+            )
+            blocks.extend(
+                self._normalize_block(payload)
+                for payload in response.get("results", [])
+            )
+            if not response.get("has_more"):
+                return blocks
+
+            next_cursor = response.get("next_cursor")
+            if not next_cursor:
+                return blocks
+
+    async def _request_json_with_rate_limit_retry(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        *,
+        limiter: _AsyncRateLimiter,
+    ) -> dict[str, Any]:
+        """Make a throttled request, respecting Retry-After on HTTP 429."""
+        for retry_index in range(NOTION_RATE_LIMIT_RETRIES + 1):
+            await limiter.acquire()
+            try:
+                return await asyncio.to_thread(
+                    self._request_json_once,
+                    method,
+                    path,
+                    payload,
+                )
+            except NotionApiError as exc:
+                if exc.status != 429 or retry_index >= NOTION_RATE_LIMIT_RETRIES:
+                    raise
+                await limiter.defer(self._retry_after_seconds(exc, retry_index))
+
+        raise RuntimeError("Notion rate-limit retry loop ended unexpectedly.")
+
+    def _retry_after_seconds(self, error: NotionApiError, retry_index: int) -> float:
+        """Return Retry-After seconds, with bounded backoff for invalid headers."""
+        retry_after = next(
+            (
+                value
+                for key, value in error.headers.items()
+                if key.lower() == "retry-after"
+            ),
+            None,
+        )
+        if retry_after is not None:
+            try:
+                return max(0.0, float(retry_after))
+            except (TypeError, ValueError):
+                pass
+        return float(min(2 ** retry_index, 8))
+
+    def _assemble_block_tree(
+        self,
+        *,
+        page_id: str,
+        parent_block_id: str,
+        children_by_parent: Mapping[tuple[str, str], tuple[NotionBlock, ...]],
+        ancestors: frozenset[str] = frozenset(),
+    ) -> list[NotionBlock]:
+        """Rebuild immutable nested blocks from the workers' shallow results."""
+        blocks: list[NotionBlock] = []
+        for block in children_by_parent.get((page_id, parent_block_id), ()):
+            children: tuple[NotionBlock, ...] = ()
+            if block.has_children and block.block_id not in ancestors:
+                children = tuple(
+                    self._assemble_block_tree(
+                        page_id=page_id,
+                        parent_block_id=block.block_id,
+                        children_by_parent=children_by_parent,
+                        ancestors=ancestors | {block.block_id},
+                    )
+                )
+            blocks.append(
+                NotionBlock(
+                    block_id=block.block_id,
+                    block_type=block.block_type,
+                    has_children=block.has_children,
+                    parent_id=block.parent_id,
+                    parent_type=block.parent_type,
+                    raw=block.raw,
+                    children=children,
+                )
+            )
         return blocks
 
     def _fetch_block_children(self, block_id: str) -> Iterable[dict[str, Any]]:
@@ -577,7 +803,12 @@ class NotionClient:
         # handle error responses
         if response.status >= 400:
             message = data.get("message") or f"Notion API error ({response.status})"
-            raise NotionApiError(message, status=response.status, payload=data)
+            raise NotionApiError(
+                message,
+                status  = response.status,
+                payload = data,
+                headers = response.headers,
+            )
         
         return data
 
@@ -601,7 +832,16 @@ class NotionClient:
                     headers=dict(response.headers.items()),
                     body=raw_body,
                 )
-        
+
+        # urllib represents HTTP error responses as exceptions. Preserve the
+        # response so API errors such as 429 can use status and Retry-After.
+        except error.HTTPError as exc:
+            return NotionResponse(
+                status=exc.code,
+                headers=dict(exc.headers.items()) if exc.headers else {},
+                body=exc.read(),
+            )
+
         # transport failed
         except Exception as exc:
             raise NotionTransportError(str(exc)) from exc

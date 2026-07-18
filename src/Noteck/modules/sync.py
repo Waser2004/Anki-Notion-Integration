@@ -522,11 +522,12 @@ def _sync_page_content(
     toggle_payloads: list[ToggleCardPayload] = []
     errors: list[str] = []
 
-    # Shallow fetch: direct children only (no recursion).
-    blocks = client.get_page_blocks_shallow(page_id)
+    # Fetch one complete snapshot so all descendants are retrieved concurrently
+    # and every parser on this page observes the same Notion block tree.
+    blocks = client.get_page_content(page_id)
     toggles = [block for block in blocks if block.block_type == "toggle"]
     toggle_ids = {block.block_id for block in toggles}
-    _LOG.debug("Fetched shallow page blocks. page_id=%s blocks=%d toggles=%d", page_id, len(blocks), len(toggles))
+    _LOG.debug("Fetched complete page tree. page_id=%s blocks=%d toggles=%d", page_id, len(blocks), len(toggles))
 
     # Detach old mappings whose source is no longer eligible while preserving their Anki notes.
     for block_id, mapping in existing_cards.items():
@@ -565,14 +566,11 @@ def _sync_page_content(
             card_type_overrides=card_type_overrides,
         )
 
-        # A child edit need not change the toggle object's own timestamp, so every
-        # non-excluded toggle with children must be expanded on every sync.
-        children = client.get_block_children_recursive(toggle.block_id) if toggle.has_children else []
-        _LOG.debug("Expanding toggle for sync. page_id=%s block_id=%s children=%d card_type=%s", page_id, toggle.block_id, len(children), effective_card_type)
-        expanded_toggle = _with_children(toggle, children)
+        # The page-tree fetch has already expanded this toggle and its descendants.
+        _LOG.debug("Parsing expanded toggle. page_id=%s block_id=%s children=%d card_type=%s", page_id, toggle.block_id, len(toggle.children), effective_card_type)
         parse_result = _parse_cards_with_warnings(
             page_id=page_id,
-            blocks=[expanded_toggle],
+            blocks=[toggle],
             default_card_type=default_card_type,
             card_type_overrides=card_type_overrides,
             enable_cloze=False,
@@ -956,19 +954,6 @@ def _sync_one_payload(
     except Exception as exc:
         _LOG.exception("Card sync failed. page_id=%s block_id=%s", page_id, payload.notion_block_id)
         return stats, [f"Block {payload.notion_block_id}: {exc}"], False
-
-
-def _with_children(block: NotionBlock, children: list[NotionBlock]) -> NotionBlock:
-    """Return a copy of a block with a fully populated children tuple."""
-    return NotionBlock(
-        block_id=block.block_id,
-        block_type=block.block_type,
-        has_children=block.has_children,
-        parent_id=block.parent_id,
-        parent_type=block.parent_type,
-        raw=block.raw,
-        children=tuple(children),
-    )
 
 
 def _load_page_last_seen_notion_edit_time(db: Database, page_id: str) -> str | None:
