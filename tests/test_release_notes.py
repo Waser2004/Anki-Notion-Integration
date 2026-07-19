@@ -12,8 +12,10 @@ sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 from Noteck.modules.release_notes import (
     LAST_SEEN_RELEASE_KEY,
     SHOW_AFTER_UPDATE_KEY,
+    STARTUP_SYNC_RELEASE_KEY,
     ReleaseNotesError,
     clear_force_release_notes,
+    consume_startup_sync_suppression,
     force_release_notes_requested,
     load_release_notes,
     mark_release_notes_seen,
@@ -110,6 +112,52 @@ class ReleaseNotesTests(unittest.TestCase):
             should_show_release_notes(
                 latest_release="1.3.0",
                 last_seen_release="1.3.0",
+                database_existed=True,
+            )
+        )
+
+    def test_first_startup_sync_is_skipped_once_for_parser_update(self) -> None:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        db = Database(Path(temp_dir.name) / "noteck.db")
+        db.initialize()
+
+        self.assertTrue(
+            consume_startup_sync_suppression(
+                db,
+                latest_release="1.3.0",
+                database_existed=True,
+            )
+        )
+        self.assertFalse(
+            consume_startup_sync_suppression(
+                db,
+                latest_release="1.3.0",
+                database_existed=True,
+            )
+        )
+        self.assertEqual(db.get_setting(STARTUP_SYNC_RELEASE_KEY), "1.3.0")
+
+    def test_startup_sync_is_not_skipped_for_fresh_install_or_normal_release(self) -> None:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        fresh_db = Database(Path(temp_dir.name) / "fresh.db")
+        fresh_db.initialize()
+
+        self.assertFalse(
+            consume_startup_sync_suppression(
+                fresh_db,
+                latest_release="1.3.0",
+                database_existed=False,
+            )
+        )
+
+        existing_db = Database(Path(temp_dir.name) / "existing.db")
+        existing_db.initialize()
+        self.assertFalse(
+            consume_startup_sync_suppression(
+                existing_db,
+                latest_release="1.4.0",
                 database_existed=True,
             )
         )
@@ -220,11 +268,11 @@ class ReleaseNotesTests(unittest.TestCase):
         document = load_release_notes()
         self.assertEqual(document.latest.version, "1.3.0")
         self.assertIn(
-            "docs/release-notes-assets/1.3.0-sample-flower.jpeg",
+            "docs/release-notes-assets/notion_anki_colored_blocks_visualisation.png",
             document.latest.markdown,
         )
         image_path = document.source_path.parent / "docs" / "release-notes-assets" / (
-            "1.3.0-sample-flower.jpeg"
+            "notion_anki_colored_blocks_visualisation.png"
         )
         self.assertTrue(image_path.is_file())
 

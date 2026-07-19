@@ -11,7 +11,11 @@ from .db import Database
 
 LAST_SEEN_RELEASE_KEY = "release_notes_last_seen"
 SHOW_AFTER_UPDATE_KEY = "release_notes_show_after_update"
+STARTUP_SYNC_RELEASE_KEY = "startup_sync_release_seen"
 FORCE_RELEASE_NOTES_SENTINEL = ".force_release_notes_on_startup"
+# These releases require the user to start the first sync manually because their
+# parser changes can make that sync considerably longer than a normal startup sync.
+MANUAL_FIRST_SYNC_RELEASES = frozenset({"1.3.0"})
 
 _RELEASE_HEADING = re.compile(
     r"^##\s+(?P<version>\S+)\s+-\s+(?P<date>\d{4}-\d{2}-\d{2})\s*$",
@@ -125,6 +129,25 @@ def should_show_release_notes(
         # A missing database represents a fresh installation, which stays quiet.
         return database_existed
     return last_seen_release != latest_release
+
+
+def consume_startup_sync_suppression(
+    db: Database,
+    *,
+    latest_release: str,
+    database_existed: bool,
+) -> bool:
+    """Consume this release's first-start marker and decide whether to skip auto-sync."""
+    if db.get_setting(STARTUP_SYNC_RELEASE_KEY) == latest_release:
+        return False
+
+    # Persist before any release-notes UI work so a UI failure cannot cause startup
+    # sync to remain disabled on every subsequent launch.
+    db.set_setting(STARTUP_SYNC_RELEASE_KEY, latest_release)
+    return (
+        database_existed
+        and latest_release in MANUAL_FIRST_SYNC_RELEASES
+    )
 
 
 def force_release_notes_requested(path: str | Path) -> bool:
