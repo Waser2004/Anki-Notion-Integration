@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from Noteck.modules.db import Database
-from Noteck.modules.notion_client import NotionBlock
+from Noteck.modules.notion_client import NotionBlock, NotionMarkdownSnapshot
 from Noteck.modules.parser import ToggleCardPayload
 from Noteck.modules.sync import (
     SyncResult,
@@ -401,6 +401,118 @@ class _MutableToggleClient(_FakeNotionClient):
         ]
 
 
+class _SelectiveMarkdownClient(_FakeNotionClient):
+    """Expose Markdown, shallow roots, and tracked recursive toggle retrieval."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.body_by_id = {
+            "block-1": "First answer",
+            "block-2": "Second answer",
+        }
+        self.recursive_calls: list[str] = []
+        self.full_page_fetches = 0
+
+    def get_page_markdown(self, page_id: str) -> NotionMarkdownSnapshot:
+        return NotionMarkdownSnapshot(
+            page_id=page_id,
+            markdown=(
+                "<details>\n"
+                "<summary>First question</summary>\n"
+                f"\t{self.body_by_id['block-1']}\n"
+                "</details>\n"
+                "<details>\n"
+                "<summary>Second question</summary>\n"
+                f"\t{self.body_by_id['block-2']}\n"
+                "</details>"
+            ),
+            truncated=False,
+            unknown_block_ids=(),
+        )
+
+    def get_page_blocks_shallow(self, page_id: str) -> list[NotionBlock]:
+        return [
+            self._named_toggle("block-1", "First question", page_id),
+            self._named_toggle("block-2", "Second question", page_id),
+        ]
+
+    def get_block_children_recursive(self, block_id: str) -> list[NotionBlock]:
+        self.recursive_calls.append(block_id)
+        body = self.body_by_id[block_id]
+        raw = {
+            "object": "block",
+            "id": f"{block_id}-body",
+            "type": "paragraph",
+            "has_children": False,
+            "parent": {"type": "block_id", "block_id": block_id},
+            "paragraph": {
+                "rich_text": [
+                    {
+                        "type": "text",
+                        "plain_text": body,
+                        "text": {"content": body},
+                    }
+                ]
+            },
+        }
+        return [
+            NotionBlock(
+                block_id=f"{block_id}-body",
+                block_type="paragraph",
+                has_children=False,
+                parent_id=block_id,
+                parent_type="block_id",
+                raw=raw,
+                children=(),
+            )
+        ]
+
+    def get_page_content(self, page_id: str) -> list[NotionBlock]:
+        self.full_page_fetches += 1
+        blocks: list[NotionBlock] = []
+        for toggle in self.get_page_blocks_shallow(page_id):
+            blocks.append(
+                NotionBlock(
+                    block_id=toggle.block_id,
+                    block_type=toggle.block_type,
+                    has_children=toggle.has_children,
+                    parent_id=toggle.parent_id,
+                    parent_type=toggle.parent_type,
+                    raw=toggle.raw,
+                    children=tuple(self.get_block_children_recursive(toggle.block_id)),
+                )
+            )
+        return blocks
+
+    def _named_toggle(self, block_id: str, title: str, page_id: str) -> NotionBlock:
+        """Build one shallow root toggle with stable identity and current title."""
+        raw = {
+            "object": "block",
+            "id": block_id,
+            "type": "toggle",
+            "has_children": True,
+            "parent": {"type": "page_id", "page_id": page_id},
+            "toggle": {
+                "rich_text": [
+                    {
+                        "type": "text",
+                        "plain_text": title,
+                        "text": {"content": title},
+                    }
+                ]
+            },
+        }
+        return NotionBlock(
+            block_id=block_id,
+            block_type="toggle",
+            has_children=True,
+            parent_id=page_id,
+            parent_type="page_id",
+            raw=raw,
+            children=(),
+        )
+
+
 class SyncTests(unittest.TestCase):
     """Validate create/update/no-op sync behavior with mocked dependencies."""
 
@@ -713,6 +825,82 @@ class SyncTests(unittest.TestCase):
             self._db.get_setting(_SYNC_MODULE._TOGGLE_REFRESH_REVISION_SETTING_KEY),
             _SYNC_MODULE._TOGGLE_REFRESH_REVISION,
         )
+
+    def test_markdown_snapshots_fetch_only_new_or_changed_toggles(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        client = _SelectiveMarkdownClient()
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ):
+            first = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            second = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            client.body_by_id["block-2"] = "Changed second answer"
+            third = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(first.ok)
+        self.assertEqual(first.stats.cards_created, 2)
+        self.assertTrue(second.ok)
+        self.assertEqual(second.stats.cards_unchanged, 2)
+        self.assertTrue(third.ok)
+        self.assertEqual(third.stats.cards_updated, 1)
+        self.assertEqual(third.stats.cards_unchanged, 1)
+        self.assertEqual(
+            client.recursive_calls,
+            ["block-1", "block-2", "block-2"],
+        )
+        self.assertEqual(client.full_page_fetches, 0)
+
+        connection = self._db.connect()
+        try:
+            page_row = connection.execute(
+                "SELECT content_hash FROM pages WHERE notion_page_id = ?",
+                ("page-1",),
+            ).fetchone()
+            snapshot_rows = connection.execute(
+                """
+                SELECT notion_block_id, source_hash
+                FROM notion_toggle_snapshots
+                WHERE notion_page_id = ?
+                ORDER BY notion_block_id
+                """,
+                ("page-1",),
+            ).fetchall()
+        finally:
+            connection.close()
+        self.assertIsNotNone(page_row)
+        self.assertTrue(str(page_row["content_hash"]))
+        self.assertEqual(
+            [str(row["notion_block_id"]) for row in snapshot_rows],
+            ["block-1", "block-2"],
+        )
+
+    def test_ambiguous_markdown_alignment_falls_back_to_full_page_tree(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        client = _SelectiveMarkdownClient()
+        client.get_page_markdown = Mock(
+            return_value=NotionMarkdownSnapshot(
+                page_id="page-1",
+                markdown="<details>\n<summary>Only one</summary>\n\tAnswer\n</details>",
+                truncated=False,
+                unknown_block_ids=(),
+            )
+        )
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_created, 2)
+        self.assertEqual(client.full_page_fetches, 1)
         connection = self._db.connect()
         try:
             card_row = connection.execute(

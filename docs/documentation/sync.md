@@ -14,16 +14,30 @@ Noteck reports four distinct outcomes:
 
 Notion's page and block objects each expose their own `last_edited_time`. Noteck
 does not treat either timestamp as a revision for the object's entire descendant
-tree. On every sync it retrieves a complete selected-page tree with a bounded
-asynchronous worker queue. Parsed payload hashes then decide whether an Anki note
-actually needs to be created or updated.
+tree. Instead, every selected page is retrieved once as enhanced Markdown and
+once as shallow root blocks:
 
-This follows Notion's API guidance that a complete block representation may
-require recursive child retrieval:
+1. Expiring signature parameters are removed from media URLs before hashing.
+2. The cleaned full-page hash is stored in `pages.content_hash`.
+3. Top-level regular-toggle Markdown sources are aligned by order with shallow
+   Notion `toggle` blocks, which provide stable block IDs.
+4. Each successfully handled toggle source hash is stored separately.
+5. Only new, changed, repair-required, or parser-refresh toggles have their
+   descendants fetched recursively.
+
+If the Markdown response is truncated, malformed, or cannot be aligned
+unambiguously with the shallow root toggles, Noteck retrieves the complete block
+tree for that page. This preserves correctness instead of guessing identities.
+
+Top-level cloze paragraphs are already complete in the shallow block response,
+so they do not require descendant retrieval. Parsed payload hashes still decide
+whether an Anki note needs to be created or updated.
 
 - [Page object](https://developers.notion.com/reference/page)
 - [Block object](https://developers.notion.com/reference/block)
 - [Retrieve block children](https://developers.notion.com/reference/get-block-children)
+- [Retrieve a page as Markdown](https://developers.notion.com/reference/retrieve-page-markdown)
+- [Enhanced Markdown format](https://developers.notion.com/guides/data-apis/enhanced-markdown)
 
 ## Warnings
 

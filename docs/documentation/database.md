@@ -4,9 +4,9 @@ The add-on persists per-profile state in SQLite.
 
 ## Migrations
 
-- A single baseline migration lives in `MIGRATIONS`.
+- Ordered schema migrations live in `MIGRATIONS`.
 - `Database.initialize()` applies pending migrations and records applied versions in `schema_migrations`.
-- Current latest schema version: **1**.
+- Current latest schema version: **2**.
 - The baseline schema is intentionally squashed for the first public release.
 - Compatibility with pre-release database variants is intentionally unsupported.
 
@@ -18,7 +18,7 @@ The add-on persists per-profile state in SQLite.
 - `anki_deck_name` (TEXT, NOT NULL)
 - `anki_deck_id` (INTEGER, nullable)
 - `sync_enabled` (INTEGER, NOT NULL)
-- `content_hash` (TEXT, legacy/unused)
+- `content_hash` (TEXT, nullable; canonical full-page enhanced-Markdown hash)
 - `last_seen_notion_edit_time` (TEXT, nullable)
 - `last_synced_at` (TEXT, nullable)
 - `parent_id` (TEXT, nullable)
@@ -50,6 +50,18 @@ When a mapped source block is confirmed missing or no longer syncable, Noteck de
 - `notion_page_id` (TEXT, FK → pages)
 - `card_type` (TEXT, NOT NULL)
 - `updated_at` (TEXT, NOT NULL)
+
+### `notion_toggle_snapshots`
+
+- `notion_block_id` (TEXT, PK)
+- `notion_page_id` (TEXT, FK â†’ pages)
+- `source_hash` (TEXT, NOT NULL; canonical enhanced-Markdown hash)
+- `updated_at` (TEXT, NOT NULL)
+
+Snapshots are independent from `cards` rows. This lets Noteck remember a
+successfully parsed empty or otherwise non-card-producing toggle after its card
+mapping is detached, preventing the same unchanged warning and recursive fetch
+from repeating on every sync.
 
 ## Helpers
 

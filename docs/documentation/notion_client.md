@@ -7,6 +7,9 @@ Provide a small, testable wrapper around the Notion REST API that supports the M
 - Fetch a page’s block content recursively so the parser can turn toggles into Anki cards.
 - Update toggle blocks so future Anki → Notion sync can write changes back.
 
+- Fetch page bodies as enhanced Markdown for deterministic content change
+  detection.
+
 This module intentionally uses only the Python standard library (no extra HTTP dependencies).
 
 ## Notion API version
@@ -61,6 +64,19 @@ The original API payload is always retained as `raw` for future feature growth.
   HTTP 429 responses defer the shared limiter for the server-provided
   `Retry-After` interval and are retried up to five times.
 - Returns a tree of `NotionBlock` instances.
+
+#### `get_page_markdown(page_id: str) -> NotionMarkdownSnapshot`
+
+- Calls `GET /pages/{page_id}/markdown`.
+- Uses the shared request limiter and HTTP 429 retry handling.
+- Returns the Markdown body together with `truncated` and
+  `unknown_block_ids` response metadata.
+
+#### `get_page_blocks_shallow(page_id: str) -> list[NotionBlock]`
+
+- Retrieves only direct page children with `page_size=100`.
+- Supplies stable root block IDs and ordering without expanding descendants.
+- Uses the same shared request limiter and retry behavior as tree retrieval.
 
 #### `update_toggle(block_id: str, title: str, body: str) -> None`
 Per the current project decision, this is an **exact match** update strategy:

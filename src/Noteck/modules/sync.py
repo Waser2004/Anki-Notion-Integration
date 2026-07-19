@@ -20,7 +20,8 @@ from .card_type_overrides import CardTypeOverrideStore
 from .cards import MODEL_NAME_BASIC, ensure_notion_toggle_model
 from .db import Database
 from .logging_utils import configure_file_logging, log_file_path
-from .notion_client import NotionBlock, NotionClient
+from .markdown_snapshot import extract_root_toggle_markdown, hash_notion_markdown
+from .notion_client import NotionBlock, NotionClient, NotionMarkdownSnapshot
 from .parser import CardParseResult, CardParseWarning, ToggleCardPayload, parse_page_to_cards
 from .settings import SettingsStore, create_default_settings
 
@@ -229,6 +230,8 @@ def sync_notion_to_anki(
                 default_card_type=page_default_card_type,
                 card_type_overrides=page_card_type_overrides,
                 enable_cloze=enable_cloze,
+                force_toggle_refresh=toggle_refresh_revision_pending,
+                force_cloze_refresh=cloze_refresh_revision_pending,
                 should_cancel=should_cancel,
                 warnings=page_warnings,
             )
@@ -505,6 +508,374 @@ def _resolve_profile_name(mw: Any) -> str | None:
 
 
 def _sync_page_content(
+    db:                   Database,
+    collection:           Any,
+    page_id:              str,
+    deck_id:              int,
+    client:               NotionClient,
+    stats:                SyncStats,
+    default_card_type:    str,
+    card_type_overrides:  dict[str, str],
+    enable_cloze:         bool,
+    force_toggle_refresh: bool                     = False,
+    force_cloze_refresh:  bool                     = False,
+    should_cancel:        SyncCancelCheck | None   = None,
+    warnings:             list[SyncWarning] | None = None,
+) -> tuple[SyncStats, list[str], bool]:
+    """Use Markdown snapshots to recursively fetch only changed root toggles."""
+    get_page_markdown = getattr(client, "get_page_markdown", None)
+    if not callable(get_page_markdown):
+        return _sync_page_content_full(
+            db                  = db,
+            collection          = collection,
+            page_id             = page_id,
+            deck_id             = deck_id,
+            client              = client,
+            stats               = stats,
+            default_card_type   = default_card_type,
+            card_type_overrides = card_type_overrides,
+            enable_cloze        = enable_cloze,
+            should_cancel       = should_cancel,
+            warnings            = warnings,
+        )
+
+    snapshot = get_page_markdown(page_id)
+    if not isinstance(snapshot, NotionMarkdownSnapshot) or snapshot.truncated:
+        _LOG.info(
+            "Markdown snapshot unavailable for selective sync; using full tree. "
+            "page_id=%s truncated=%s",
+            page_id,
+            getattr(snapshot, "truncated", None),
+        )
+        return _sync_page_content_full(
+            db                  = db,
+            collection          = collection,
+            page_id             = page_id,
+            deck_id             = deck_id,
+            client              = client,
+            stats               = stats,
+            default_card_type   = default_card_type,
+            card_type_overrides = card_type_overrides,
+            enable_cloze        = enable_cloze,
+            should_cancel       = should_cancel,
+            warnings            = warnings,
+        )
+
+    shallow_blocks  = client.get_page_blocks_shallow(page_id)
+    shallow_toggles = [block for block in shallow_blocks if block.block_type == "toggle"]
+    toggle_sources  = extract_root_toggle_markdown(snapshot.markdown)
+    if toggle_sources is None or len(toggle_sources) != len(shallow_toggles):
+        _LOG.warning(
+            "Markdown/root-toggle alignment was ambiguous; using full tree. "
+            "page_id=%s markdown_toggles=%s notion_toggles=%d",
+            page_id,
+            None if toggle_sources is None else len(toggle_sources),
+            len(shallow_toggles),
+        )
+        return _sync_page_content_full(
+            db                  = db,
+            collection          = collection,
+            page_id             = page_id,
+            deck_id             = deck_id,
+            client              = client,
+            stats               = stats,
+            default_card_type   = default_card_type,
+            card_type_overrides = card_type_overrides,
+            enable_cloze        = enable_cloze,
+            should_cancel       = should_cancel,
+            warnings            = warnings,
+        )
+
+    return _sync_page_content_selective(
+        db                   = db,
+        collection           = collection,
+        page_id              = page_id,
+        deck_id              = deck_id,
+        client               = client,
+        stats                = stats,
+        default_card_type    = default_card_type,
+        card_type_overrides  = card_type_overrides,
+        enable_cloze         = enable_cloze,
+        force_toggle_refresh = force_toggle_refresh,
+        force_cloze_refresh  = force_cloze_refresh,
+        should_cancel        = should_cancel,
+        warnings             = warnings,
+        snapshot             = snapshot,
+        shallow_blocks       = shallow_blocks,
+        shallow_toggles      = shallow_toggles,
+        toggle_sources       = toggle_sources,
+    )
+
+
+def _sync_page_content_selective(
+    *,
+    db:                   Database,
+    collection:           Any,
+    page_id:              str,
+    deck_id:              int,
+    client:               NotionClient,
+    stats:                SyncStats,
+    default_card_type:    str,
+    card_type_overrides:  dict[str, str],
+    enable_cloze:         bool,
+    force_toggle_refresh: bool,
+    force_cloze_refresh:  bool,
+    should_cancel:        SyncCancelCheck | None,
+    warnings:             list[SyncWarning] | None,
+    snapshot:             NotionMarkdownSnapshot,
+    shallow_blocks:       list[NotionBlock],
+    shallow_toggles:      list[NotionBlock],
+    toggle_sources:       tuple[str, ...],
+) -> tuple[SyncStats, list[str], bool]:
+    """Synchronize one trusted Markdown/shallow-block snapshot."""
+    existing_cards       = _load_existing_cards_for_page(db, page_id)
+    stored_source_hashes = _load_toggle_source_hashes(db, page_id)
+    stored_page_hash     = _load_page_content_hash(db, page_id)
+    current_page_hash    = hash_notion_markdown(snapshot.markdown)
+    current_toggle_ids   = {toggle.block_id for toggle in shallow_toggles}
+    errors: list[str] = []
+    _LOG.info(
+        "Markdown page hash check. page_id=%s changed=%s stored=%s current=%s",
+        page_id,
+        stored_page_hash != current_page_hash,
+        stored_page_hash,
+        current_page_hash,
+    )
+
+    # Shallow block IDs are authoritative for root-toggle eligibility.
+    for block_id, mapping in existing_cards.items():
+        if mapping["excluded"]:
+            continue
+
+        normalized_type = normalize_card_type(mapping["card_type"], default=BASIC)
+        if normalized_type in DEFAULT_SELECTABLE_CARD_TYPES and block_id not in current_toggle_ids:
+            stats = _detach_mapping_with_warning(
+                db       = db,
+                stats    = stats,
+                warnings = warnings,
+                page_id  = page_id,
+                block_id = block_id,
+                code     = "source_no_longer_syncable",
+                message  = (
+                    "Mapped toggle is missing or no longer a top-level toggle; "
+                    "its Anki note was preserved."
+                ),
+            )
+    _delete_stale_toggle_source_hashes(db, page_id, current_toggle_ids)
+
+    # Iterate over the shallow toggles and their corresponding Markdown sources, skipping any that are unchanged.
+    for toggle, source_markdown in zip(shallow_toggles, toggle_sources):
+        if _is_sync_cancelled(should_cancel):
+            return stats, errors, True
+
+        block_id             = toggle.block_id
+        source_hash          = hash_notion_markdown(source_markdown)
+        previous_source_hash = stored_source_hashes.get(block_id)
+        mapping              = existing_cards.get(block_id)
+        stats                = _replace_stats(stats, cards_seen=stats.cards_seen + 1)
+
+        # Skip toggles that are explicitly excluded, but still record their source hash so we don't repeatedly re-parse them.
+        if mapping is not None and mapping["excluded"]:
+            _upsert_toggle_source_hash(db, page_id, block_id, source_hash)
+            stats = _replace_stats(stats, cards_skipped=stats.cards_skipped + 1)
+            continue
+
+        effective_card_type = _effective_card_type_for_block(
+            block_id,
+            default_card_type=default_card_type,
+            card_type_overrides=card_type_overrides,
+        )
+        needs_recursive_fetch = force_toggle_refresh or previous_source_hash != source_hash
+
+        # If the toggle is unchanged and has a valid mapping, we can skip the recursive fetch.
+        if mapping is None:
+            if not needs_recursive_fetch:
+                stats = _replace_stats(stats, cards_skipped=stats.cards_skipped + 1)
+                continue
+        
+        # Check if the existing mapping's card type or Anki note is no longer valid, which would require a recursive fetch.
+        else:
+            mapped_type = normalize_card_type(mapping["card_type"], default=BASIC)
+            if mapped_type != effective_card_type:
+                needs_recursive_fetch = True
+
+            note_id = mapping["anki_note_id"]
+            note = _get_note(collection, note_id) if note_id is not None else None
+            if (
+                note_id is None
+                or note is None
+                or _note_back_needs_mermaid_theme_upgrade(note)
+                or _note_back_contains_pending_media(note)
+            ):
+                needs_recursive_fetch = True
+
+        if not needs_recursive_fetch and mapping is not None:
+            note_id = mapping["anki_note_id"]
+            if note_id is not None:
+                _ensure_note_cards_in_deck(collection, note_id, deck_id)
+            stats = _replace_stats(stats, cards_unchanged=stats.cards_unchanged + 1)
+            continue
+
+        # recursively fetch the toggle's children and parse them into card payloads
+        children = client.get_block_children_recursive(block_id)
+        expanded_toggle = NotionBlock(
+            block_id=toggle.block_id,
+            block_type=toggle.block_type,
+            has_children=toggle.has_children,
+            parent_id=toggle.parent_id,
+            parent_type=toggle.parent_type,
+            raw=toggle.raw,
+            children=tuple(children),
+        )
+        parse_result = _parse_cards_with_warnings(
+            page_id=page_id,
+            blocks=[expanded_toggle],
+            default_card_type=default_card_type,
+            card_type_overrides=card_type_overrides,
+            enable_cloze=False,
+        )
+        stats = _record_parser_warnings(stats, warnings, page_id, parse_result.warnings)
+
+        if not parse_result.payloads:
+            if not _has_parse_failure(parse_result.warnings):
+                stats = _detach_mapping(db, stats, page_id, block_id)
+                _upsert_toggle_source_hash(db, page_id, block_id, source_hash)
+            continue
+
+        # Sync each payload from the toggle, recording any errors and stopping if cancelled.
+        toggle_errors: list[str] = []
+        for payload in parse_result.payloads:
+            stats, payload_errors, cancelled = _sync_one_payload(
+                db=db,
+                collection=collection,
+                page_id=page_id,
+                deck_id=deck_id,
+                payload=payload,
+                stats=stats,
+                should_cancel=should_cancel,
+                warnings=warnings,
+            )
+            toggle_errors.extend(payload_errors)
+            if cancelled:
+                return stats, errors + toggle_errors, True
+
+        errors.extend(toggle_errors)
+        if not toggle_errors:
+            _upsert_toggle_source_hash(db, page_id, block_id, source_hash)
+
+    stats, cloze_errors, cancelled = _sync_shallow_cloze_content(
+        db                  = db,
+        collection          = collection,
+        page_id             = page_id,
+        deck_id             = deck_id,
+        blocks              = shallow_blocks,
+        existing_cards      = existing_cards,
+        stats               = stats,
+        default_card_type   = default_card_type,
+        card_type_overrides = card_type_overrides,
+        enable_cloze        = enable_cloze,
+        force_cloze_refresh = force_cloze_refresh,
+        should_cancel       = should_cancel,
+        warnings            = warnings,
+    )
+    errors.extend(cloze_errors)
+    if cancelled:
+        return stats, errors, True
+
+    if not errors:
+        _set_page_content_hash(db, page_id, current_page_hash)
+    return stats, errors, False
+
+
+def _sync_shallow_cloze_content(
+    *,
+    db:                  Database,
+    collection:          Any,
+    page_id:             str,
+    deck_id:             int,
+    blocks:              list[NotionBlock],
+    existing_cards:      dict[str, dict[str, Any]],
+    stats:               SyncStats,
+    default_card_type:   str,
+    card_type_overrides: dict[str, str],
+    enable_cloze:        bool,
+    force_cloze_refresh: bool,
+    should_cancel:       SyncCancelCheck | None,
+    warnings:            list[SyncWarning] | None,
+) -> tuple[SyncStats, list[str], bool]:
+    """Parse top-level cloze paragraphs directly from the shallow page result."""
+    _ = force_cloze_refresh
+    if not enable_cloze:
+        return stats, [], False
+
+    candidate_ids: set[str] = set()
+    for block in blocks:
+        if block.block_type != "paragraph":
+            continue
+        mapping = existing_cards.get(block.block_id)
+        if mapping is not None and mapping["excluded"]:
+            stats = _replace_stats(stats, cards_skipped=stats.cards_skipped + 1)
+            continue
+        candidate_ids.add(block.block_id)
+
+    if candidate_ids:
+        parse_result = _parse_cards_with_warnings(
+            page_id=page_id,
+            blocks=blocks,
+            default_card_type=default_card_type,
+            card_type_overrides=card_type_overrides,
+            enable_cloze=True,
+            include_block_ids=candidate_ids,
+        )
+    else:
+        parse_result = CardParseResult(payloads=(), warnings=())
+    stats = _record_parser_warnings(stats, warnings, page_id, parse_result.warnings)
+    cloze_payloads = [payload for payload in parse_result.payloads if payload.card_type == CLOZE]
+
+    if not _has_parse_failure(parse_result.warnings):
+        current_cloze_ids = {payload.notion_block_id for payload in cloze_payloads}
+        for block_id, mapping in existing_cards.items():
+            if mapping["excluded"]:
+                continue
+            if normalize_card_type(mapping["card_type"], default=BASIC) != CLOZE:
+                continue
+            if block_id in current_cloze_ids:
+                continue
+            stats = _detach_mapping_with_warning(
+                db=db,
+                stats=stats,
+                warnings=warnings,
+                page_id=page_id,
+                block_id=block_id,
+                code="source_no_longer_syncable",
+                message=(
+                    "Mapped cloze source is missing or no longer contains usable "
+                    "cloze text; its Anki note was preserved."
+                ),
+            )
+
+    errors: list[str] = []
+    for payload in cloze_payloads:
+        if _is_sync_cancelled(should_cancel):
+            return stats, errors, True
+        stats = _replace_stats(stats, cards_seen=stats.cards_seen + 1)
+        stats, payload_errors, cancelled = _sync_one_payload(
+            db=db,
+            collection=collection,
+            page_id=page_id,
+            deck_id=deck_id,
+            payload=payload,
+            stats=stats,
+            should_cancel=should_cancel,
+            warnings=warnings,
+        )
+        errors.extend(payload_errors)
+        if cancelled:
+            return stats, errors, True
+    return stats, errors, False
+
+
+def _sync_page_content_full(
     db: Database,
     collection: Any,
     page_id: str,
@@ -1618,6 +1989,126 @@ def _load_existing_cards_for_page(db: Database, page_id: str) -> dict[str, dict[
         }
         for row in rows
     }
+
+
+def _load_toggle_source_hashes(db: Database, page_id: str) -> dict[str, str]:
+    """Return stored canonical Markdown hashes for one page's root toggles."""
+    connection = db.connect()
+    try:
+        rows = connection.execute(
+            """
+            SELECT notion_block_id, source_hash
+            FROM notion_toggle_snapshots
+            WHERE notion_page_id = ?
+            """,
+            (page_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+    return {
+        str(row["notion_block_id"]): str(row["source_hash"])
+        for row in rows
+    }
+
+
+def _load_page_content_hash(db: Database, page_id: str) -> str | None:
+    """Return the last successful canonical full-page Markdown hash."""
+    connection = db.connect()
+    try:
+        row = connection.execute(
+            "SELECT content_hash FROM pages WHERE notion_page_id = ?",
+            (page_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    if row is None or row["content_hash"] is None:
+        return None
+    value = str(row["content_hash"])
+    return value or None
+
+
+def _upsert_toggle_source_hash(
+    db: Database,
+    page_id: str,
+    block_id: str,
+    source_hash: str,
+) -> None:
+    """Persist one successfully handled root-toggle Markdown snapshot."""
+    connection = db.connect()
+    try:
+        connection.execute(
+            """
+            INSERT INTO notion_toggle_snapshots (
+                notion_block_id,
+                notion_page_id,
+                source_hash,
+                updated_at
+            )
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT(notion_block_id) DO UPDATE SET
+                notion_page_id = excluded.notion_page_id,
+                source_hash = excluded.source_hash,
+                updated_at = datetime('now')
+            """,
+            (block_id, page_id, source_hash),
+        )
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def _delete_stale_toggle_source_hashes(
+    db: Database,
+    page_id: str,
+    current_block_ids: set[str],
+) -> None:
+    """Remove snapshots for blocks no longer present as root toggles."""
+    connection = db.connect()
+    try:
+        if current_block_ids:
+            placeholders = ", ".join("?" for _block_id in current_block_ids)
+            connection.execute(
+                f"""
+                DELETE FROM notion_toggle_snapshots
+                WHERE notion_page_id = ?
+                  AND notion_block_id NOT IN ({placeholders})
+                """,
+                (page_id, *sorted(current_block_ids)),
+            )
+        else:
+            connection.execute(
+                "DELETE FROM notion_toggle_snapshots WHERE notion_page_id = ?",
+                (page_id,),
+            )
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def _set_page_content_hash(db: Database, page_id: str, content_hash: str) -> None:
+    """Persist the canonical full-page Markdown hash after successful sync."""
+    connection = db.connect()
+    try:
+        connection.execute(
+            """
+            UPDATE pages
+            SET content_hash = ?
+            WHERE notion_page_id = ?
+            """,
+            (content_hash, page_id),
+        )
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def _upsert_card_mapping(

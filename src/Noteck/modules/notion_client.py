@@ -85,6 +85,16 @@ class NotionBlock:
 
 
 @dataclass(frozen=True)
+class NotionMarkdownSnapshot:
+    """Complete enhanced-Markdown response for one Notion page or subtree."""
+
+    page_id: str
+    markdown: str
+    truncated: bool
+    unknown_block_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class _BlockFetchJob:
     """One page-tree queue item identifying a parent whose children are needed."""
 
@@ -252,9 +262,37 @@ class NotionClient:
         """Return the full block tree for a page."""
         return asyncio.run(self._fetch_page_tree(page_id))
 
+    def get_page_markdown(self, page_id: str) -> NotionMarkdownSnapshot:
+        """Return a page's complete enhanced Markdown representation."""
+        payload = asyncio.run(
+            self._request_json_with_rate_limit_retry(
+                "GET",
+                f"/pages/{page_id}/markdown",
+                None,
+                limiter=self._tree_rate_limiter,
+            )
+        )
+        unknown_block_ids = payload.get("unknown_block_ids")
+        if not isinstance(unknown_block_ids, list):
+            unknown_block_ids = []
+        
+        return NotionMarkdownSnapshot(
+            page_id=str(payload.get("id") or page_id),
+            markdown=str(payload.get("markdown") or ""),
+            truncated=bool(payload.get("truncated")),
+            unknown_block_ids=tuple(str(block_id) for block_id in unknown_block_ids),
+        )
+
     def get_page_last_edited_time(self, page_id: str) -> str | None:
         """Return page-level edit metadata for sync diagnostics and persistence."""
-        payload = self._request_json("GET", f"/pages/{page_id}", None)
+        payload = asyncio.run(
+            self._request_json_with_rate_limit_retry(
+                "GET",
+                f"/pages/{page_id}",
+                None,
+                limiter=self._tree_rate_limiter,
+            )
+        )
         last_edited_time = payload.get("last_edited_time")
         if isinstance(last_edited_time, str) and last_edited_time:
             return last_edited_time
@@ -262,10 +300,12 @@ class NotionClient:
 
     def get_page_blocks_shallow(self, page_id: str) -> list[NotionBlock]:
         """Return the page's direct child blocks without expanding nested children."""
-        blocks: list[NotionBlock] = []
-        for payload in self._fetch_block_children(page_id):
-            blocks.append(self._normalize_block(payload))
-        return blocks
+        return asyncio.run(
+            self._fetch_block_children_async(
+                page_id,
+                limiter=self._tree_rate_limiter,
+            )
+        )
 
     def get_block(self, block_id: str) -> NotionBlock:
         """Return a single Notion block without expanding its children."""

@@ -238,6 +238,31 @@ class NotionClientChildPageOrderTests(unittest.TestCase):
 class NotionClientPageTreeQueueTests(unittest.TestCase):
     """Verify complete trees use bounded concurrent workers and robust retries."""
 
+    def test_get_page_markdown_returns_complete_snapshot(self) -> None:
+        calls: list[str] = []
+
+        def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> NotionResponse:
+            _ = (method, headers, body, timeout)
+            calls.append(url)
+            return _json_response(
+                {
+                    "object": "page_markdown",
+                    "id": "page-1",
+                    "markdown": "<details>\n<summary>Question</summary>\n\tAnswer\n</details>",
+                    "truncated": False,
+                    "unknown_block_ids": ["unknown-1"],
+                }
+            )
+
+        with patch.object(notion_client_module, "NOTION_REQUESTS_PER_SECOND", 1_000_000.0):
+            snapshot = NotionClient(api_token="token", transport=transport).get_page_markdown("page-1")
+
+        self.assertEqual(snapshot.page_id, "page-1")
+        self.assertIn("<summary>Question</summary>", snapshot.markdown)
+        self.assertFalse(snapshot.truncated)
+        self.assertEqual(snapshot.unknown_block_ids, ("unknown-1",))
+        self.assertEqual(calls, ["https://api.notion.com/v1/pages/page-1/markdown"])
+
     def test_get_page_content_fetches_paginated_descendants_with_bounded_workers(self) -> None:
         calls: list[str] = []
         active_requests = 0
