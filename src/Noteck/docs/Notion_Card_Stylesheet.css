@@ -20,7 +20,8 @@ html {
 body {
 	line-height: 1.5;
 	margin: 0;
-	padding: 0;
+	/* Keep the card gutter inside the viewport so short cards do not overflow. */
+	padding: 1rem;
 	min-height: 100vh;
 }
 
@@ -195,9 +196,9 @@ th {
 
 .notion-card {
 	/* Keep the Notion surface on the card while Anki retains its canvas. */
-	width: calc(100% - 2rem);
+	width: 100%;
 	max-width: 760px;
-	margin: 1rem auto;
+	margin: 0 auto;
 	padding: 0 1.5rem;
 	border: 1px solid var(--notion-border);
 	border-radius: 12px;

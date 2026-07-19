@@ -17,6 +17,11 @@ from .modules.sync import trigger_startup_sync, trigger_sync_with_anki_button
 from .modules.cards import ensure_notion_toggle_model
 from .modules.settings import create_default_settings
 from .modules.notion_client import NotionClient
+from .modules.release_notes import (
+    ReleaseNotesError,
+    consume_startup_sync_suppression,
+    load_release_notes,
+)
 
 # This project is primarily an Anki add-on, but we also want the core modules to be
 # importable in plain Python test environments where `aqt` is not available.
@@ -55,6 +60,20 @@ def on_profile_did_open() -> None:
         if callable(initialize_ui):
             initialize_ui()
 
+        # Consume the one-time guard without changing the user's auto-sync setting,
+        # which keeps manual sync available and restores normal behavior next launch.
+        skip_startup_sync = False
+        try:
+            release_notes = load_release_notes()
+            skip_startup_sync = consume_startup_sync_suppression(
+                db,
+                latest_release=release_notes.latest.version,
+                database_existed=database_existed,
+            )
+        except ReleaseNotesError:
+            # A damaged optional changelog must not prevent startup or normal syncing.
+            pass
+
         if callable(show_release_notes_after_update):
             show_release_notes_after_update(
                 mw,
@@ -62,7 +81,8 @@ def on_profile_did_open() -> None:
                 database_existed=database_existed,
             )
 
-        trigger_startup_sync(mw=mw, db_path=db_path)
+        if not skip_startup_sync:
+            trigger_startup_sync(mw=mw, db_path=db_path)
         
     QTimer.singleShot(0, work)
 

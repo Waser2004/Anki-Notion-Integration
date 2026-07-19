@@ -102,6 +102,14 @@ class CardModelTests(unittest.TestCase):
                     self.assertIn('<div class="notion-card', template.front)
                     self.assertIn('<div class="notion-card', template.back)
 
+    def test_card_gutter_does_not_extend_the_viewport_height(self) -> None:
+        """The card gutter belongs to body's border box, not the card's outer margin."""
+        css_path = Path(__file__).resolve().parents[1] / "src" / "Noteck" / "docs" / "Notion_Card_Stylesheet.css"
+        css = css_path.read_text(encoding="utf-8")
+
+        self.assertRegex(css, r"body\s*\{[^}]*padding:\s*1rem;[^}]*min-height:\s*100vh;")
+        self.assertRegex(css, r"\.notion-card\s*\{[^}]*width:\s*100%;[^}]*margin:\s*0 auto;")
+
     def test_toggle_templates_use_the_managed_card_background_field(self) -> None:
         for definition in _MODEL_DEFINITIONS:
             if definition.name == MODEL_NAME_CLOZE:
