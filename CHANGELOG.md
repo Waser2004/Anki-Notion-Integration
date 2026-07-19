@@ -2,15 +2,17 @@
 
 ## 1.3.0 - 2026-07-14
 
-### Release notes
+> [!WARNING]
+> **Parser and card template changes**
+>
+> This update introduces a new parser and updated card versions; See below for further details. Because all cards need to be reparsed, the first sync may take longer than usual, and automatic sync is disabled the first time you open this version so you can run it manually when convenient.
 
-![Sample pink flower on a blue background](docs/release-notes-assets/1.3.0-sample-flower.jpeg)
+![Notion Anki colored blocks visualsation](docs/release-notes-assets/notion_anki_colored_blocks_visualisation.png)
 
-- Added a polished release-notes window that supports Markdown titles, sections, links, and optional bundled images.
-- Added a `Release Notes` button beside the close action on the Settings page.
-- Release notes now open once after an existing installation is updated, while fresh installations remain uninterrupted.
-- Added an in-window preference to hide or re-enable automatic release notes after updates.
-- Test deployments force the latest notes to appear once on the next Anki startup for straightforward manual verification.
+- Added support for Notion block colors in Anki cards, including foreground and background colors for paragraphs, headings, list items, quotes, callouts, and nested toggles.
+- Top-level toggle colors are now reflected on the complete card surface or card title, matching the color used in Notion.
+- After upgrading, open **Settings** → **Cards** and select **Update card templates** so the new colors are displayed on your Anki cards.
+- Improved syncing for faster, more reliable updates.
 
 ## 1.2.0 - 2026-07-04
 
