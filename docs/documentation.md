@@ -170,7 +170,10 @@ Images are launched manually into Image Occlusion workflow; they are not automat
 
 - Sync processes only selected pages.
 - Existing note mappings are reused where possible.
-- If source content is unchanged, unnecessary updates are skipped.
+- Every run reads the selected pages' root blocks and recursively reads toggle
+  contents, so descendant edits are detected even when an ancestor's Notion
+  `last_edited_time` has not changed.
+- Content hashes prevent unnecessary Anki writes when parsed card content is unchanged.
 - If a mapped card changes card type, the mapped note is converted to the new type on sync.
 - Excluded cards remain excluded.
 

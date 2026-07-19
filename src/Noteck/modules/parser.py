@@ -29,6 +29,7 @@ _NUMBER_RE = re.compile(r"(?:0[xX][0-9A-Fa-f]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)")
 _OPERATOR_CHARS = frozenset("+-*/%=!<>|&^~?:")
 _PUNCTUATION_CHARS = frozenset("()[]{}.,;")
 _CLOZE_EXTRA_PREFIX_RE = re.compile(r"^\s*extra\s*:\s*", re.IGNORECASE)
+_MEANINGFUL_NON_TEXT_HTML_RE = re.compile(r"<img\b", re.IGNORECASE)
 
 # Notion exposes the same fixed palette for every color-capable block type.
 _NOTION_BLOCK_FOREGROUND_COLORS = frozenset(
@@ -225,6 +226,21 @@ class ToggleCardPayload:
 
 
 @dataclass(frozen=True)
+class CardParseWarning:
+    """Describe one Notion block that could not produce a usable card."""
+    code: str
+    message: str
+    notion_block_id: str
+
+
+@dataclass(frozen=True)
+class CardParseResult:
+    """Return parsed payloads and recoverable block diagnostics together."""
+    payloads: tuple[ToggleCardPayload, ...]
+    warnings: tuple[CardParseWarning, ...]
+
+
+@dataclass(frozen=True)
 class ImageOcclusionCandidate:
     """Represents one image candidate for Image Occlusion workflow."""
 
@@ -271,10 +287,11 @@ def parse_page_to_cards(
     page_id: str,
     blocks: Iterable[NotionBlock],
     *,
-    default_card_type: str = BASIC,
+    default_card_type:   str                      = BASIC,
     card_type_overrides: Mapping[str, str] | None = None,
-    enable_cloze: bool = False,
-    include_block_ids: Collection[str] | None = None,
+    enable_cloze:        bool                     = False,
+    include_block_ids:   Collection[str] | None   = None,
+    warnings:            list[CardParseWarning]   = [],
 ) -> list[ToggleCardPayload]:
     """Parse page blocks into typed card payloads."""
     resolved_default_card_type = normalize_default_selectable_card_type(default_card_type)
@@ -295,9 +312,38 @@ def parse_page_to_cards(
             }
         resolved_card_type = normalized_overrides.get(block.block_id, resolved_default_card_type)
 
-        # parse front and bacvk html
-        front_html = _render_toggle_front(block)
-        back_html = render_blocks(block.children)
+        try:
+            # Render each card independently so malformed content does not stop the page.
+            front_html = _render_toggle_front(block)
+            back_html = render_blocks(block.children)
+        except Exception as exc:
+            warnings.append(
+                CardParseWarning(
+                    code="card_parse_failed",
+                    message=f"Toggle could not be rendered: {exc}",
+                    notion_block_id=block.block_id,
+                )
+            )
+            continue
+
+        if not _rich_text_to_plain(_block_rich_text(block)).strip():
+            warnings.append(
+                CardParseWarning(
+                    code="empty_toggle_title",
+                    message="Toggle has no usable title and was skipped.",
+                    notion_block_id=block.block_id,
+                )
+            )
+            continue
+        if not _has_usable_card_content(back_html):
+            warnings.append(
+                CardParseWarning(
+                    code="empty_toggle_content",
+                    message="Toggle has no usable card contents and was skipped.",
+                    notion_block_id=block.block_id,
+                )
+            )
+            continue
 
         # create card fields and content hash for change detection
         fields = _build_toggle_fields(
@@ -339,6 +385,7 @@ def parse_page_to_cards(
                 page_id,
                 top_level_blocks,
                 include_block_ids=normalized_include_block_ids,
+                warnings=warnings,
             )
         )
 
@@ -864,7 +911,8 @@ def _parse_top_level_cloze_paragraphs(
     page_id: str,
     blocks: list[NotionBlock],
     *,
-    include_block_ids: set[str] | None = None,
+    include_block_ids: set[str] | None        = None,
+    warnings:          list[CardParseWarning] = [],
 ) -> list[ToggleCardPayload]:
     """Parse top-level paragraphs containing cloze markers into cloze payloads."""
     payloads: list[ToggleCardPayload] = []
@@ -877,46 +925,75 @@ def _parse_top_level_cloze_paragraphs(
             continue
         if include_block_ids is not None and block.block_id not in include_block_ids:
             continue
-        rich_text = _block_rich_text(block)
-        if not _paragraph_has_cloze_marker(rich_text):
-            continue
+        try:
+            rich_text = _block_rich_text(block)
+            if not _paragraph_has_cloze_marker(rich_text):
+                continue
 
-        cloze_text = _rich_text_to_cloze_text(rich_text)
-        if not cloze_text.strip():
-            continue
+            cloze_text = _rich_text_to_cloze_text(rich_text)
+            if not cloze_text.strip():
+                warnings.append(
+                    CardParseWarning(
+                        code="empty_cloze_content",
+                        message="Cloze paragraph produced no usable card text and was skipped.",
+                        notion_block_id=block.block_id,
+                    )
+                )
+                continue
 
-        extra_html = ""
-        next_index = index + 1
-        if next_index < len(blocks):
-            next_block = blocks[next_index]
-            # Keep cloze-extra deterministic: consume exactly one adjacent `Extra:` paragraph.
-            if _is_cloze_extra_paragraph(next_block):
-                extra_html = _render_extra_paragraph_without_prefix(next_block)
-                consumed_indices.add(next_index)
-        model_name = _model_name_for_card_type(CLOZE)
-        fields = {
-            "Text": cloze_text,
-            "Extra": extra_html,
-            "Notion Block ID": block.block_id,
-        }
-        payloads.append(
-            ToggleCardPayload(
-                notion_page_id=page_id,
-                notion_block_id=block.block_id,
-                card_type=CLOZE,
-                model_name=model_name,
-                fields=fields,
-                content_hash=_compute_payload_content_hash(
-                    page_id=page_id,
-                    block_id=block.block_id,
+            extra_html = ""
+            next_index = index + 1
+            if next_index < len(blocks):
+                next_block = blocks[next_index]
+                # Keep cloze-extra deterministic: consume exactly one adjacent `Extra:` paragraph.
+                if _is_cloze_extra_paragraph(next_block):
+                    extra_html = _render_extra_paragraph_without_prefix(next_block)
+                    consumed_indices.add(next_index)
+            model_name = _model_name_for_card_type(CLOZE)
+            fields = {
+                "Text": cloze_text,
+                "Extra": extra_html,
+                "Notion Block ID": block.block_id,
+            }
+            payloads.append(
+                ToggleCardPayload(
+                    notion_page_id=page_id,
+                    notion_block_id=block.block_id,
                     card_type=CLOZE,
                     model_name=model_name,
                     fields=fields,
-                ),
-                last_edited_time=_as_optional_string(block.raw.get("last_edited_time")),
+                    content_hash=_compute_payload_content_hash(
+                        page_id=page_id,
+                        block_id=block.block_id,
+                        card_type=CLOZE,
+                        model_name=model_name,
+                        fields=fields,
+                    ),
+                    last_edited_time=_as_optional_string(block.raw.get("last_edited_time")),
+                )
             )
-        )
+        except Exception as exc:
+            warnings.append(
+                CardParseWarning(
+                    code="card_parse_failed",
+                    message=f"Cloze paragraph could not be rendered: {exc}",
+                    notion_block_id=block.block_id,
+                )
+            )
     return payloads
+
+def _has_usable_card_content(rendered_html: str) -> bool:
+    """Return whether rendered toggle contents are not empty."""
+    if not rendered_html:
+        return False
+
+    plain_text = re.sub(r"<[^>]+>", "", rendered_html)
+    if html.unescape(plain_text).replace("\u00a0", " ").strip():
+        return True
+
+    # Images are the only supported renderer output that can be meaningful
+    # without contributing text. Structural markup such as <p></p> is empty.
+    return _MEANINGFUL_NON_TEXT_HTML_RE.search(rendered_html) is not None
 
 
 def _is_cloze_extra_paragraph(block: NotionBlock) -> bool:

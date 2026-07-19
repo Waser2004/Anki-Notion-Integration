@@ -12,7 +12,12 @@ from unittest.mock import Mock, patch
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from Noteck.modules.db import Database
-from Noteck.modules.notion_client import NotionBlock
+from Noteck.modules.notion_client import (
+    NotionBlock,
+    NotionMarkdownSnapshot,
+    NotionPageFetchResult,
+    NotionPageSyncData,
+)
 from Noteck.modules.parser import ToggleCardPayload
 from Noteck.modules.sync import (
     SyncResult,
@@ -317,6 +322,246 @@ class _FakeNotionClientWithParagraphs(_FakeNotionClient):
         )
 
 
+class _MutableToggleClient(_FakeNotionClient):
+    """Return mutable toggle content while keeping all Notion timestamps fixed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.title = "Original title"
+        self.body = "Original body"
+
+    def _toggle_block(self, parent_id: str) -> NotionBlock:
+        block = super()._toggle_block(parent_id)
+        raw = dict(block.raw)
+        raw["toggle"] = {
+            "rich_text": [
+                {
+                    "type": "text",
+                    "plain_text": self.title,
+                    "text": {"content": self.title},
+                }
+            ]
+        }
+        return NotionBlock(
+            block_id=block.block_id,
+            block_type=block.block_type,
+            has_children=block.has_children,
+            parent_id=block.parent_id,
+            parent_type=block.parent_type,
+            raw=raw,
+            children=(),
+        )
+
+    def get_block_children_recursive(self, block_id: str) -> list[NotionBlock]:
+        raw = {
+            "object": "block",
+            "id": "body-1",
+            "type": "paragraph",
+            "has_children": False,
+            "last_edited_time": self._toggle_last_edited_time,
+            "parent": {"type": "block_id", "block_id": block_id},
+            "paragraph": {
+                "rich_text": [
+                    {
+                        "type": "text",
+                        "plain_text": self.body,
+                        "text": {"content": self.body},
+                        "annotations": {
+                            "bold": False,
+                            "italic": False,
+                            "strikethrough": False,
+                            "underline": False,
+                            "code": False,
+                            "color": "default",
+                        },
+                    }
+                ]
+            },
+        }
+        return [
+            NotionBlock(
+                block_id="body-1",
+                block_type="paragraph",
+                has_children=False,
+                parent_id=block_id,
+                parent_type="block_id",
+                raw=raw,
+                children=(),
+            )
+        ]
+
+    def get_page_content(self, page_id: str) -> list[NotionBlock]:
+        """Return the fully expanded tree produced by the real client."""
+        toggle = self._toggle_block(parent_id=page_id)
+        return [
+            NotionBlock(
+                block_id=toggle.block_id,
+                block_type=toggle.block_type,
+                has_children=toggle.has_children,
+                parent_id=toggle.parent_id,
+                parent_type=toggle.parent_type,
+                raw=toggle.raw,
+                children=tuple(self.get_block_children_recursive(toggle.block_id)),
+            )
+        ]
+
+
+class _SelectiveMarkdownClient(_FakeNotionClient):
+    """Expose Markdown, shallow roots, and tracked recursive toggle retrieval."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.body_by_id = {
+            "block-1": "First answer",
+            "block-2": "Second answer",
+        }
+        self.recursive_calls: list[str] = []
+        self.full_page_fetches = 0
+
+    def get_page_markdown(self, page_id: str) -> NotionMarkdownSnapshot:
+        return NotionMarkdownSnapshot(
+            page_id=page_id,
+            markdown=(
+                "<details>\n"
+                "<summary>First question</summary>\n"
+                f"\t{self.body_by_id['block-1']}\n"
+                "</details>\n"
+                "<details>\n"
+                "<summary>Second question</summary>\n"
+                f"\t{self.body_by_id['block-2']}\n"
+                "</details>"
+            ),
+            truncated=False,
+            unknown_block_ids=(),
+        )
+
+    def get_page_blocks_shallow(self, page_id: str) -> list[NotionBlock]:
+        return [
+            self._named_toggle("block-1", "First question", page_id),
+            self._named_toggle("block-2", "Second question", page_id),
+        ]
+
+    def get_block_children_recursive(self, block_id: str) -> list[NotionBlock]:
+        self.recursive_calls.append(block_id)
+        body = self.body_by_id[block_id]
+        raw = {
+            "object": "block",
+            "id": f"{block_id}-body",
+            "type": "paragraph",
+            "has_children": False,
+            "parent": {"type": "block_id", "block_id": block_id},
+            "paragraph": {
+                "rich_text": [
+                    {
+                        "type": "text",
+                        "plain_text": body,
+                        "text": {"content": body},
+                    }
+                ]
+            },
+        }
+        return [
+            NotionBlock(
+                block_id=f"{block_id}-body",
+                block_type="paragraph",
+                has_children=False,
+                parent_id=block_id,
+                parent_type="block_id",
+                raw=raw,
+                children=(),
+            )
+        ]
+
+    def get_page_content(self, page_id: str) -> list[NotionBlock]:
+        self.full_page_fetches += 1
+        blocks: list[NotionBlock] = []
+        for toggle in self.get_page_blocks_shallow(page_id):
+            blocks.append(
+                NotionBlock(
+                    block_id=toggle.block_id,
+                    block_type=toggle.block_type,
+                    has_children=toggle.has_children,
+                    parent_id=toggle.parent_id,
+                    parent_type=toggle.parent_type,
+                    raw=toggle.raw,
+                    children=tuple(self.get_block_children_recursive(toggle.block_id)),
+                )
+            )
+        return blocks
+
+    def _named_toggle(self, block_id: str, title: str, page_id: str) -> NotionBlock:
+        """Build one shallow root toggle with stable identity and current title."""
+        raw = {
+            "object": "block",
+            "id": block_id,
+            "type": "toggle",
+            "has_children": True,
+            "parent": {"type": "page_id", "page_id": page_id},
+            "toggle": {
+                "rich_text": [
+                    {
+                        "type": "text",
+                        "plain_text": title,
+                        "text": {"content": title},
+                    }
+                ]
+            },
+        }
+        return NotionBlock(
+            block_id=block_id,
+            block_type="toggle",
+            has_children=True,
+            parent_id=page_id,
+            parent_type="page_id",
+            raw=raw,
+            children=(),
+        )
+
+
+class _QueuedPageClient(_FakeNotionClient):
+    """Return page inputs in one batch and reject sequential source retrieval."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.requested_page_ids: tuple[str, ...] = ()
+
+    def get_pages_sync_data(
+        self,
+        page_ids: object,
+        *,
+        progress_callback: object = None,
+    ) -> dict[str, NotionPageFetchResult]:
+        self.requested_page_ids = tuple(str(page_id) for page_id in page_ids)
+        results: dict[str, NotionPageFetchResult] = {}
+        for completed, page_id in enumerate(self.requested_page_ids, start=1):
+            results[page_id] = NotionPageFetchResult(
+                page_id=page_id,
+                data=NotionPageSyncData(
+                    page_id=page_id,
+                    last_edited_time="2026-07-19T00:00:00.000Z",
+                    markdown_snapshot=NotionMarkdownSnapshot(
+                        page_id=page_id,
+                        markdown="",
+                        truncated=False,
+                        unknown_block_ids=(),
+                    ),
+                    shallow_blocks=(),
+                ),
+            )
+            if callable(progress_callback):
+                progress_callback(completed, len(self.requested_page_ids))
+        return results
+
+    def get_page_last_edited_time(self, page_id: str) -> str:
+        raise AssertionError(f"Sequential metadata fetch used for {page_id}")
+
+    def get_page_markdown(self, page_id: str) -> NotionMarkdownSnapshot:
+        raise AssertionError(f"Sequential Markdown fetch used for {page_id}")
+
+    def get_page_blocks_shallow(self, page_id: str) -> list[NotionBlock]:
+        raise AssertionError(f"Sequential shallow fetch used for {page_id}")
+
+
 class SyncTests(unittest.TestCase):
     """Validate create/update/no-op sync behavior with mocked dependencies."""
 
@@ -386,6 +631,31 @@ class SyncTests(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(str(row["notion_block_id"]), "block-1")
         self.assertGreater(int(row["anki_note_id"]), 0)
+
+    def test_sync_reset_failure_returns_structured_warning(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        mw.reset = Mock(side_effect=RuntimeError("reset failed"))
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[self._payload()],
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(
+            [warning.code for warning in result.warnings],
+            ["anki_ui_refresh_failed"],
+        )
+        self.assertIn("reset failed", result.warnings[0].message)
+        self.assertIsNone(result.warnings[0].page_id)
+        self.assertIsNone(result.warnings[0].block_id)
 
     def test_sync_persists_payload_card_type_to_mapping(self) -> None:
         collection = _FakeCollection()
@@ -501,7 +771,7 @@ class SyncTests(unittest.TestCase):
         include_block_ids = parse_mock.call_args.kwargs.get("include_block_ids")
         self.assertEqual(set(include_block_ids), {"cloze-included"})
 
-    def test_sync_unchanged_page_repair_parses_only_non_excluded_target_blocks(self) -> None:
+    def test_sync_matching_page_timestamp_parses_non_excluded_toggle(self) -> None:
         collection = _FakeCollection()
         mw = _FakeMw(collection)
         existing_note = collection.new_note({"name": "Notion Toggle"})
@@ -525,8 +795,8 @@ class SyncTests(unittest.TestCase):
                 VALUES (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    "block-1", "page-1", existing_note.id, "basic", "hash-1", 1,
-                    "block-2", "page-1", None, "basic", "hash-2", 0,
+                    "block-excluded", "page-1", existing_note.id, "basic", "hash-1", 1,
+                    "block-1", "page-1", None, "basic", "hash-2", 0,
                 ),
             )
             connection.commit()
@@ -535,7 +805,7 @@ class SyncTests(unittest.TestCase):
 
         payload = ToggleCardPayload(
             notion_page_id="page-1",
-            notion_block_id="block-2",
+            notion_block_id="block-1",
             front_html="<p>front</p>",
             back_html="<p>back</p>",
             content_hash="hash-2-new",
@@ -558,19 +828,261 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(result.stats.cards_created, 1)
         self.assertEqual(result.stats.cards_seen, 1)
         parse_mock.assert_called_once()
-        include_block_ids = parse_mock.call_args.kwargs.get("include_block_ids")
-        self.assertEqual(set(include_block_ids), {"block-2"})
+        self.assertIsNone(parse_mock.call_args.kwargs.get("include_block_ids"))
 
         connection = self._db.connect()
         try:
             row = connection.execute(
                 "SELECT anki_note_id FROM cards WHERE notion_block_id = ?",
-                ("block-2",),
+                ("block-1",),
             ).fetchone()
         finally:
             connection.close()
         self.assertIsNotNone(row)
         self.assertIsNotNone(row["anki_note_id"])
+
+    def test_sync_stale_mapping_is_warning_and_detaches_without_deleting_note(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        existing_note = collection.new_note({"name": "Notion Toggle"})
+        collection.add_note(existing_note, deck_id=1)
+        self._db.set_setting(_SYNC_MODULE._TOGGLE_REFRESH_REVISION_SETTING_KEY, "legacy")
+
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                "UPDATE pages SET last_seen_notion_edit_time = ? WHERE notion_page_id = ?",
+                ("2026-02-04T00:00:00.000Z", "page-1"),
+            )
+            connection.execute(
+                """
+                INSERT INTO cards (
+                    notion_block_id, notion_page_id, anki_note_id, card_type,
+                    content_hash, last_seen_notion_edit_time
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "missing-block", "page-1", existing_note.id, "basic",
+                    "legacy-hash", "2026-02-04T00:00:00.000Z",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO card_type_overrides (notion_block_id, notion_page_id, card_type)
+                VALUES (?, ?, ?)
+                """,
+                ("missing-block", "page-1", "input"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        client = Mock()
+        client.get_page_last_edited_time.return_value = "2026-02-04T00:00:00.000Z"
+        client.get_page_content.return_value = []
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertFalse(result.cancelled)
+        self.assertEqual(result.errors, ())
+        self.assertEqual([warning.code for warning in result.warnings], ["source_no_longer_syncable"])
+        self.assertEqual(result.stats.cards_detached, 1)
+        self.assertEqual(result.stats.cards_warned, 1)
+        self.assertIn(existing_note.id, collection.notes)
+        self.assertEqual(
+            self._db.get_setting(_SYNC_MODULE._TOGGLE_REFRESH_REVISION_SETTING_KEY),
+            _SYNC_MODULE._TOGGLE_REFRESH_REVISION,
+        )
+
+    def test_markdown_snapshots_fetch_only_new_or_changed_toggles(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        client = _SelectiveMarkdownClient()
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ):
+            first = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            second = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            client.body_by_id["block-2"] = "Changed second answer"
+            third = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(first.ok)
+        self.assertEqual(first.stats.cards_created, 2)
+        self.assertTrue(second.ok)
+        self.assertEqual(second.stats.cards_unchanged, 2)
+        self.assertTrue(third.ok)
+        self.assertEqual(third.stats.cards_updated, 1)
+        self.assertEqual(third.stats.cards_unchanged, 1)
+        self.assertEqual(
+            client.recursive_calls,
+            ["block-1", "block-2", "block-2"],
+        )
+        self.assertEqual(client.full_page_fetches, 0)
+
+        connection = self._db.connect()
+        try:
+            page_row = connection.execute(
+                "SELECT content_hash FROM pages WHERE notion_page_id = ?",
+                ("page-1",),
+            ).fetchone()
+            snapshot_rows = connection.execute(
+                """
+                SELECT notion_block_id, source_hash
+                FROM notion_toggle_snapshots
+                WHERE notion_page_id = ?
+                ORDER BY notion_block_id
+                """,
+                ("page-1",),
+            ).fetchall()
+        finally:
+            connection.close()
+        self.assertIsNotNone(page_row)
+        self.assertTrue(str(page_row["content_hash"]))
+        self.assertEqual(
+            [str(row["notion_block_id"]) for row in snapshot_rows],
+            ["block-1", "block-2"],
+        )
+
+    def test_ambiguous_markdown_alignment_falls_back_to_full_page_tree(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        client = _SelectiveMarkdownClient()
+        client.get_page_markdown = Mock(
+            return_value=NotionMarkdownSnapshot(
+                page_id="page-1",
+                markdown="<details>\n<summary>Only one</summary>\n\tAnswer\n</details>",
+                truncated=False,
+                unknown_block_ids=(),
+            )
+        )
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_created, 2)
+        self.assertEqual(client.full_page_fetches, 1)
+        connection = self._db.connect()
+        try:
+            card_row = connection.execute(
+                "SELECT notion_block_id FROM cards WHERE notion_block_id = ?",
+                ("missing-block",),
+            ).fetchone()
+            override_row = connection.execute(
+                "SELECT notion_block_id FROM card_type_overrides WHERE notion_block_id = ?",
+                ("missing-block",),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNone(card_row)
+        self.assertIsNone(override_row)
+
+    def test_sync_empty_toggle_is_warning_and_detaches_existing_mapping(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        existing_note = collection.new_note({"name": "Notion Toggle"})
+        collection.add_note(existing_note, deck_id=1)
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                INSERT INTO cards (
+                    notion_block_id, notion_page_id, anki_note_id, card_type,
+                    content_hash, last_seen_notion_edit_time
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("block-1", "page-1", existing_note.id, "basic", "old-hash", "old-time"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual([warning.code for warning in result.warnings], ["empty_toggle_content"])
+        self.assertEqual(result.stats.cards_detached, 1)
+        self.assertIn(existing_note.id, collection.notes)
+        connection = self._db.connect()
+        try:
+            row = connection.execute(
+                "SELECT notion_block_id FROM cards WHERE notion_block_id = ?",
+                ("block-1",),
+            ).fetchone()
+            page_row = connection.execute(
+                "SELECT last_seen_notion_edit_time FROM pages WHERE notion_page_id = ?",
+                ("page-1",),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNone(row)
+        self.assertEqual(str(page_row["last_seen_notion_edit_time"]), "2026-02-04T00:00:00.000Z")
+
+    def test_sync_parser_exception_is_warning_and_preserves_mapping(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        existing_note = collection.new_note({"name": "Notion Toggle"})
+        collection.add_note(existing_note, deck_id=1)
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                INSERT INTO cards (
+                    notion_block_id, notion_page_id, anki_note_id, card_type,
+                    content_hash, last_seen_notion_edit_time
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("block-1", "page-1", existing_note.id, "basic", "old-hash", "old-time"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            side_effect=ValueError("bad card content"),
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual([warning.code for warning in result.warnings], ["card_parse_failed"])
+        self.assertEqual(result.stats.cards_detached, 0)
+        self.assertIn(existing_note.id, collection.notes)
+        connection = self._db.connect()
+        try:
+            row = connection.execute(
+                "SELECT anki_note_id FROM cards WHERE notion_block_id = ?",
+                ("block-1",),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(int(row["anki_note_id"]), existing_note.id)
 
     def test_sync_auto_converts_existing_note_when_card_type_changes(self) -> None:
         collection = _FakeCollection()
@@ -1289,6 +1801,8 @@ class SyncTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.stats.cards_missing_note, 1)
         self.assertEqual(result.stats.cards_created, 1)
+        self.assertEqual(result.stats.cards_warned, 1)
+        self.assertEqual([warning.code for warning in result.warnings], ["missing_anki_note"])
         connection = self._db.connect()
         try:
             row = connection.execute(
@@ -1298,6 +1812,148 @@ class SyncTests(unittest.TestCase):
             connection.close()
         self.assertIsNotNone(row)
         self.assertNotEqual(int(row["anki_note_id"]), 123456)
+
+    def test_sync_preserves_cloze_mapping_when_cloze_parsing_is_disabled(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        self._db.set_setting("enable_cloze_parsing", "0")
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                "UPDATE pages SET last_seen_notion_edit_time = ? WHERE notion_page_id = ?",
+                ("2026-02-04T00:00:00.000Z", "page-1"),
+            )
+            connection.execute(
+                """
+                INSERT INTO cards (
+                    notion_block_id, notion_page_id, anki_note_id, card_type, content_hash
+                )
+                VALUES (?, ?, NULL, ?, ?)
+                """,
+                ("cloze-paused", "page-1", "cloze", "hash"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        client = Mock()
+        client.get_page_last_edited_time.return_value = "2026-02-04T00:00:00.000Z"
+        client.get_page_content.return_value = []
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.warnings, ())
+        connection = self._db.connect()
+        try:
+            row = connection.execute(
+                "SELECT notion_block_id FROM cards WHERE notion_block_id = ?",
+                ("cloze-paused",),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNotNone(row)
+
+    def test_sync_fetch_failure_is_error_and_later_pages_continue(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                INSERT INTO pages (notion_page_id, anki_deck_name, sync_enabled)
+                VALUES (?, ?, 1)
+                """,
+                ("page-2", "Notion::Page 2"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        client = Mock()
+
+        def page_edit_time(page_id: str) -> str:
+            if page_id == "page-1":
+                raise RuntimeError("Notion unavailable")
+            return "2026-02-05T00:00:00.000Z"
+
+        client.get_page_last_edited_time.side_effect = page_edit_time
+        client.get_page_content.return_value = []
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertFalse(result.ok)
+        self.assertFalse(result.cancelled)
+        self.assertEqual(len(result.errors), 1)
+        self.assertIn("Notion unavailable", result.errors[0])
+        self.assertEqual(result.warnings, ())
+        self.assertEqual(result.stats.pages_scanned, 2)
+        connection = self._db.connect()
+        try:
+            failed_page = connection.execute(
+                "SELECT last_seen_notion_edit_time FROM pages WHERE notion_page_id = ?",
+                ("page-1",),
+            ).fetchone()
+            successful_page = connection.execute(
+                "SELECT last_seen_notion_edit_time FROM pages WHERE notion_page_id = ?",
+                ("page-2",),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNone(failed_page["last_seen_notion_edit_time"])
+        self.assertEqual(str(successful_page["last_seen_notion_edit_time"]), "2026-02-05T00:00:00.000Z")
+
+    def test_sync_uses_queued_page_inputs_for_all_enabled_pages(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                INSERT INTO pages (notion_page_id, anki_deck_name, sync_enabled)
+                VALUES (?, ?, 1)
+                """,
+                ("page-2", "Notion::Page 2"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        client = _QueuedPageClient()
+        progress_labels: list[str] = []
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ):
+            result = sync_notion_to_anki(
+                mw=mw,
+                db_path=self._db_path,
+                progress_callback=progress_labels.append,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(client.requested_page_ids, ("page-1", "page-2"))
+        self.assertEqual(result.stats.pages_scanned, 2)
+        self.assertEqual(
+            progress_labels,
+            [
+                "Fetching page data: 0/2 pages fetched.",
+                "Fetching page data: 1/2 pages fetched.",
+                "Fetching page data: 2/2 pages fetched.",
+                "Parsing page data: 0/2 pages parsed.",
+                "Parsing page data: 1/2 pages parsed.",
+                "Parsing page data: 2/2 pages parsed.",
+            ],
+        )
 
     def test_sync_returns_cancelled_when_user_requests_abort(self) -> None:
         collection = _FakeCollection()
@@ -1317,15 +1973,16 @@ class SyncTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.message, "Sync canceled.")
         self.assertEqual(result.stats.pages_scanned, 0)
-        self.assertIn("Canceled by user.", result.errors)
+        self.assertTrue(result.cancelled)
+        self.assertEqual(result.errors, ())
 
-    def test_sync_skips_unchanged_page_without_fetching_blocks_or_parsing(self) -> None:
+    def test_sync_matching_page_timestamp_still_parses_and_uses_content_hash(self) -> None:
         collection = _FakeCollection()
         mw = _FakeMw(collection)
         existing_note = collection.new_note({"name": "Notion Toggle"})
         collection.add_note(existing_note, deck_id=1)
 
-        # Record that we've already seen this page edit time so the fast path treats it as unchanged.
+        # Matching ancestor timestamps must not prevent content inspection.
         connection = self._db.connect()
         try:
             connection.execute(
@@ -1359,11 +2016,17 @@ class SyncTests(unittest.TestCase):
             _SYNC_MODULE.NotionClient,
             "from_settings",
             return_value=fake_client,
-        ), patch.object(_SYNC_MODULE, "parse_page_to_cards") as parse_mock:
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[self._payload(content_hash="hash-1")],
+        ) as parse_mock:
             result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
 
         self.assertTrue(result.ok)
-        parse_mock.assert_not_called()
+        parse_mock.assert_called_once()
+        self.assertEqual(result.stats.cards_unchanged, 1)
+        self.assertEqual(result.stats.cards_updated, 0)
 
         # last_synced_at should remain NULL because nothing was written to Anki.
         connection = self._db.connect()
@@ -1376,6 +2039,45 @@ class SyncTests(unittest.TestCase):
             connection.close()
         self.assertIsNotNone(row)
         self.assertIsNone(row["last_synced_at"])
+
+    def test_sync_detects_toggle_and_descendant_edits_with_unchanged_timestamps(self) -> None:
+        """Ancestor timestamps must not hide edits to a toggle title or body."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        client = _MutableToggleClient()
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ):
+            first_result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            self.assertTrue(first_result.ok)
+            self.assertEqual(first_result.stats.cards_created, 1)
+
+            client.body = "Updated body"
+            body_result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            self.assertTrue(body_result.ok)
+            self.assertEqual(body_result.stats.cards_updated, 1)
+
+            client.title = "Updated title"
+            title_result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            self.assertTrue(title_result.ok)
+            self.assertEqual(title_result.stats.cards_updated, 1)
+
+        connection = self._db.connect()
+        try:
+            row = connection.execute(
+                "SELECT anki_note_id FROM cards WHERE notion_block_id = ?",
+                ("block-1",),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNotNone(row)
+        note = collection.get_note(int(row["anki_note_id"]))
+        self.assertIsNotNone(note)
+        self.assertIn("Updated title", note["Front"])
+        self.assertIn("Updated body", note["Back"])
 
     def test_sync_unchanged_page_refreshes_toggle_once_after_parser_upgrade(self) -> None:
         """Unchanged Notion timestamps must not prevent the block-color field migration."""
@@ -1443,8 +2145,8 @@ class SyncTests(unittest.TestCase):
             _SYNC_MODULE._TOGGLE_REFRESH_REVISION,
         )
         self.assertEqual(
-            list(parse_mock.call_args.kwargs.get("include_block_ids")),
-            ["block-1"],
+            parse_mock.call_args.kwargs.get("include_block_ids"),
+            None,
         )
 
     def test_sync_changed_page_does_not_fast_skip_toggle_during_parser_refresh(self) -> None:
@@ -1577,7 +2279,7 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(result.stats.cards_updated, 1)
         parse_mock.assert_called_once()
         include_block_ids = parse_mock.call_args.kwargs.get("include_block_ids")
-        self.assertEqual(list(include_block_ids), ["cloze-included"])
+        self.assertEqual(set(include_block_ids), {"cloze-included", "cloze-excluded"})
         self.assertEqual(
             self._db.get_setting(_SYNC_MODULE._CLOZE_REFRESH_REVISION_SETTING_KEY),
             _SYNC_MODULE._CLOZE_REFRESH_REVISION,
@@ -1640,16 +2342,34 @@ class SyncTests(unittest.TestCase):
         finally:
             connection.close()
 
+        current_payload = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="cloze-included",
+            card_type="cloze",
+            model_name="Notion (Cloze)",
+            fields={
+                "Text": "{{c1::Included}}",
+                "Extra": "",
+                "Notion Block ID": "cloze-included",
+            },
+            content_hash="hash-current",
+            last_edited_time="2026-02-04T00:00:00.000Z",
+        )
         fake_client = _FakeNotionClientWithParagraphs(page_last_edited_time="2026-02-04T00:00:00.000Z")
         with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
             _SYNC_MODULE.NotionClient,
             "from_settings",
             return_value=fake_client,
-        ), patch.object(_SYNC_MODULE, "parse_page_to_cards") as parse_mock:
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[current_payload],
+        ) as parse_mock:
             result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
 
         self.assertTrue(result.ok)
-        parse_mock.assert_not_called()
+        parse_mock.assert_called_once()
+        self.assertEqual(result.stats.cards_unchanged, 1)
         self.assertEqual(result.stats.cards_updated, 0)
         self.assertEqual(result.stats.cards_created, 0)
 

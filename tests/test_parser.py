@@ -92,6 +92,70 @@ def _equation_item(
 class ParserTests(unittest.TestCase):
     """Validate parser rendering and toggle-card extraction rules."""
 
+    def test_empty_toggle_content_is_reported_as_warning(self) -> None:
+        warnings = []
+        empty_toggle = _block(
+            "empty-toggle",
+            "toggle",
+            {"rich_text": [_text_item("Question without an answer")]},
+        )
+
+        payloads = parse_page_to_cards("page-1", [empty_toggle], warnings=warnings)
+
+        self.assertEqual(payloads, [])
+        self.assertEqual([warning.code for warning in warnings], ["empty_toggle_content"])
+        self.assertEqual(warnings[0].notion_block_id, "empty-toggle")
+
+    def test_markup_only_toggle_content_is_reported_as_warning(self) -> None:
+        warnings = []
+        empty_toggle = _block(
+            "empty-paragraph-toggle",
+            "toggle",
+            {"rich_text": [_text_item("Question without an answer")]},
+            children=(_block("empty-p", "paragraph", {"rich_text": []}),),
+        )
+
+        payloads = parse_page_to_cards("page-1", [empty_toggle], warnings=warnings)
+
+        self.assertEqual(payloads, [])
+        self.assertEqual([warning.code for warning in warnings], ["empty_toggle_content"])
+
+    def test_image_only_toggle_content_remains_usable(self) -> None:
+        image_toggle = _block(
+            "image-toggle",
+            "toggle",
+            {"rich_text": [_text_item("Identify this image")]},
+            children=(
+                _block(
+                    "image",
+                    "image",
+                    {
+                        "type": "external",
+                        "external": {"url": "https://example.com/image.png"},
+                    },
+                ),
+            ),
+        )
+
+        payloads = parse_page_to_cards("page-1", [image_toggle], warnings=[])
+
+        self.assertEqual(len(payloads), 1)
+        self.assertIn("<img", payloads[0].back_html)
+
+    def test_empty_toggle_title_is_reported_as_warning(self) -> None:
+        warnings = []
+        untitled_toggle = _block(
+            "untitled-toggle",
+            "toggle",
+            {"rich_text": []},
+            children=(_block("body", "paragraph", {"rich_text": [_text_item("Answer")]}),),
+        )
+
+        payloads = parse_page_to_cards("page-1", [untitled_toggle], warnings=warnings)
+
+        self.assertEqual(payloads, [])
+        self.assertEqual([warning.code for warning in warnings], ["empty_toggle_title"])
+
     def test_parse_page_to_cards_only_emits_root_toggles(self) -> None:
         nested_toggle = _block(
             "nested-toggle",
@@ -636,6 +700,7 @@ class ParserTests(unittest.TestCase):
             "root-toggle",
             "toggle",
             {"rich_text": [_text_item("Blue title")], "color": "blue"},
+            children=(_block("body", "paragraph", {"rich_text": [_text_item("Answer")]}),),
         )
 
         payload = parse_page_to_cards("page-1", [root_toggle])[0]

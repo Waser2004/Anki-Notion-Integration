@@ -31,9 +31,21 @@ This document describes the Anki add-on architecture for Notion → Anki sync.
 - Per-page effective card type = page override or global default.
 - Auto-convert mapped notes when card type changes.
 - Hash-based idempotency including card type and payload fields.
+- Every sync retrieves canonical enhanced Markdown plus shallow root blocks.
+  Page metadata, Markdown, and shallow roots are prepared through a bounded
+  page-worker queue. Stable root-toggle IDs are aligned with their Markdown
+  sources by order, and only new or source-changed toggles are expanded through
+  the bounded tree-worker queue. Truncated or ambiguous Markdown falls back to a
+  complete page tree.
+- Ancestor `last_edited_time` values are metadata, not content-tree cache keys.
+- Card parsing and recoverable repairs produce structured warnings without failing sync.
+- Missing or no-longer-syncable sources detach Noteck metadata while preserving Anki notes.
+- Only source access, database, Anki write, or orchestration failures are sync errors.
 
 ### Persistence
 - `pages`: selection, deck mapping, hierarchy metadata, optional `default_card_type` override.
 - `cards`: Notion block → note mapping, `card_type`, content hash, sync metadata.
 - `settings`: DB-backed schema values + keyring secrets, including page-selection behavior and dynamic subtree-selection roots.
 - `card_type_overrides`: optional per-toggle card-type overrides with page linkage.
+- `notion_toggle_snapshots`: canonical per-toggle Markdown hashes used to avoid
+  unchanged descendant fetches independently of card mappings.

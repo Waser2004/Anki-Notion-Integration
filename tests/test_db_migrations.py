@@ -45,10 +45,15 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("notion_page_id", override_columns)
             self.assertIn("card_type", override_columns)
             self.assertIn("updated_at", override_columns)
+            snapshot_columns = _column_names(connection, "notion_toggle_snapshots")
+            self.assertEqual(
+                snapshot_columns,
+                {"notion_block_id", "notion_page_id", "source_hash", "updated_at"},
+            )
         finally:
             connection.close()
 
-    def test_initialize_records_schema_version_1(self) -> None:
+    def test_initialize_records_latest_schema_version(self) -> None:
         db = Database(self._db_path)
         db.initialize()
 
@@ -57,11 +62,11 @@ class DatabaseMigrationTests(unittest.TestCase):
             latest_version = connection.execute(
                 "SELECT MAX(version) FROM schema_migrations"
             ).fetchone()[0]
-            self.assertEqual(latest_version, 1)
+            self.assertEqual(latest_version, 4)
         finally:
             connection.close()
 
-    def test_initialize_is_idempotent_for_single_baseline_migration(self) -> None:
+    def test_initialize_is_idempotent_for_all_migrations(self) -> None:
         db = Database(self._db_path)
         db.initialize()
         db.initialize()
@@ -71,7 +76,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             versions = connection.execute(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
-            self.assertEqual([int(row[0]) for row in versions], [1])
+            self.assertEqual([int(row[0]) for row in versions], [1, 4])
 
             page_columns = _column_names(connection, "pages")
             self.assertIn("anki_deck_id", page_columns)
@@ -80,5 +85,47 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("parent_id", page_columns)
             self.assertIn("parent_type", page_columns)
             self.assertIn("default_card_type", page_columns)
+            snapshot_columns = _column_names(connection, "notion_toggle_snapshots")
+            self.assertIn("source_hash", snapshot_columns)
         finally:
             connection.close()
+
+    def test_development_databases_are_upgraded_with_toggle_snapshots(self) -> None:
+        for previous_version in (1, 2, 3):
+            with self.subTest(previous_version=previous_version):
+                db_path = Path(self._temp_dir.name) / f"migration-{previous_version}.db"
+                connection = sqlite3.connect(db_path)
+                try:
+                    connection.executescript(
+                        f"""
+                        CREATE TABLE schema_migrations (
+                            version INTEGER PRIMARY KEY,
+                            applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+                        );
+                        INSERT INTO schema_migrations (version) VALUES ({previous_version});
+                        CREATE TABLE pages (
+                            notion_page_id TEXT PRIMARY KEY,
+                            anki_deck_name TEXT NOT NULL,
+                            sync_enabled INTEGER NOT NULL DEFAULT 1
+                        );
+                        """
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
+
+                Database(db_path).initialize()
+
+                connection = sqlite3.connect(db_path)
+                try:
+                    latest_version = connection.execute(
+                        "SELECT MAX(version) FROM schema_migrations"
+                    ).fetchone()[0]
+                    snapshot_columns = _column_names(
+                        connection,
+                        "notion_toggle_snapshots",
+                    )
+                finally:
+                    connection.close()
+                self.assertEqual(latest_version, 4)
+                self.assertIn("source_hash", snapshot_columns)
