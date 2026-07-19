@@ -18,6 +18,8 @@ NOTION_API_VERSION = "2026-03-11"
 NOTION_BLOCK_PAGE_SIZE = 100
 NOTION_TREE_WORKER_COUNT = 4
 NOTION_TREE_QUEUE_SIZE = NOTION_TREE_WORKER_COUNT * 2
+NOTION_PAGE_WORKER_COUNT = 4
+NOTION_PAGE_QUEUE_SIZE = NOTION_PAGE_WORKER_COUNT * 2
 NOTION_REQUESTS_PER_SECOND = 3.0
 NOTION_RATE_LIMIT_RETRIES = 5
 
@@ -95,6 +97,25 @@ class NotionMarkdownSnapshot:
 
 
 @dataclass(frozen=True)
+class NotionPageSyncData:
+    """Notion source data required before one page can be reconciled."""
+
+    page_id: str
+    last_edited_time: str | None
+    markdown_snapshot: NotionMarkdownSnapshot
+    shallow_blocks: tuple[NotionBlock, ...]
+
+
+@dataclass(frozen=True)
+class NotionPageFetchResult:
+    """One page-preparation result, including an isolated fetch failure."""
+
+    page_id: str
+    data: NotionPageSyncData | None = None
+    error: Exception | None = None
+
+
+@dataclass(frozen=True)
 class _BlockFetchJob:
     """One page-tree queue item identifying a parent whose children are needed."""
 
@@ -141,6 +162,7 @@ class _AsyncRateLimiter:
 
 # Keep this alias Python 3.9-compatible because it is evaluated at import time.
 Transport = Callable[[str, str, dict[str, str], Optional[bytes], float], NotionResponse]
+PageFetchProgressCallback = Callable[[int, int], None]
 
 
 class NotionClient:
@@ -261,6 +283,24 @@ class NotionClient:
     def get_page_content(self, page_id: str) -> list[NotionBlock]:
         """Return the full block tree for a page."""
         return asyncio.run(self._fetch_page_tree(page_id))
+
+    def get_pages_sync_data(
+        self,
+        page_ids: Iterable[str],
+        *,
+        progress_callback: PageFetchProgressCallback | None = None,
+    ) -> dict[str, NotionPageFetchResult]:
+        """Fetch sync inputs for pages through a bounded asynchronous queue."""
+        ordered_page_ids = tuple(dict.fromkeys(str(page_id) for page_id in page_ids))
+        if not ordered_page_ids:
+            return {}
+
+        return asyncio.run(
+            self._fetch_pages_sync_data(
+                ordered_page_ids,
+                progress_callback=progress_callback,
+            )
+        )
 
     def get_page_markdown(self, page_id: str) -> NotionMarkdownSnapshot:
         """Return a page's complete enhanced Markdown representation."""
@@ -500,6 +540,95 @@ class NotionClient:
                 return self._rich_text_to_plain(prop.get("title", [])) or "Untitled"
         
         return "Untitled"
+
+    async def _fetch_pages_sync_data(
+        self,
+        page_ids: tuple[str, ...],
+        *,
+        progress_callback: PageFetchProgressCallback | None,
+    ) -> dict[str, NotionPageFetchResult]:
+        """Prepare multiple pages concurrently while sharing the API limiter."""
+        jobs:    asyncio.Queue[str] = asyncio.Queue(maxsize=NOTION_PAGE_QUEUE_SIZE)
+        results: dict[str, NotionPageFetchResult] = {}
+        completed_count = 0
+
+        async def worker() -> None:
+            """Fetch the metadata, Markdown, and shallow roots for queued pages."""
+            nonlocal completed_count
+            while True:
+                page_id = await jobs.get()
+                try:
+                    try:
+                        data = await self._fetch_page_sync_data(page_id)
+                        results[page_id] = NotionPageFetchResult(page_id=page_id, data=data)
+                    except Exception as exc:
+                        results[page_id] = NotionPageFetchResult(page_id=page_id, error=exc)
+                finally:
+                    # All workers run on one event loop, so this update cannot
+                    # interleave with another worker between read and write.
+                    completed_count += 1
+                    if progress_callback is not None:
+                        try:
+                            progress_callback(completed_count, len(page_ids))
+                        except Exception:
+                            pass
+
+                    jobs.task_done()
+
+        workers = [
+            asyncio.create_task(worker())
+            for _ in range(NOTION_PAGE_WORKER_COUNT)
+        ]
+
+        try:
+            # Workers must already be consuming before the bounded queue is filled.
+            for page_id in page_ids:
+                await jobs.put(page_id)
+            await jobs.join()
+        finally:
+            for task in workers:
+                task.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+
+        return results
+
+    async def _fetch_page_sync_data(self, page_id: str) -> NotionPageSyncData:
+        """Fetch all non-recursive Notion inputs used by one sync page."""
+        page_payload = await self._request_json_with_rate_limit_retry(
+            "GET",
+            f"/pages/{page_id}",
+            None,
+            limiter=self._tree_rate_limiter,
+        )
+        markdown_payload = await self._request_json_with_rate_limit_retry(
+            "GET",
+            f"/pages/{page_id}/markdown",
+            None,
+            limiter=self._tree_rate_limiter,
+        )
+        shallow_blocks = await self._fetch_block_children_async(
+            page_id,
+            limiter=self._tree_rate_limiter,
+        )
+
+        unknown_block_ids = markdown_payload.get("unknown_block_ids")
+        if not isinstance(unknown_block_ids, list):
+            unknown_block_ids = []
+        last_edited_time = page_payload.get("last_edited_time")
+        if not isinstance(last_edited_time, str) or not last_edited_time:
+            last_edited_time = None
+
+        return NotionPageSyncData(
+            page_id           = page_id,
+            last_edited_time  = last_edited_time,
+            markdown_snapshot = NotionMarkdownSnapshot(
+                page_id           = str(markdown_payload.get("id") or page_id),
+                markdown          = str(markdown_payload.get("markdown") or ""),
+                truncated         = bool(markdown_payload.get("truncated")),
+                unknown_block_ids = tuple(str(block_id) for block_id in unknown_block_ids),
+            ),
+            shallow_blocks    = tuple(shallow_blocks),
+        )
 
     def _normalize_icon(self, icon_payload: dict[str, Any] | None) -> dict[str, Any] | None:
         """Return the icon payload if present."""

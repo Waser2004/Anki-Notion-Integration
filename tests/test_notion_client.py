@@ -238,6 +238,60 @@ class NotionClientChildPageOrderTests(unittest.TestCase):
 class NotionClientPageTreeQueueTests(unittest.TestCase):
     """Verify complete trees use bounded concurrent workers and robust retries."""
 
+    def test_get_pages_sync_data_uses_bounded_page_workers(self) -> None:
+        active_pages: set[str] = set()
+        pages_with_overlap: set[str] = set()
+        progress_updates: list[tuple[int, int]] = []
+        lock = threading.Lock()
+
+        def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> NotionResponse:
+            _ = (method, headers, body, timeout)
+            page_id = "page-1" if "page-1" in url else "page-2"
+            with lock:
+                active_pages.add(page_id)
+                if len(active_pages) > 1:
+                    pages_with_overlap.update(active_pages)
+            try:
+                time.sleep(0.02)
+                if url.endswith(f"/pages/{page_id}"):
+                    return _json_response({"id": page_id, "last_edited_time": f"{page_id}-edited"})
+                if url.endswith(f"/pages/{page_id}/markdown"):
+                    return _json_response(
+                        {
+                            "id": page_id,
+                            "markdown": f"# {page_id}",
+                            "truncated": False,
+                            "unknown_block_ids": [],
+                        }
+                    )
+                if f"/blocks/{page_id}/children?page_size=100" in url:
+                    return _json_response({"results": [], "has_more": False})
+                self.fail(f"Unexpected URL: {url}")
+            finally:
+                with lock:
+                    active_pages.discard(page_id)
+
+        with patch.object(notion_client_module, "NOTION_REQUESTS_PER_SECOND", 1_000_000.0):
+            client = NotionClient(api_token="token", transport=transport)
+            results = client.get_pages_sync_data(
+                ["page-1", "page-2"],
+                progress_callback=lambda completed, total: progress_updates.append(
+                    (completed, total)
+                ),
+            )
+
+        self.assertEqual(set(results), {"page-1", "page-2"})
+        self.assertEqual(pages_with_overlap, {"page-1", "page-2"})
+        self.assertEqual(progress_updates, [(1, 2), (2, 2)])
+        for page_id, result in results.items():
+            self.assertIsNone(result.error)
+            self.assertIsNotNone(result.data)
+            assert result.data is not None
+            self.assertEqual(result.data.page_id, page_id)
+            self.assertEqual(result.data.last_edited_time, f"{page_id}-edited")
+            self.assertEqual(result.data.markdown_snapshot.markdown, f"# {page_id}")
+            self.assertEqual(result.data.shallow_blocks, ())
+
     def test_get_page_markdown_returns_complete_snapshot(self) -> None:
         calls: list[str] = []
 

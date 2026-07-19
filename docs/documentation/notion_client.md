@@ -34,6 +34,10 @@ The client normalizes Notion payloads into a few dataclasses:
 - `NotionPage`: minimal page metadata needed by the UI (`page_id`, `title`, `icon`, `parent_id`, `parent_type`, plus `raw`).
 - `PageNode`: hierarchical wrapper for tree rendering (`page` + `children`).
 - `NotionBlock`: normalized block with nested `children` (the parser can walk this tree).
+- `NotionPageSyncData`: page metadata, enhanced Markdown, and shallow roots
+  prepared for sync without any Anki or database mutation.
+- `NotionPageFetchResult`: either prepared data or the isolated fetch error for
+  one page.
 
 The original API payload is always retained as `raw` for future feature growth.
 
@@ -64,6 +68,19 @@ The original API payload is always retained as `raw` for future feature growth.
   HTTP 429 responses defer the shared limiter for the server-provided
   `Retry-After` interval and are retried up to five times.
 - Returns a tree of `NotionBlock` instances.
+
+#### `get_pages_sync_data(page_ids) -> dict[str, NotionPageFetchResult]`
+
+- Places selected page IDs into a bounded asynchronous queue with four workers
+  and waits for completion with `queue.join()`.
+- Each worker retrieves page metadata, enhanced Markdown, and paginated shallow
+  root blocks for one page.
+- The optional progress callback receives completed-page and total-page counts
+  after every job, including isolated page failures.
+- Workers share the same global request limiter and HTTP 429 retry behavior used
+  by recursive block retrieval.
+- A failed page receives its own error result instead of canceling preparation
+  for the remaining pages.
 
 #### `get_page_markdown(page_id: str) -> NotionMarkdownSnapshot`
 

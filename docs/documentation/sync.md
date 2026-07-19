@@ -14,8 +14,15 @@ Noteck reports four distinct outcomes:
 
 Notion's page and block objects each expose their own `last_edited_time`. Noteck
 does not treat either timestamp as a revision for the object's entire descendant
-tree. Instead, every selected page is retrieved once as enhanced Markdown and
-once as shallow root blocks:
+tree. A bounded asynchronous page queue first retrieves each selected page's
+metadata, enhanced Markdown, and shallow root blocks. The queue uses fixed
+workers, the shared Notion rate limiter and retry handling, and `queue.join()` to
+wait for preparation to complete. Anki and database reconciliation then remains
+sequential because those local APIs are not worker-thread safe:
+
+The Anki progress dialog reports these as two text-only phases. `Fetching page
+data` advances whenever a concurrent page job finishes, followed by `Parsing
+page data` as each prepared page is reconciled sequentially.
 
 1. Expiring signature parameters are removed from media URLs before hashing.
 2. The cleaned full-page hash is stored in `pages.content_hash`.

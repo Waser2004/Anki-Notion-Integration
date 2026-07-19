@@ -21,7 +21,13 @@ from .cards import MODEL_NAME_BASIC, ensure_notion_toggle_model
 from .db import Database
 from .logging_utils import configure_file_logging, log_file_path
 from .markdown_snapshot import extract_root_toggle_markdown, hash_notion_markdown
-from .notion_client import NotionBlock, NotionClient, NotionMarkdownSnapshot
+from .notion_client import (
+    NotionBlock,
+    NotionClient,
+    NotionMarkdownSnapshot,
+    NotionPageFetchResult,
+    NotionPageSyncData,
+)
 from .parser import CardParseResult, CardParseWarning, ToggleCardPayload, parse_page_to_cards
 from .settings import SettingsStore, create_default_settings
 
@@ -164,26 +170,70 @@ def sync_notion_to_anki(
         cloze_refresh_revision_pending, toggle_refresh_revision_pending,
     )
 
+    # Fetch latency-bound page inputs concurrently. Anki and SQLite mutations stay
+    # on this sync thread because those APIs are not safe for worker-thread writes.
+    if _is_sync_cancelled(should_cancel):
+        _LOG.warning("Sync cancelled before Notion page preparation.")
+        return _build_cancelled_result(stats)
+
+    prefetched_pages: dict[str, NotionPageFetchResult] | None = None
+    get_pages_sync_data = getattr(client, "get_pages_sync_data", None)
+    supports_page_queue = callable(
+        getattr(type(client), "get_pages_sync_data", None)
+    )
+    if supports_page_queue and callable(get_pages_sync_data):
+        try:
+            total_pages = len(enabled_pages)
+            _publish_progress(
+                callback=progress_callback,
+                label=f"Fetching page data: 0/{total_pages} pages fetched.",
+            )
+
+            def publish_fetch_progress(completed: int, total: int) -> None:
+                """Translate page-worker completion into an Anki progress label."""
+                _publish_progress(
+                    callback=progress_callback,
+                    label=f"Fetching page data: {completed}/{total} pages fetched.",
+                )
+
+            prefetched_pages = get_pages_sync_data(
+                (page.notion_page_id for page in enabled_pages),
+                progress_callback=publish_fetch_progress,
+            )
+            _LOG.info("Prepared Notion page inputs. pages=%d", len(prefetched_pages))
+            if _is_sync_cancelled(should_cancel):
+                _LOG.warning("Sync cancelled after Notion page preparation.")
+                return _build_cancelled_result(stats)
+        except Exception as exc:
+            _LOG.exception("Concurrent Notion page preparation failed.")
+            return SyncResult(ok=False, message=f"Sync failed: {exc}", errors=(str(exc),))
+
+    # Reconcile prepared pages sequentially so collection and database writes remain safe.
     _publish_progress(
         callback=progress_callback,
-        label="Preparing Notion sync...",
+        label=f"Parsing page data: 0/{len(enabled_pages)} pages parsed.",
     )
-
-    # Iterate over enabled Notion pages and sync their content
     for page in enabled_pages:
         if _is_sync_cancelled(should_cancel):
             _LOG.warning("Sync cancelled before page %s.", page.notion_page_id)
             return _build_cancelled_result(stats)
 
-        _publish_progress(
-            callback=progress_callback,
-            label=f"{stats.pages_scanned}/{len(enabled_pages)} pages synced...",
-        )
         stats = _replace_stats(stats, pages_scanned=stats.pages_scanned + 1)
 
         page_warnings: list[SyncWarning] = []
+        page_id = page.notion_page_id
         try:
-            page_id = page.notion_page_id
+            page_sync_data: NotionPageSyncData | None = None
+            if prefetched_pages is not None:
+                fetch_result = prefetched_pages.get(page_id)
+                if fetch_result is None:
+                    raise RuntimeError("Notion page preparation returned no result.")
+                if fetch_result.error is not None:
+                    raise fetch_result.error
+                if fetch_result.data is None:
+                    raise RuntimeError("Notion page preparation returned no data.")
+                page_sync_data = fetch_result.data
+
             page_default_card_type = _effective_default_card_type(
                 page.default_card_type,
                 global_default=global_default_card_type,
@@ -207,7 +257,11 @@ def sync_notion_to_anki(
                     deck_id=deck_id,
                     deck_name=resolved_deck_name,
                 )
-            page_last_edited_time = client.get_page_last_edited_time(page_id)
+            page_last_edited_time = (
+                page_sync_data.last_edited_time
+                if page_sync_data is not None
+                else client.get_page_last_edited_time(page_id)
+            )
             stored_page_edit_time = _load_page_last_seen_notion_edit_time(db, page_id)
             page_metadata_matches = (
                 page_last_edited_time is not None
@@ -234,6 +288,7 @@ def sync_notion_to_anki(
                 force_cloze_refresh=cloze_refresh_revision_pending,
                 should_cancel=should_cancel,
                 warnings=page_warnings,
+                prefetched_data=page_sync_data,
             )
 
             if cancelled:
@@ -262,15 +317,18 @@ def sync_notion_to_anki(
                 page_id, after_writes - before_writes, len(page_errors), len(page_warnings), stats,
             )
             
-            _publish_progress(
-                callback=progress_callback,
-                label=f"Synced page {stats.pages_scanned}/{len(enabled_pages)}.",
-            )
-        
         except Exception as exc:
             _LOG.exception("Page sync failed. page_id=%s", page_id)
             errors.append(f"Page {page_id}: {exc}")
             warnings.extend(page_warnings)
+        finally:
+            _publish_progress(
+                callback=progress_callback,
+                label=(
+                    f"Parsing page data: {stats.pages_scanned}/"
+                    f"{len(enabled_pages)} pages parsed."
+                ),
+            )
 
     try:
         _reset_mw_if_available(mw)
@@ -521,6 +579,7 @@ def _sync_page_content(
     force_cloze_refresh:  bool                     = False,
     should_cancel:        SyncCancelCheck | None   = None,
     warnings:             list[SyncWarning] | None = None,
+    prefetched_data:      NotionPageSyncData | None = None,
 ) -> tuple[SyncStats, list[str], bool]:
     """Use Markdown snapshots to recursively fetch only changed root toggles."""
     get_page_markdown = getattr(client, "get_page_markdown", None)
@@ -539,7 +598,11 @@ def _sync_page_content(
             warnings            = warnings,
         )
 
-    snapshot = get_page_markdown(page_id)
+    snapshot = (
+        prefetched_data.markdown_snapshot
+        if prefetched_data is not None
+        else get_page_markdown(page_id)
+    )
     if not isinstance(snapshot, NotionMarkdownSnapshot) or snapshot.truncated:
         _LOG.info(
             "Markdown snapshot unavailable for selective sync; using full tree. "
@@ -561,7 +624,11 @@ def _sync_page_content(
             warnings            = warnings,
         )
 
-    shallow_blocks  = client.get_page_blocks_shallow(page_id)
+    shallow_blocks = (
+        list(prefetched_data.shallow_blocks)
+        if prefetched_data is not None
+        else client.get_page_blocks_shallow(page_id)
+    )
     shallow_toggles = [block for block in shallow_blocks if block.block_type == "toggle"]
     toggle_sources  = extract_root_toggle_markdown(snapshot.markdown)
     if toggle_sources is None or len(toggle_sources) != len(shallow_toggles):

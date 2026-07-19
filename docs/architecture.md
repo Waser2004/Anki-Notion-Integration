@@ -32,9 +32,11 @@ This document describes the Anki add-on architecture for Notion → Anki sync.
 - Auto-convert mapped notes when card type changes.
 - Hash-based idempotency including card type and payload fields.
 - Every sync retrieves canonical enhanced Markdown plus shallow root blocks.
-  Stable root-toggle IDs are aligned with their Markdown sources by order, and
-  only new or source-changed toggles are expanded through the bounded worker
-  queue. Truncated or ambiguous Markdown falls back to a complete page tree.
+  Page metadata, Markdown, and shallow roots are prepared through a bounded
+  page-worker queue. Stable root-toggle IDs are aligned with their Markdown
+  sources by order, and only new or source-changed toggles are expanded through
+  the bounded tree-worker queue. Truncated or ambiguous Markdown falls back to a
+  complete page tree.
 - Ancestor `last_edited_time` values are metadata, not content-tree cache keys.
 - Card parsing and recoverable repairs produce structured warnings without failing sync.
 - Missing or no-longer-syncable sources detach Noteck metadata while preserving Anki notes.

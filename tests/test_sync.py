@@ -12,7 +12,12 @@ from unittest.mock import Mock, patch
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from Noteck.modules.db import Database
-from Noteck.modules.notion_client import NotionBlock, NotionMarkdownSnapshot
+from Noteck.modules.notion_client import (
+    NotionBlock,
+    NotionMarkdownSnapshot,
+    NotionPageFetchResult,
+    NotionPageSyncData,
+)
 from Noteck.modules.parser import ToggleCardPayload
 from Noteck.modules.sync import (
     SyncResult,
@@ -511,6 +516,50 @@ class _SelectiveMarkdownClient(_FakeNotionClient):
             raw=raw,
             children=(),
         )
+
+
+class _QueuedPageClient(_FakeNotionClient):
+    """Return page inputs in one batch and reject sequential source retrieval."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.requested_page_ids: tuple[str, ...] = ()
+
+    def get_pages_sync_data(
+        self,
+        page_ids: object,
+        *,
+        progress_callback: object = None,
+    ) -> dict[str, NotionPageFetchResult]:
+        self.requested_page_ids = tuple(str(page_id) for page_id in page_ids)
+        results: dict[str, NotionPageFetchResult] = {}
+        for completed, page_id in enumerate(self.requested_page_ids, start=1):
+            results[page_id] = NotionPageFetchResult(
+                page_id=page_id,
+                data=NotionPageSyncData(
+                    page_id=page_id,
+                    last_edited_time="2026-07-19T00:00:00.000Z",
+                    markdown_snapshot=NotionMarkdownSnapshot(
+                        page_id=page_id,
+                        markdown="",
+                        truncated=False,
+                        unknown_block_ids=(),
+                    ),
+                    shallow_blocks=(),
+                ),
+            )
+            if callable(progress_callback):
+                progress_callback(completed, len(self.requested_page_ids))
+        return results
+
+    def get_page_last_edited_time(self, page_id: str) -> str:
+        raise AssertionError(f"Sequential metadata fetch used for {page_id}")
+
+    def get_page_markdown(self, page_id: str) -> NotionMarkdownSnapshot:
+        raise AssertionError(f"Sequential Markdown fetch used for {page_id}")
+
+    def get_page_blocks_shallow(self, page_id: str) -> list[NotionBlock]:
+        raise AssertionError(f"Sequential shallow fetch used for {page_id}")
 
 
 class SyncTests(unittest.TestCase):
@@ -1836,6 +1885,50 @@ class SyncTests(unittest.TestCase):
             connection.close()
         self.assertIsNone(failed_page["last_seen_notion_edit_time"])
         self.assertEqual(str(successful_page["last_seen_notion_edit_time"]), "2026-02-05T00:00:00.000Z")
+
+    def test_sync_uses_queued_page_inputs_for_all_enabled_pages(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                INSERT INTO pages (notion_page_id, anki_deck_name, sync_enabled)
+                VALUES (?, ?, 1)
+                """,
+                ("page-2", "Notion::Page 2"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        client = _QueuedPageClient()
+        progress_labels: list[str] = []
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ):
+            result = sync_notion_to_anki(
+                mw=mw,
+                db_path=self._db_path,
+                progress_callback=progress_labels.append,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(client.requested_page_ids, ("page-1", "page-2"))
+        self.assertEqual(result.stats.pages_scanned, 2)
+        self.assertEqual(
+            progress_labels,
+            [
+                "Fetching page data: 0/2 pages fetched.",
+                "Fetching page data: 1/2 pages fetched.",
+                "Fetching page data: 2/2 pages fetched.",
+                "Parsing page data: 0/2 pages parsed.",
+                "Parsing page data: 1/2 pages parsed.",
+                "Parsing page data: 2/2 pages parsed.",
+            ],
+        )
 
     def test_sync_returns_cancelled_when_user_requests_abort(self) -> None:
         collection = _FakeCollection()
