@@ -106,6 +106,42 @@ class ParserTests(unittest.TestCase):
         self.assertEqual([warning.code for warning in warnings], ["empty_toggle_content"])
         self.assertEqual(warnings[0].notion_block_id, "empty-toggle")
 
+    def test_markup_only_toggle_content_is_reported_as_warning(self) -> None:
+        warnings = []
+        empty_toggle = _block(
+            "empty-paragraph-toggle",
+            "toggle",
+            {"rich_text": [_text_item("Question without an answer")]},
+            children=(_block("empty-p", "paragraph", {"rich_text": []}),),
+        )
+
+        payloads = parse_page_to_cards("page-1", [empty_toggle], warnings=warnings)
+
+        self.assertEqual(payloads, [])
+        self.assertEqual([warning.code for warning in warnings], ["empty_toggle_content"])
+
+    def test_image_only_toggle_content_remains_usable(self) -> None:
+        image_toggle = _block(
+            "image-toggle",
+            "toggle",
+            {"rich_text": [_text_item("Identify this image")]},
+            children=(
+                _block(
+                    "image",
+                    "image",
+                    {
+                        "type": "external",
+                        "external": {"url": "https://example.com/image.png"},
+                    },
+                ),
+            ),
+        )
+
+        payloads = parse_page_to_cards("page-1", [image_toggle], warnings=[])
+
+        self.assertEqual(len(payloads), 1)
+        self.assertIn("<img", payloads[0].back_html)
+
     def test_empty_toggle_title_is_reported_as_warning(self) -> None:
         warnings = []
         untitled_toggle = _block(

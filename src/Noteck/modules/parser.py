@@ -29,6 +29,7 @@ _NUMBER_RE = re.compile(r"(?:0[xX][0-9A-Fa-f]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)")
 _OPERATOR_CHARS = frozenset("+-*/%=!<>|&^~?:")
 _PUNCTUATION_CHARS = frozenset("()[]{}.,;")
 _CLOZE_EXTRA_PREFIX_RE = re.compile(r"^\s*extra\s*:\s*", re.IGNORECASE)
+_MEANINGFUL_NON_TEXT_HTML_RE = re.compile(r"<img\b", re.IGNORECASE)
 
 # Notion exposes the same fixed palette for every color-capable block type.
 _NOTION_BLOCK_FOREGROUND_COLORS = frozenset(
@@ -987,7 +988,12 @@ def _has_usable_card_content(rendered_html: str) -> bool:
         return False
 
     plain_text = re.sub(r"<[^>]+>", "", rendered_html)
-    return bool(html.unescape(plain_text).replace("\u00a0", " ").strip()) or bool(rendered_html.strip())
+    if html.unescape(plain_text).replace("\u00a0", " ").strip():
+        return True
+
+    # Images are the only supported renderer output that can be meaningful
+    # without contributing text. Structural markup such as <p></p> is empty.
+    return _MEANINGFUL_NON_TEXT_HTML_RE.search(rendered_html) is not None
 
 
 def _is_cloze_extra_paragraph(block: NotionBlock) -> bool:

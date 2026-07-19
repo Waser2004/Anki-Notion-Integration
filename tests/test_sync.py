@@ -632,6 +632,31 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(str(row["notion_block_id"]), "block-1")
         self.assertGreater(int(row["anki_note_id"]), 0)
 
+    def test_sync_reset_failure_returns_structured_warning(self) -> None:
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        mw.reset = Mock(side_effect=RuntimeError("reset failed"))
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[self._payload()],
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(
+            [warning.code for warning in result.warnings],
+            ["anki_ui_refresh_failed"],
+        )
+        self.assertIn("reset failed", result.warnings[0].message)
+        self.assertIsNone(result.warnings[0].page_id)
+        self.assertIsNone(result.warnings[0].block_id)
+
     def test_sync_persists_payload_card_type_to_mapping(self) -> None:
         collection = _FakeCollection()
         mw = _FakeMw(collection)

@@ -334,7 +334,14 @@ def sync_notion_to_anki(
         _reset_mw_if_available(mw)
     except Exception as exc:
         _LOG.warning("Sync could not refresh the Anki UI: %s", exc)
-        warnings.append(f"Anki UI refresh: {exc}")
+        stats = _add_warning(
+            stats,
+            warnings,
+            code="anki_ui_refresh_failed",
+            message=f"Anki UI refresh failed after sync: {exc}",
+            page_id=None,
+            block_id=None,
+        )
     
     if errors:
         _LOG.error("Sync completed with errors. count=%d warnings=%d stats=%s", len(errors), len(warnings), stats)
