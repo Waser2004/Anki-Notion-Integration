@@ -17,7 +17,8 @@ REVERSED_CARD_NAME = "Notion (Reversed)"
 INPUT_CARD_NAME = "Notion (Input)"
 CLOZE_CARD_NAME = "Notion (Cloze)"
 
-CARD_TEMPLATE_VERSION = 1
+# Version 2 delivers the external/file callout-icon sizing rule in the managed CSS.
+CARD_TEMPLATE_VERSION = 2
 CARD_TEMPLATE_STATUS_CURRENT = "current"
 CARD_TEMPLATE_STATUS_UPDATE_AVAILABLE = "update_available"
 CARD_TEMPLATE_STATUS_USER_MODIFIED = "user_modified"

@@ -217,6 +217,20 @@ th {
 	color: var(--hl-yellow);
 }
 
+/* Color only the table cell containing Anki's currently hidden cloze. */
+td:has(.cloze),
+th:has(.cloze) {
+	background: var(--hl-yellow-bg) !important;
+}
+
+/* The cell supplies the background; do not highlight the hidden text again. */
+td .cloze,
+th .cloze {
+	background: transparent !important;
+	color: inherit;
+	padding: 0;
+}
+
 .notion-input {
 	margin: 0 auto;
 	max-width: 700px;
@@ -494,6 +508,13 @@ html.night_mode .notion-mermaid .notion-mermaid-dark,
 .notion-callout-icon {
 	line-height: 1;
 	font-size: 1.1em;
+}
+
+.notion-callout-icon-image {
+	display: block;
+	width: 1.1em;
+	height: 1.1em;
+	object-fit: contain;
 }
 
 /* ============================================================

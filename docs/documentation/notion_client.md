@@ -56,6 +56,10 @@ The original API payload is always retained as `raw` for future feature growth.
 - Fetches `/blocks/{page_id}/children` and recursively expands any blocks where `has_children == True`.
 - Returns a tree of `NotionBlock` instances.
 
+#### `get_page_markdown(page_id: str) -> str`
+- Fetches `/pages/{page_id}/markdown` using the enhanced Markdown API.
+- Used during cloze sync to recover table cell, row, and column colors that are not included in the block API response.
+
 #### `update_toggle(block_id: str, title: str, body: str) -> None`
 Per the current project decision, this is an **exact match** update strategy:
 

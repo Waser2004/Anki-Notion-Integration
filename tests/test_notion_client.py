@@ -230,6 +230,24 @@ class NotionClientChildPageOrderTests(unittest.TestCase):
         self.assertEqual(order_map.get("parent"), ("child-b", "child-a", "child-c"))
 
 
+class NotionClientMarkdownTests(unittest.TestCase):
+    """Verify enhanced Markdown retrieval uses the page Markdown endpoint."""
+
+    def test_get_page_markdown_returns_markdown_payload(self) -> None:
+        calls: list[tuple[str, dict[str, str]]] = []
+
+        def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> NotionResponse:
+            _ = (body, timeout)
+            calls.append((url, headers))
+            return _json_response({"object": "page_markdown", "id": "page-1", "markdown": "<table/>"})
+
+        client = NotionClient(api_token="token", transport=transport)
+
+        self.assertEqual(client.get_page_markdown("page-1"), "<table/>")
+        self.assertEqual(calls[0][0], "https://api.notion.com/v1/pages/page-1/markdown")
+        self.assertEqual(calls[0][1]["Notion-Version"], "2026-03-11")
+
+
 def _json_response(payload: dict[str, object]) -> NotionResponse:
     """Build a success JSON response payload for transport test doubles."""
     return NotionResponse(status=200, headers={}, body=json.dumps(payload).encode("utf-8"))

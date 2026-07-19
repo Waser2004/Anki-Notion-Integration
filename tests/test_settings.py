@@ -60,7 +60,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(self._db.get_setting("enable_gray_toggle_cloze_parsing"), "1")
         self.assertEqual(
             self._db.get_setting("cloze_marker_colors"),
-            '["yellow","green","blue","purple","pink","orange","red","brown"]',
+            '["yellow","green","blue","purple"]',
         )
         self.assertEqual(self._db.get_setting("enable_image_occlusion_parsing"), "0")
         self.assertIsNone(self._db.get_setting("restore_default_card_templates"))

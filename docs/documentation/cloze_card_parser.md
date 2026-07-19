@@ -73,7 +73,9 @@ not apply to recognized advanced cloze toggles.
 ## Normal paragraph clozes
 
 A normal source is a top-level `paragraph` containing at least one rich-text
-item marked by either supported Notion representation:
+marker. A block background by itself is not a top-level cloze marker because it
+would create a deletion without surrounding context. Rich-text
+markers use either supported Notion representation:
 
 - `annotations.color == "<color>_background"`
 - `annotations.background_color == "<color>"`
@@ -85,12 +87,19 @@ item ends that run, so two highlighted regions separated by ordinary text
 become two separate `c1` deletions. Empty rendered fragments are ignored and do
 not themselves create a boundary.
 
+Block-level markers remain supported for blocks inside advanced cloze
+containers, where the surrounding container supplies the card context.
+
 Normal cloze rendering is intentionally lighter than the shared HTML renderer:
 
 - text is HTML-escaped but rich-text styles and links are not rendered;
 - inline equations become escaped Anki MathJax `\(...\)` fragments;
 - the paragraph is stored without a wrapping `<p>` element;
 - unmarked content remains outside cloze markup.
+
+These rendering limits apply to the inline-marker path. A block-level paragraph
+marker uses the shared rich-text item renderer inside its single deletion so
+the revealed answer retains safe formatting and links.
 
 For example, rich-text fragments `The `, highlighted `area`, ` is `, and a
 highlighted inline equation `pi r^2` produce:
@@ -131,6 +140,29 @@ columns, images, code, equations, callouts, and nested toggles. The parser
 injects a cloze-aware rich-text renderer, so marker conversion also works in
 rich text nested inside those supported child structures.
 
+For colorable renderer-supported blocks (`paragraph`, `heading_1` through
+`heading_3`, `bulleted_list_item`, `numbered_list_item`, `quote`, `callout`,
+and nested `toggle`), a configured `<color>_background` payload replaces the
+complete direct text with one marker while retaining the block's recognizable
+HTML. A colored callout keeps its icon, container, and child layout while its
+direct and descendant text uses the callout's cloze number. An explicitly
+colored nested callout starts its own cloze scope. The block-level marker wins
+over inner inline markers, preventing nested deletions.
+
+Notion's block API has no table-cell color field. During cloze sync, the add-on
+also reads the page's enhanced Markdown representation and overlays its cell,
+row, and column colors onto the matching block-API table rows. Table cells are
+treated as block-level only when every non-empty rich-text fragment uses the
+same effective configured marker. The cell contents become one deletion while
+their `td`/`th` and header semantics remain. CSS highlights only the cell
+containing Anki's dynamically rendered hidden `.cloze` child, and keeps the
+child text itself transparent.
+Partial or mixed-color cells use the existing inline behavior. Code, equation,
+image, table/container, column, and divider blocks have no standalone complete
+block-color strategy. If they are descendants of a marked callout, their
+textual content is hidden with the callout's cloze number while their supported
+HTML structure is retained.
+
 A direct child paragraph whose text starts with `Extra:` is rendered into
 `Extra`, with the case-insensitive prefix removed. Unlike normal paragraph
 clozes, the extra paragraph is inside the advanced cloze toggle rather than the
@@ -156,6 +188,10 @@ Both `annotations.color = "<color>_background"` and
 suffix) are recognized. Consecutive fragments with the same resolved number
 are merged. A change of number, or a transition to/from unmarked text, starts a
 new run. Repeated numbers and gaps are valid.
+
+For a supported block payload, only `color = "<color>_background"` is a
+block-level marker. A foreground `color = "<color>"` does not trigger cloze
+conversion.
 
 Before the shared rich-text renderer runs, the annotation that acted as a
 marker is reset to `default`. This prevents the marker background from leaking

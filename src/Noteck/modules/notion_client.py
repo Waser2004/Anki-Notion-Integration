@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import html
 import json
+import re
 from typing import Any, Callable, Iterable, Mapping, Optional
 from urllib import request, parse
 
@@ -67,6 +69,197 @@ class NotionBlock:
     parent_type: str | None
     raw: dict[str, Any]
     children: tuple["NotionBlock", ...] = ()
+
+
+_MARKDOWN_TABLE_RE     = re.compile(r"<table\b[^>]*>(?P<body>.*?)</table>", re.IGNORECASE | re.DOTALL)
+_MARKDOWN_COLGROUP_RE  = re.compile(r"<colgroup\b[^>]*>(?P<body>.*?)</colgroup>", re.IGNORECASE | re.DOTALL)
+_MARKDOWN_COL_RE       = re.compile(r"<col\b(?P<attrs>[^>]*)/?>", re.IGNORECASE)
+_MARKDOWN_ROW_RE       = re.compile(r"<tr\b(?P<attrs>[^>]*)>(?P<body>.*?)</tr>", re.IGNORECASE | re.DOTALL)
+_MARKDOWN_CELL_RE      = re.compile(r"<(?:td|th)\b(?P<attrs>[^>]*)>(?P<body>.*?)</(?:td|th)>", re.IGNORECASE | re.DOTALL)
+_MARKDOWN_ATTRIBUTE_RE = re.compile(r"([A-Za-z][\w-]*)\s*=\s*([\"'])(.*?)\2", re.DOTALL)
+_MARKDOWN_TAG_RE       = re.compile(r"<[^>]+>")
+
+
+def merge_markdown_table_colors(
+    blocks: Iterable[NotionBlock],
+    markdown: str,
+) -> list[NotionBlock]:
+    """Overlay enhanced-Markdown table colors onto the block-API tree.
+
+    The block API exposes table cells as rich text only, while the enhanced
+    Markdown endpoint exposes cell, row, and column colors.  Matching tables
+    by their normalized cell text keeps this bridge independent of block IDs,
+    which are intentionally absent from enhanced Markdown.
+    """
+    markdown_tables = _extract_markdown_table_colors(markdown)
+    if not markdown_tables:
+        return list(blocks)
+
+    used_tables: set[int] = set()
+
+    def enrich(block: NotionBlock) -> NotionBlock:
+        prepared_children = tuple(enrich(child) for child in block.children)
+        current = block
+        if block.block_type == "table":
+            table_index = _match_markdown_table(block, markdown_tables, used_tables)
+            if table_index is not None:
+                current = _apply_table_colors(block, markdown_tables[table_index])
+        if current is block and prepared_children != block.children:
+            current = NotionBlock(
+                block_id=current.block_id,
+                block_type=current.block_type,
+                has_children=current.has_children,
+                parent_id=current.parent_id,
+                parent_type=current.parent_type,
+                raw=current.raw,
+                children=prepared_children,
+            )
+        elif current is not block and block.block_type != "table" and prepared_children != current.children:
+            current = NotionBlock(
+                block_id=current.block_id,
+                block_type=current.block_type,
+                has_children=current.has_children,
+                parent_id=current.parent_id,
+                parent_type=current.parent_type,
+                raw=current.raw,
+                children=prepared_children,
+            )
+        return current
+
+    return [enrich(block) for block in blocks]
+
+
+def _extract_markdown_table_colors(markdown: str) -> list[dict[str, Any]]:
+    """Parse table color attributes from enhanced Markdown."""
+    tables: list[dict[str, Any]] = []
+
+    for table_match in _MARKDOWN_TABLE_RE.finditer(markdown or ""):
+        body = table_match.group("body")
+        column_colors: list[str | None] = []
+        colgroup_match = _MARKDOWN_COLGROUP_RE.search(body)
+        if colgroup_match:
+            column_colors = [
+                _markdown_color(_markdown_attributes(match.group("attrs")).get("color"))
+                for match in _MARKDOWN_COL_RE.finditer(colgroup_match.group("body"))
+            ]
+
+        rows: list[dict[str, Any]] = []
+        for row_match in _MARKDOWN_ROW_RE.finditer(body):
+            row_color = _markdown_color(_markdown_attributes(row_match.group("attrs")).get("color"))
+            
+            cells: list[dict[str, Any]] = []
+            for cell_match in _MARKDOWN_CELL_RE.finditer(row_match.group("body")):
+                cell_attrs = _markdown_attributes(cell_match.group("attrs"))
+                cell_text  = _normalize_table_text(cell_match.group("body"))
+                cells.append({"text": cell_text, "color": _markdown_color(cell_attrs.get("color"))})
+            
+            rows.append({"color": row_color, "cells": cells})
+        tables.append({"column_colors": column_colors, "rows": rows})
+
+    return tables
+
+
+def _markdown_attributes(raw_attributes: str) -> dict[str, str]:
+    """Return lowercase enhanced-Markdown attributes from one tag."""
+    return {name.lower(): value.strip() for name, _, value in _MARKDOWN_ATTRIBUTE_RE.findall(raw_attributes)}
+
+
+def _markdown_color(value: Any) -> str | None:
+    """Normalize enhanced-Markdown color aliases while retaining foreground colors."""
+    color = str(value or "").strip().lower()
+    return color or None
+
+
+def _normalize_table_text(value: str) -> str:
+    """Normalize table cell text for matching the two API representations."""
+    plain = html.unescape(_MARKDOWN_TAG_RE.sub("", value or ""))
+    return " ".join(plain.split()).strip()
+
+
+def _table_text_matrix(block: NotionBlock) -> list[list[str]]:
+    """Extract a normalized text matrix from a block-API table."""
+    matrix: list[list[str]] = []
+    for row in block.children:
+        if row.block_type != "table_row":
+            continue
+        payload = row.raw.get("table_row")
+        cells = payload.get("cells") if isinstance(payload, dict) else None
+        row_text: list[str] = []
+        for cell in cells if isinstance(cells, list) else []:
+            fragments = cell if isinstance(cell, list) else []
+            values = []
+            for item in fragments:
+                if not isinstance(item, dict):
+                    continue
+                values.append(str(item.get("plain_text") or item.get("text", {}).get("content") or ""))
+            row_text.append(_normalize_table_text("".join(values)))
+        matrix.append(row_text)
+    return matrix
+
+
+def _match_markdown_table(
+    block: NotionBlock,
+    tables: list[dict[str, Any]],
+    used_tables: set[int],
+) -> int | None:
+    """Find the enhanced-Markdown table with the same cell text matrix."""
+    block_matrix = _table_text_matrix(block)
+    for index, table in enumerate(tables):
+        if index in used_tables:
+            continue
+        markdown_matrix = [[cell["text"] for cell in row["cells"]] for row in table["rows"]]
+        if markdown_matrix == block_matrix:
+            used_tables.add(index)
+            return index
+    return None
+
+
+def _apply_table_colors(block: NotionBlock, table: dict[str, Any]) -> NotionBlock:
+    """Store effective Markdown cell colors on matching table-row payloads."""
+    rows = table["rows"]
+    column_colors = table["column_colors"]
+    prepared_children: list[NotionBlock] = []
+    row_index = 0
+    for child in block.children:
+        if child.block_type != "table_row" or row_index >= len(rows):
+            prepared_children.append(child)
+            continue
+        row = rows[row_index]
+        payload = child.raw.get("table_row")
+        if not isinstance(payload, dict):
+            prepared_children.append(child)
+            row_index += 1
+            continue
+        colors = [
+            cell["color"] or row["color"] or (column_colors[index] if index < len(column_colors) else None)
+            for index, cell in enumerate(row["cells"])
+        ]
+        raw = dict(child.raw)
+        row_payload = dict(payload)
+        row_payload["_noteck_cell_colors"] = colors
+        raw["table_row"] = row_payload
+        prepared_children.append(
+            NotionBlock(
+                block_id=child.block_id,
+                block_type=child.block_type,
+                has_children=child.has_children,
+                parent_id=child.parent_id,
+                parent_type=child.parent_type,
+                raw=raw,
+                children=child.children,
+            )
+        )
+        row_index += 1
+    raw = dict(block.raw)
+    return NotionBlock(
+        block_id=block.block_id,
+        block_type=block.block_type,
+        has_children=block.has_children,
+        parent_id=block.parent_id,
+        parent_type=block.parent_type,
+        raw=raw,
+        children=tuple(prepared_children),
+    )
 
 
 # Keep this alias Python 3.9-compatible because it is evaluated at import time.
@@ -190,6 +383,12 @@ class NotionClient:
     def get_page_content(self, page_id: str) -> list[NotionBlock]:
         """Return the full block tree for a page."""
         return self._fetch_block_children_recursive(page_id)
+
+    def get_page_markdown(self, page_id: str) -> str:
+        """Return enhanced Markdown content, including table cell colors."""
+        payload = self._request_json("GET", f"/pages/{page_id}/markdown", None)
+        markdown = payload.get("markdown")
+        return markdown if isinstance(markdown, str) else ""
 
     def get_page_last_edited_time(self, page_id: str) -> str | None:
         """Return the page `last_edited_time` used for fast-sync decisions."""

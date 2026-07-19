@@ -21,7 +21,7 @@ from .card_type_overrides import CardTypeOverrideStore
 from .cards import MODEL_NAME_BASIC, ensure_notion_toggle_model
 from .db import Database
 from .logging_utils import configure_file_logging, log_file_path
-from .notion_client import NotionBlock, NotionClient
+from .notion_client import NotionBlock, NotionClient, merge_markdown_table_colors
 from .parser import ToggleCardPayload, parse_page_to_cards
 from .settings import SettingsStore, create_default_settings
 
@@ -79,7 +79,8 @@ _MERMAID_FIGURE_RE = re.compile(
 )
 _HTTP_TIMEOUT_SECONDS = 20.0
 _CLOZE_REFRESH_REVISION_SETTING_KEY = "_internal_cloze_refresh_revision"
-_CLOZE_REFRESH_REVISION = "2026-07-paragraph-color-markers-v2"
+# Re-render and discover cloze notes after adding enhanced-Markdown table colors.
+_CLOZE_REFRESH_REVISION = "2026-07-markdown-table-colors-v5"
 _GRAY_TOGGLE_CLOZE_ENABLED_SETTING_KEY = "_internal_gray_toggle_cloze_enabled"
 _CLOZE_MARKER_COLORS_SETTING_KEY = "_internal_cloze_marker_colors"
 
@@ -510,6 +511,7 @@ def _sync_changed_page_fast(
     blocks = client.get_page_blocks_shallow(page_id)
     toggles = [block for block in blocks if block.block_type == "toggle"]
     cloze_parser = ClozeCardParser(cloze_marker_colors)
+    cloze_markdown = _get_cloze_markdown(client, page_id) if enable_cloze else None
 
     _LOG.debug("Fetched shallow page blocks. page_id=%s blocks=%d toggles=%d", page_id, len(blocks), len(toggles))
 
@@ -536,8 +538,18 @@ def _sync_changed_page_fast(
         )
         # Avoid an extra API call when Notion indicates there are no child blocks.
         children = client.get_block_children_recursive(toggle.block_id) if toggle.has_children else []
-        _LOG.debug("Expanding toggle for sync. page_id=%s block_id=%s children=%d card_type=%s", page_id, toggle.block_id, len(children), effective_card_type)
+        # This branch has not resolved a selectable card type yet; advanced
+        # cloze toggles are determined from their Notion structure instead.
+        _LOG.debug(
+            "Expanding toggle for sync. page_id=%s block_id=%s children=%d advanced_cloze=%s",
+            page_id,
+            toggle.block_id,
+            len(children),
+            is_advanced_cloze_toggle,
+        )
         expanded_toggle = _with_children(toggle, children)
+        if is_advanced_cloze_toggle:
+            expanded_toggle = _enrich_cloze_table_colors(expanded_toggle, cloze_markdown)
         toggle_payloads.extend(
             parse_page_to_cards(
                 page_id,
@@ -636,7 +648,7 @@ def _repair_missing_notes_for_unchanged_page(
     force_cloze_marker_colors_refresh: bool = False,
     should_cancel: SyncCancelCheck | None = None,
 ) -> tuple[SyncStats, list[str], bool]:
-    """Recreate local Anki notes that are missing even though the Notion page is unchanged."""
+    """Repair local notes and perform one-time cloze parser upgrades on an unchanged page."""
     existing_cards = _load_existing_cards_for_page(db, page_id)
     errors: list[str] = []
 
@@ -681,7 +693,10 @@ def _repair_missing_notes_for_unchanged_page(
         if force_cloze_refresh and normalize_card_type(mapping["card_type"], default=BASIC) == CLOZE:
             schedule_resync(block_id)
 
-    if not blocks_needing_resync:
+    # A parser upgrade can make a previously unmarked top-level paragraph a
+    # cloze card.  It has no existing mapping, so discover all cloze payloads
+    # once instead of returning before the page has been parsed.
+    if not blocks_needing_resync and not force_cloze_refresh:
         _LOG.debug("Unchanged page has no missing notes or conversion work. page_id=%s", page_id)
         return stats, errors, False
 
@@ -689,6 +704,7 @@ def _repair_missing_notes_for_unchanged_page(
 
     try:
         blocks = client.get_page_content(page_id)
+        blocks = _enrich_cloze_table_colors(blocks, _get_cloze_markdown(client, page_id) if enable_cloze else None)
     except Exception as exc:
         _LOG.exception("Could not fetch unchanged page for repair. page_id=%s", page_id)
         return stats, [f"Page {page_id}: {exc}"], False
@@ -700,8 +716,18 @@ def _repair_missing_notes_for_unchanged_page(
         enable_cloze=enable_cloze,
         enable_gray_toggle_cloze=enable_gray_toggle_cloze,
         cloze_marker_colors=cloze_marker_colors,
-        include_block_ids=blocks_needing_resync,
+        include_block_ids=None if force_cloze_refresh else blocks_needing_resync,
     )
+
+    if force_cloze_refresh:
+        # Only cloze cards participate in this migration; ordinary toggle
+        # cards retain the existing unchanged-page fast path.  Respect any
+        # explicit exclusion before queuing newly discovered card sources.
+        for payload in payloads:
+            mapping = existing_cards.get(payload.notion_block_id)
+            if payload.card_type == CLOZE and not (mapping is not None and mapping["excluded"]):
+                schedule_resync(payload.notion_block_id)
+
     payloads_by_block_id = {payload.notion_block_id: payload for payload in payloads}
 
     for block_id in blocks_needing_resync:
@@ -727,6 +753,32 @@ def _repair_missing_notes_for_unchanged_page(
             return stats, errors, True
 
     return stats, errors, False
+
+
+def _get_cloze_markdown(client: NotionClient, page_id: str) -> str | None:
+    """Fetch enhanced Markdown once for a page when the endpoint is available."""
+    get_markdown = getattr(client, "get_page_markdown", None)
+    if not callable(get_markdown):
+        return None
+    try:
+        return get_markdown(page_id)
+    except Exception:
+        # The block API remains a compatible fallback for older connections.
+        return None
+
+
+def _enrich_cloze_table_colors(blocks: Any, markdown: str | None) -> Any:
+    """Overlay enhanced-Markdown table colors while preserving the input shape."""
+    if not markdown:
+        return blocks
+
+    # Fast sync expands one root toggle at a time, while repair passes a full
+    # block list. The shared enrichment helper operates on iterables only.
+    if isinstance(blocks, NotionBlock):
+        enriched_blocks = merge_markdown_table_colors([blocks], markdown)
+        return enriched_blocks[0]
+
+    return merge_markdown_table_colors(blocks, markdown)
 
 
 def _load_cloze_refresh_revision(db: Database) -> str | None:

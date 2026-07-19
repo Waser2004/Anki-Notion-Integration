@@ -11,7 +11,12 @@ from . import parser as shared
 from ..card_types import CLOZE
 from ..cards import MODEL_NAME_CLOZE
 from ..notion_client import NotionBlock
-from .renderer import _render_rich_text_item, render_blocks_with_renderer, render_rich_text
+from .renderer import (
+    TABLE_CELL_CLOZE_COLOR_KEY,
+    _render_rich_text_item,
+    render_blocks_with_renderer,
+    render_rich_text,
+)
 
 
 _CLOZE_CONTAINER_PREFIX_RE = re.compile(r"^\s*\[cloze\]", re.IGNORECASE)
@@ -32,6 +37,26 @@ CLOZE_MARKER_COLORS = tuple(_CLOZE_NUMBERS)
 _CLOZE_START_RE    = re.compile(r"\{\{c([1-9]\d*)::")
 _HTML_TAG_RE       = re.compile(r"<[^>]*>")
 _MAX_NESTING_DEPTH = 3
+_COLORABLE_RENDERED_BLOCK_TYPES = frozenset(
+    {
+        "paragraph",
+        "heading_1",
+        "heading_2",
+        "heading_3",
+        "bulleted_list_item",
+        "numbered_list_item",
+        "quote",
+        "callout",
+        "toggle",
+    }
+)
+# This private payload/item key exists only on temporary copies prepared for
+# rendering a colored callout.  It lets the parent callout hide every textual
+# descendant without mutating the source Notion block or its original styling.
+_INHERITED_CALLOUT_CLOZE_COLOR_KEY = "_noteck_inherited_callout_cloze_color"
+_CALLOUT_TEXTUAL_DESCENDANT_BLOCK_TYPES = _COLORABLE_RENDERED_BLOCK_TYPES | frozenset(
+    {"code", "equation", "image"}
+)
 
 
 @dataclass(frozen=True)
@@ -47,7 +72,10 @@ class ClozeCardParser:
     def __init__(self, marker_colors: Iterable[str] | None = None) -> None:
         """Limit cloze conversion to the selected marker colors."""
         selected = CLOZE_MARKER_COLORS if marker_colors is None else marker_colors
-        self._marker_colors = {str(color).lower().removesuffix("_background") for color in selected}
+        self._marker_colors = {
+            str(color).strip().lower().removesuffix("_background")
+            for color in selected
+        }
 
     # Normal paragraph clozes -------------------------------------------------
 
@@ -62,12 +90,14 @@ class ClozeCardParser:
             if include_block_ids is not None and block.block_id not in include_block_ids:
                 continue
             
-            # Check if the paragraph contains any cloze markers (background colors).
+            # Top-level paragraphs require an inline marker; a block-level
+            # background alone has no context and is not a useful card.
             rich_text = self._rich_text(block)
             if not any(self._cloze_number(item) is not None for item in rich_text):
                 continue
             
-            # Convert the rich text to Anki cloze markup.
+            # Convert only the marked rich-text runs. Block-level colors remain
+            # available for descendants of advanced cloze containers.
             text = self._rich_text_to_cloze_text(rich_text)
             if not text.strip():
                 continue
@@ -131,15 +161,27 @@ class ClozeCardParser:
 
         # Check for the "gray_background" color in the toggle payload.
         color = self._payload(block).get("color")
-        is_gray_toggle = color.strip().lower() == "gray_background" if isinstance(color, str) else False
+        is_gray_toggle = self._normalize_background_color(color) == "gray" if isinstance(color, str) else False
         return enable_gray_toggle_cloze and is_gray_toggle
 
     def parse_advanced(self, page_id: str, block: NotionBlock) -> "shared.ToggleCardPayload":
         """Parse one advanced cloze toggle into an Anki cloze payload."""
         text_blocks, extra_blocks = self._split_advanced_children(block.children)
+        text_blocks = self._prepare_advanced_blocks(text_blocks)
+        extra_blocks = self._prepare_advanced_blocks(extra_blocks)
         fields = {
-            "Text":            render_blocks_with_renderer(text_blocks,  rich_text_renderer = self._rich_text_to_advanced_cloze_html),
-            "Extra":           render_blocks_with_renderer(extra_blocks, rich_text_renderer = self._rich_text_to_advanced_cloze_html),
+            "Text":            render_blocks_with_renderer(
+                text_blocks,
+                rich_text_renderer=self._rich_text_to_advanced_cloze_html,
+                block_text_override=self._render_block_level_cloze_html,
+                table_cell_override=self._render_table_cell_cloze_html,
+            ),
+            "Extra":           render_blocks_with_renderer(
+                extra_blocks,
+                rich_text_renderer=self._rich_text_to_advanced_cloze_html,
+                block_text_override=self._render_block_level_cloze_html,
+                table_cell_override=self._render_table_cell_cloze_html,
+            ),
             "Notion Block ID": block.block_id,
         }
         return self._payload_for_fields(page_id, block, fields)
@@ -184,6 +226,129 @@ class ClozeCardParser:
         
         flush()
         return "".join(parts)
+
+    def _render_block_level_cloze_html(self, block: NotionBlock) -> str | None:
+        """Return one cloze marker for a configured background-colored block."""
+        number = self._block_cloze_number(block)
+        if number is None:
+            return None
+
+        if block.block_type == "equation":
+            expression = self._payload(block).get("expression")
+            expression_text = expression.strip() if isinstance(expression, str) else ""
+            content = f"\\({html.escape(expression_text)}\\)" if expression_text else ""
+        else:
+            content = self._rich_text_to_html_without_marker_colors(self._block_cloze_rich_text(block))
+        return self._cloze_markup(number, content) or None
+
+    def _render_table_cell_cloze_html(
+        self,
+        cell_rich_text: list[dict[str, Any]],
+    ) -> str | None:
+        """Replace a fully colored table cell with one cloze marker."""
+        number = self._table_cell_cloze_number(cell_rich_text)
+        if number is None:
+            return None
+
+        content = self._rich_text_to_html_without_marker_colors(cell_rich_text)
+        marker = self._cloze_markup(number, content)
+        return marker or None
+
+    def _rich_text_to_html_without_marker_colors(self, rich_text: Iterable[dict[str, Any]]) -> str:
+        """Render complete block content without allowing inner marker colors to nest clozes."""
+        rendered: list[str] = []
+        for item in rich_text:
+            render_item = self._remove_marker_color(item) if self._cloze_number(item) is not None else item
+            rendered.append(_render_rich_text_item(render_item))
+        return "".join(rendered)
+
+    def _block_cloze_rich_text(self, block: NotionBlock) -> list[dict[str, Any]]:
+        """Return the direct text a supported renderer displays for a marked block."""
+        if block.block_type == "image":
+            caption = self._payload(block).get("caption")
+            return [item for item in caption if isinstance(item, dict)] if isinstance(caption, list) else []
+        return self._rich_text(block)
+
+    def _prepare_advanced_blocks(self, blocks: Iterable[NotionBlock]) -> list[NotionBlock]:
+        """Clone marked-callout descendants so their structure survives while text is hidden."""
+        return [self._prepare_advanced_block(block, inherited_callout_color=None) for block in blocks]
+
+    def _prepare_advanced_block(
+        self,
+        block: NotionBlock,
+        *,
+        inherited_callout_color: str | None,
+    ) -> NotionBlock:
+        """Apply a marked callout's color to descendant text without changing the source tree."""
+        explicit_block_color = self._explicit_block_cloze_color(block)
+        # A nested, explicitly colored callout starts a new marker scope.  Its
+        # own direct content and all of its descendants use that closer color.
+        own_callout_color = explicit_block_color if block.block_type == "callout" else None
+        effective_callout_color = own_callout_color or inherited_callout_color
+        payload = self._payload(block)
+        prepared_payload = payload
+        payload_changed = False
+
+        if (
+            inherited_callout_color is not None
+            and explicit_block_color is None
+            and block.block_type in _CALLOUT_TEXTUAL_DESCENDANT_BLOCK_TYPES
+        ):
+            prepared_payload = dict(payload)
+            prepared_payload[_INHERITED_CALLOUT_CLOZE_COLOR_KEY] = inherited_callout_color
+            payload_changed = True
+
+        if inherited_callout_color is not None and block.block_type == "table_row":
+            prepared_payload = dict(prepared_payload)
+            prepared_payload["cells"] = self._mark_table_cells(
+                prepared_payload.get("cells"),
+                inherited_callout_color,
+            )
+            payload_changed = True
+
+        prepared_children = tuple(
+            self._prepare_advanced_block(child, inherited_callout_color=effective_callout_color)
+            for child in block.children
+        )
+        children_changed = any(
+            prepared is not original
+            for prepared, original in zip(prepared_children, block.children)
+        )
+        if not payload_changed and not children_changed:
+            return block
+
+        raw = dict(block.raw)
+        if payload_changed:
+            raw[block.block_type] = prepared_payload
+        return replace(block, raw=raw, children=prepared_children)
+
+    def _mark_table_cells(self, raw_cells: Any, marker_color: str) -> list[Any]:
+        """Apply one inherited callout marker to every rich-text table cell."""
+        if not isinstance(raw_cells, list):
+            return []
+        return [
+            self._mark_rich_text_items(raw_cell, marker_color)
+            if isinstance(raw_cell, list)
+            else raw_cell
+            for raw_cell in raw_cells
+        ]
+
+    def _mark_rich_text_items(self, raw_items: Iterable[Any], marker_color: str) -> list[Any]:
+        """Mark copied items without overwriting their original annotations."""
+        marked_items: list[Any] = []
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                marked_items.append(raw_item)
+                continue
+            item = dict(raw_item)
+            item[_INHERITED_CALLOUT_CLOZE_COLOR_KEY] = marker_color
+            marked_items.append(item)
+        return marked_items
+
+    @staticmethod
+    def _cloze_markup(number: int, content: str) -> str:
+        """Wrap non-empty rendered content in valid Anki cloze markup."""
+        return f"{{{{c{number}::{content}}}}}" if content else ""
 
     # Helpers shared by paragraph and toggle clozes --------------------------
 
@@ -231,9 +396,72 @@ class ClozeCardParser:
         payload = block.raw.get(block.block_type)
         return payload if isinstance(payload, dict) else {}
 
+    def _block_cloze_color(self, block: NotionBlock) -> str | None:
+        """Return a configured explicit or inherited marker color for rendering."""
+        explicit_color = self._explicit_block_cloze_color(block)
+        if explicit_color is not None:
+            return explicit_color
+        return self._configured_marker_color(
+            self._payload(block).get(_INHERITED_CALLOUT_CLOZE_COLOR_KEY),
+        )
+
+    def _explicit_block_cloze_color(self, block: NotionBlock) -> str | None:
+        """Return a real Notion block background for renderer-supported colorable types."""
+        if block.block_type not in _COLORABLE_RENDERED_BLOCK_TYPES:
+            return None
+        return self._configured_marker_color(
+            self._payload(block).get("color"),
+            require_background=True,
+        )
+
+    def _configured_marker_color(self, value: Any, *, require_background: bool = False) -> str | None:
+        """Normalize one configured Notion marker color without accepting foreground block colors."""
+        color = str(value or "").strip().lower()
+        if require_background:
+            normalized = self._normalize_background_color(color)
+            if normalized is None:
+                return None
+            color = normalized
+        else:
+            color = self._normalize_background_color(color) or color
+
+        if color not in _CLOZE_NUMBERS or color not in self._marker_colors:
+            return None
+        return color
+
+    @staticmethod
+    def _normalize_background_color(value: Any) -> str | None:
+        """Return a base color from either REST or enhanced-Markdown notation."""
+        color = str(value or "").strip().lower()
+        if color.endswith("_background"):
+            return color.removesuffix("_background")
+        if color.endswith("_bg"):
+            return color.removesuffix("_bg")
+        return None
+
+    def _block_cloze_number(self, block: NotionBlock) -> int | None:
+        """Return the fixed cloze number for a configured block background color."""
+        marker_color = self._block_cloze_color(block)
+        return _CLOZE_NUMBERS.get(marker_color) if marker_color is not None else None
+
     def _rich_text(self, block: NotionBlock) -> list[dict[str, Any]]:
         rich_text = self._payload(block).get("rich_text")
         return [item for item in rich_text if isinstance(item, dict)] if isinstance(rich_text, list) else []
+
+    def _table_cell_cloze_number(self, cell_rich_text: Iterable[dict[str, Any]]) -> int | None:
+        """Return a marker only when every non-empty cell fragment has one color."""
+        number: int | None = None
+        has_content = False
+        for item in cell_rich_text:
+            if not self._cloze_fragment(item).strip():
+                continue
+
+            item_number = self._cloze_number(item)
+            if item_number is None or (number is not None and item_number != number):
+                return None
+            number = item_number
+            has_content = True
+        return number if has_content else None
 
     @staticmethod
     def _plain_text(rich_text: Iterable[dict[str, Any]]) -> str:
@@ -271,21 +499,31 @@ class ClozeCardParser:
         return replace(block, raw=raw)
 
     def _cloze_number(self, item: Any) -> int | None:
+        if isinstance(item, dict):
+            cell_color = self._configured_marker_color(item.get(TABLE_CELL_CLOZE_COLOR_KEY))
+            if cell_color is not None:
+                return _CLOZE_NUMBERS[cell_color]
+            inherited_color = self._configured_marker_color(
+                item.get(_INHERITED_CALLOUT_CLOZE_COLOR_KEY),
+            )
+            if inherited_color is not None:
+                return _CLOZE_NUMBERS[inherited_color]
+
         annotations = item.get("annotations") if isinstance(item, dict) else None
         if not isinstance(annotations, dict):
             return None
         
         # get item color annotation and convert it to the corresponding cloze number
-        color = str(annotations.get("color") or "").lower()
-        if color.endswith("_background"):
-            marker_color = color.removesuffix("_background")
-            number = _CLOZE_NUMBERS.get(marker_color) if marker_color in self._marker_colors else None
-            if number is not None:
-                return number
+        color = self._configured_marker_color(
+            annotations.get("color"),
+            require_background=True,
+        )
+        if color is not None:
+            return _CLOZE_NUMBERS[color]
         
         # get item background color annotation and convert it to the corresponding cloze number
-        background = str(annotations.get("background_color") or "").lower().removesuffix("_background")
-        return _CLOZE_NUMBERS.get(background) if background in self._marker_colors else None
+        background = self._configured_marker_color(annotations.get("background_color"))
+        return _CLOZE_NUMBERS.get(background) if background is not None else None
 
     @staticmethod
     def _cloze_fragment(item: dict[str, Any]) -> str:
@@ -296,15 +534,18 @@ class ClozeCardParser:
 
     def _remove_marker_color(self, item: dict[str, Any]) -> dict[str, Any]:
         result      = dict(item)
+        result.pop(TABLE_CELL_CLOZE_COLOR_KEY, None)
+        result.pop(_INHERITED_CALLOUT_CLOZE_COLOR_KEY, None)
         annotations = dict(item.get("annotations") or {})
 
         # Set color annotation to default for cloze color 
-        color = str(annotations.get("color") or "").lower()
-        if color.endswith("_background") and color.removesuffix("_background") in self._marker_colors:
+        color = self._normalize_background_color(annotations.get("color")) or str(annotations.get("color") or "").strip().lower()
+        if color in self._marker_colors:
             annotations["color"] = "default"
 
         # Set background_color annotation to default for cloze background color
-        if str(annotations.get("background_color") or "").lower().removesuffix("_background") in self._marker_colors:
+        background = self._normalize_background_color(annotations.get("background_color")) or str(annotations.get("background_color") or "").strip().lower()
+        if background in self._marker_colors:
             annotations["background_color"] = "default"
 
         result["annotations"] = annotations

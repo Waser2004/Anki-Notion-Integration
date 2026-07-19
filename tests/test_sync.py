@@ -326,6 +326,47 @@ class _FakeNotionClientWithParagraphs(_FakeNotionClient):
         )
 
 
+class _FakeNotionClientWithBlockColoredParagraph(_FakeNotionClient):
+    """Notion client double with a cloze source that exists only as a block color."""
+
+    def get_page_blocks_shallow(self, page_id: str) -> list[NotionBlock]:
+        _ = page_id
+        return self.get_page_content(page_id)
+
+    def get_page_content(self, page_id: str) -> list[NotionBlock]:
+        _ = page_id
+        raw = {
+            "object": "block",
+            "id": "block-colored",
+            "type": "paragraph",
+            "has_children": False,
+            "last_edited_time": self._toggle_last_edited_time,
+            "parent": {"type": "page_id", "page_id": "page-1"},
+            "paragraph": {
+                "color": "yellow_background",
+                "rich_text": [
+                    {
+                        "type": "text",
+                        "plain_text": "Block-colored answer",
+                        "text": {"content": "Block-colored answer"},
+                        "annotations": {"color": "default"},
+                    }
+                ],
+            },
+        }
+        return [
+            NotionBlock(
+                block_id="block-colored",
+                block_type="paragraph",
+                has_children=False,
+                parent_id="page-1",
+                parent_type="page_id",
+                raw=raw,
+                children=(),
+            )
+        ]
+
+
 class SyncTests(unittest.TestCase):
     """Validate create/update/no-op sync behavior with mocked dependencies."""
 
@@ -363,6 +404,28 @@ class SyncTests(unittest.TestCase):
             content_hash=content_hash,
             last_edited_time="2026-02-04T00:00:00.000Z",
         )
+
+    def test_table_color_enrichment_preserves_single_block_and_list_shapes(self) -> None:
+        """Fast sync passes one toggle while repair passes a page block list."""
+        block = _FakeNotionClient()._toggle_block(parent_id="page-1")
+        markdown = "<table><tr><td>value</td></tr></table>"
+
+        with patch.object(
+            _SYNC_MODULE,
+            "merge_markdown_table_colors",
+            side_effect=lambda blocks, _markdown: list(blocks),
+        ) as enrich_mock:
+            self.assertIs(
+                _SYNC_MODULE._enrich_cloze_table_colors(block, markdown),
+                block,
+            )
+            self.assertEqual(
+                _SYNC_MODULE._enrich_cloze_table_colors([block], markdown),
+                [block],
+            )
+
+        self.assertEqual(enrich_mock.call_args_list[0].args, ([block], markdown))
+        self.assertEqual(enrich_mock.call_args_list[1].args, ([block], markdown))
 
     def test_sync_creates_note_and_mapping(self) -> None:
         collection = _FakeCollection()
@@ -614,6 +677,11 @@ class SyncTests(unittest.TestCase):
         mw = _FakeMw(collection)
         existing_note = collection.new_note({"name": "Notion Toggle"})
         collection.add_note(existing_note, deck_id=1)
+        # This test exercises ordinary local repair, not the one-time parser upgrade.
+        self._db.set_setting(
+            _SYNC_MODULE._CLOZE_REFRESH_REVISION_SETTING_KEY,
+            _SYNC_MODULE._CLOZE_REFRESH_REVISION,
+        )
 
         connection = self._db.connect()
         try:
@@ -1548,6 +1616,11 @@ class SyncTests(unittest.TestCase):
         mw = _FakeMw(collection)
         existing_note = collection.new_note({"name": "Notion Toggle"})
         collection.add_note(existing_note, deck_id=1)
+        # Mark the parser migration complete so the no-op fast path is isolated.
+        self._db.set_setting(
+            _SYNC_MODULE._CLOZE_REFRESH_REVISION_SETTING_KEY,
+            _SYNC_MODULE._CLOZE_REFRESH_REVISION,
+        )
 
         # Record that we've already seen this page edit time so the fast path treats it as unchanged.
         connection = self._db.connect()
@@ -1673,7 +1746,7 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(result.stats.cards_updated, 1)
         parse_mock.assert_called_once()
         include_block_ids = parse_mock.call_args.kwargs.get("include_block_ids")
-        self.assertEqual(list(include_block_ids), ["cloze-included"])
+        self.assertIsNone(include_block_ids)
         self.assertEqual(
             self._db.get_setting(_SYNC_MODULE._CLOZE_REFRESH_REVISION_SETTING_KEY),
             _SYNC_MODULE._CLOZE_REFRESH_REVISION,
@@ -1689,6 +1762,56 @@ class SyncTests(unittest.TestCase):
             connection.close()
         self.assertIsNotNone(row)
         self.assertEqual(str(row["content_hash"]), "hash-updated")
+
+    def test_sync_unchanged_page_ignores_block_colored_paragraph_after_parser_upgrade(self) -> None:
+        """A parser refresh does not discover a context-free block-colored paragraph."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        self._db.set_setting("enable_cloze_parsing", "1")
+        self._db.set_setting("cloze_marker_colors", '["yellow","green","blue","purple"]')
+        self._db.set_setting(
+            _SYNC_MODULE._CLOZE_MARKER_COLORS_SETTING_KEY,
+            "yellow,green,blue,purple",
+        )
+
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                UPDATE pages
+                SET last_seen_notion_edit_time = ?
+                WHERE notion_page_id = ?
+                """,
+                ("2026-02-04T00:00:00.000Z", "page-1"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        fake_client = _FakeNotionClientWithBlockColoredParagraph(
+            page_last_edited_time="2026-02-04T00:00:00.000Z",
+        )
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=fake_client,
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            wraps=_SYNC_MODULE.parse_page_to_cards,
+        ) as parse_mock:
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_created, 0)
+        self.assertEqual(len(collection.notes), 0)
+        parse_mock.assert_called_once()
+        self.assertIsNone(parse_mock.call_args.kwargs.get("include_block_ids"))
+        self.assertEqual(
+            self._db.get_setting(_SYNC_MODULE._CLOZE_REFRESH_REVISION_SETTING_KEY),
+            _SYNC_MODULE._CLOZE_REFRESH_REVISION,
+        )
+
 
     def test_sync_unchanged_page_skips_repeat_cloze_refresh_after_revision_marker(self) -> None:
         collection = _FakeCollection()

@@ -36,8 +36,9 @@ Each payload includes:
 ## Cloze rules
 
 - Source scope: top-level paragraph blocks only.
-- Markers: yellow, green, blue, purple, pink, orange, red, and brown background annotations, mapped to `c1` through `c8` respectively.
+- Markers: yellow, green, blue, purple, pink, orange, red, and brown background annotations, mapped to `c1` through `c8` respectively. A paragraph block background alone is not a marker.
 - Only paragraphs containing at least one marker emit a cloze payload.
+- Block-level backgrounds remain supported for content inside advanced cloze containers, where the container supplies context.
 - Inline equations inside cloze text are rendered with Anki MathJax delimiters (`\(...\)`).
 - Consecutive highlighted rich-text fragments are combined into one cloze deletion, even when inline equations split the rich-text items.
 - Optional `Extra` field source: the immediate next top-level paragraph whose plain text starts with `Extra:` (case-insensitive).
@@ -68,10 +69,13 @@ Toggle-based cloze parsing uses the same `enable_cloze` option as paragraph cloz
 - Direct child paragraphs starting with `Extra:` are excluded from `Text` and render into `Extra`; `[extra]` toggles render normally.
 - Nested `[extra]` toggles are normal nested toggles and have no special meaning.
 - Supported child blocks use the same HTML rendering as toggle cards, but rich text is cloze-aware.
+- A configured block background hides direct text in one deletion while retaining the structure of paragraphs, headings, nested toggles, bulleted/numbered lists, quotes, and callouts. A marked callout preserves its icon, container, and child layout while its direct and descendant text uses the same cloze number; an explicitly colored nested callout starts its own cloze scope.
+- Tables are handled per cell: a cell is whole-cell clozed only if every non-empty fragment has the same configured marker. The stylesheet highlights only the `td`/`th` containing Anki's currently hidden cloze child; partial cell highlights retain inline behavior.
 - Marker background colors map to fixed cloze numbers: yellow -> c1, green -> c2, blue -> c3, purple -> c4, pink -> c5, orange -> c6, red -> c7, brown -> c8.
 - Repeated cloze numbers and skipped numbers are valid.
 - Marker background colors are removed from exported HTML, while normal formatting and non-marker highlight colors are preserved.
 - Containers with no marker colors still emit deterministic `cloze` payloads instead of falling back to another card type; sync validation then rejects them before any Anki write because Anki needs at least one deletion.
+- Code, equation, image, table/container, column, and divider blocks cannot carry a standalone complete block color in the current Notion API shape. Inside a marked callout, their textual content is hidden with that callout's cloze number while their supported renderer structure remains.
 
 ## Cloze validation before Anki writes
 

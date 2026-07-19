@@ -8,7 +8,7 @@ import unittest
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
-from Noteck.modules.notion_client import NotionBlock
+from Noteck.modules.notion_client import NotionBlock, merge_markdown_table_colors
 from Noteck.modules.parser.cloze_card_parser import ClozeCardParser
 from Noteck.modules.parser import (
     collect_image_occlusion_candidates,
@@ -355,6 +355,30 @@ class ParserTests(unittest.TestCase):
         self.assertIn(r'<div class="notion-block-equation">\[\text{Block Equation}\]</div>', rendered)
         self.assertIn("<blockquote><p>Quoted text</p></blockquote>", rendered)
         self.assertIn('<p class="notion-callout-icon">📌</p>', rendered)
+
+    def test_render_blocks_preserves_external_callout_icons(self) -> None:
+        """Uploaded and external callout icons keep their visual slot in rendered cards."""
+        rendered = render_blocks(
+            [
+                _block(
+                    "callout-external-icon",
+                    "callout",
+                    {
+                        "icon": {
+                            "type": "external",
+                            "external": {"url": "https://example.com/icon.svg"},
+                        },
+                        "rich_text": [_text_item("Callout text")],
+                    },
+                )
+            ]
+        )
+
+        self.assertIn(
+            '<img class="notion-callout-icon notion-callout-icon-image" '
+            'src="https://example.com/icon.svg" alt="" loading="lazy"/>',
+            rendered,
+        )
 
     def test_render_blocks_renders_heading_levels_1_2_3(self) -> None:
         blocks = [
@@ -1539,6 +1563,405 @@ class ParserTests(unittest.TestCase):
         self.assertIn('{{c1::<a href="https://example.com"><em><strong>Term</strong></em></a>}}', text)
         self.assertIn('<span class="highlight-blue">blue</span>', text)
         self.assertNotIn("highlight-yellow_background", text)
+
+    def test_colored_top_level_paragraph_is_not_a_cloze_card(self) -> None:
+        """A block background alone does not provide enough cloze context."""
+        paragraph = _block(
+            "paragraph-block-cloze",
+            "paragraph",
+            {
+                "color": "yellow_background",
+                "rich_text": [
+                    _text_item("Whole"),
+                    _text_item(" paragraph", annotations=_annotations(bold=True)),
+                ],
+            },
+        )
+
+        self.assertEqual(parse_page_to_cards("page-1", [paragraph], enable_cloze=True), [])
+
+        unselected = _block(
+            "paragraph-unselected",
+            "paragraph",
+            {"color": "yellow_background", "rich_text": [_text_item("Unselected")]},
+        )
+        foreground_only = _block(
+            "paragraph-foreground",
+            "paragraph",
+            {"color": "yellow", "rich_text": [_text_item("Foreground only")]},
+        )
+        self.assertEqual(
+            parse_page_to_cards("page-1", [unselected], enable_cloze=True, cloze_marker_colors=["green"]),
+            [],
+        )
+        self.assertEqual(parse_page_to_cards("page-1", [foreground_only], enable_cloze=True), [])
+
+    def test_advanced_cloze_preserves_colored_block_structures(self) -> None:
+        """Block markers replace direct text while keeping each Notion structure visible."""
+        advanced_toggle = _block(
+            "advanced-structures",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] Colored structures")]},
+            children=(
+                _block(
+                    "heading-1",
+                    "heading_1",
+                    {"color": "yellow_background", "rich_text": [_text_item("Heading one")]},
+                ),
+                _block(
+                    "heading-2",
+                    "heading_2",
+                    {"color": "green_background", "rich_text": [_text_item("Heading two")]},
+                ),
+                _block(
+                    "heading-3",
+                    "heading_3",
+                    {"color": "blue_background", "rich_text": [_text_item("Heading three")]},
+                ),
+                _block(
+                    "paragraph",
+                    "paragraph",
+                    {"color": "purple_background", "rich_text": [_text_item("Paragraph text")]},
+                ),
+                _block(
+                    "nested-toggle",
+                    "toggle",
+                    {"color": "pink_background", "rich_text": [_text_item("Toggle title")]},
+                    children=(_block("toggle-child", "paragraph", {"rich_text": [_text_item("Toggle child")]}),),
+                ),
+                _block(
+                    "bullet",
+                    "bulleted_list_item",
+                    {"color": "orange_background", "rich_text": [_text_item("Bullet text")]},
+                ),
+                _block(
+                    "numbered",
+                    "numbered_list_item",
+                    {"color": "red_background", "rich_text": [_text_item("Numbered text")]},
+                ),
+                _block(
+                    "quote",
+                    "quote",
+                    {"color": "brown_background", "rich_text": [_text_item("Quote text")]},
+                ),
+                _block(
+                    "callout",
+                    "callout",
+                    {
+                        "color": "yellow_background",
+                        "icon": {"type": "emoji", "emoji": "💡"},
+                        "rich_text": [_text_item("Callout text")],
+                    },
+                    children=(
+                        _block("callout-child", "paragraph", {"rich_text": [_text_item("Callout child")]}),
+                        _block(
+                            "callout-toggle",
+                            "toggle",
+                            {"rich_text": [_text_item("Callout toggle")]},
+                            children=(
+                                _block(
+                                    "callout-toggle-child",
+                                    "paragraph",
+                                    {"rich_text": [_text_item("Callout toggle child")]},
+                                ),
+                            ),
+                        ),
+                        _block(
+                            "callout-table",
+                            "table",
+                            {"table_width": 1, "has_column_header": False, "has_row_header": False},
+                            children=(
+                                _block(
+                                    "callout-table-row",
+                                    "table_row",
+                                    {"cells": [[_text_item("Callout cell")]]},
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        text = parse_page_to_cards("page-1", [advanced_toggle], enable_cloze=True)[0].fields["Text"]
+
+        self.assertIn("<h1>{{c1::Heading one}}</h1>", text)
+        self.assertIn("<h2>{{c2::Heading two}}</h2>", text)
+        self.assertIn("<h3>{{c3::Heading three}}</h3>", text)
+        self.assertIn("<p>{{c4::Paragraph text}}</p>", text)
+        self.assertIn('<details class="notion-toggle"><summary>{{c5::Toggle title}}</summary>', text)
+        self.assertIn("<p>Toggle child</p>", text)
+        self.assertIn("<ul><li>{{c6::Bullet text}}</li></ul>", text)
+        self.assertIn("<ol><li>{{c7::Numbered text}}</li></ol>", text)
+        self.assertIn("<blockquote><p>{{c8::Quote text}}</p></blockquote>", text)
+        self.assertIn('<div class="callout">', text)
+        self.assertIn('<p class="notion-callout-icon">💡</p>', text)
+        self.assertIn("<p>{{c1::Callout text}}</p><p>{{c1::Callout child}}</p>", text)
+        self.assertIn(
+            '<details class="notion-toggle"><summary>{{c1::Callout toggle}}</summary>'
+            "<p>{{c1::Callout toggle child}}</p></details>",
+            text,
+        )
+        self.assertIn('<table><tbody><tr><td>{{c1::Callout cell}}</td></tr></tbody></table>', text)
+
+    def test_colored_callout_hides_all_textual_descendants_and_keeps_their_structure(self) -> None:
+        """A callout marker covers nested code, equations, captions, tables, and child callouts."""
+        advanced_toggle = _block(
+            "advanced-callout-descendants",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] Callout descendants")]},
+            children=(
+                _block(
+                    "outer-callout",
+                    "callout",
+                    {
+                        "color": "yellow_background",
+                        "icon": {"type": "emoji", "emoji": "\U0001F4A1"},
+                        "rich_text": [
+                            _text_item("Outer text", annotations=_annotations(color="purple_background")),
+                        ],
+                    },
+                    children=(
+                        _block(
+                            "callout-code",
+                            "code",
+                            {
+                                "language": "python",
+                                "rich_text": [
+                                    _text_item("print('hidden')", annotations=_annotations(color="purple_background")),
+                                ],
+                            },
+                        ),
+                        _block(
+                            "callout-equation",
+                            "equation",
+                            {"expression": "x^2 + y^2"},
+                        ),
+                        _block(
+                            "callout-image",
+                            "image",
+                            {
+                                "type": "external",
+                                "external": {"url": "https://example.com/hidden.png"},
+                                "caption": [
+                                    _text_item("Hidden caption", annotations=_annotations(color="purple_background")),
+                                ],
+                            },
+                        ),
+                        _block(
+                            "nested-callout",
+                            "callout",
+                            {
+                                "color": "green_background",
+                                "icon": {"type": "emoji", "emoji": "\U0001F331"},
+                                "rich_text": [_text_item("Inner text")],
+                            },
+                            children=(
+                                _block(
+                                    "nested-callout-child",
+                                    "paragraph",
+                                    {
+                                        "rich_text": [
+                                            _text_item(
+                                                "Inner child",
+                                                annotations=_annotations(color="brown_background"),
+                                            ),
+                                        ],
+                                    },
+                                ),
+                            ),
+                        ),
+                        _block(
+                            "callout-table",
+                            "table",
+                            {"table_width": 1, "has_column_header": False, "has_row_header": False},
+                            children=(
+                                _block(
+                                    "callout-table-row",
+                                    "table_row",
+                                    {
+                                        "cells": [
+                                            [
+                                                _text_item(
+                                                    "Table answer",
+                                                    annotations=_annotations(color="purple_background"),
+                                                )
+                                            ]
+                                        ]
+                                    },
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        text = parse_page_to_cards("page-1", [advanced_toggle], enable_cloze=True)[0].fields["Text"]
+
+        self.assertIn('<div class="callout">', text)
+        self.assertIn("<p>{{c1::Outer text}}</p>", text)
+        self.assertIn(
+            '<pre class="code"><code class="language-python">{{c1::print(&#x27;hidden&#x27;)}}</code></pre>',
+            text,
+        )
+        self.assertIn('<div class="notion-block-equation">{{c1::\\(x^2 + y^2\\)}}</div>', text)
+        self.assertIn(
+            '<figure class="notion-image"><img src="https://example.com/hidden.png" '
+            'alt="Notion image" loading="lazy"/><figcaption>{{c1::Hidden caption}}</figcaption></figure>',
+            text,
+        )
+        self.assertIn('<p>{{c2::Inner text}}</p><p>{{c2::Inner child}}</p>', text)
+        self.assertIn('<td>{{c1::Table answer}}</td>', text)
+        self.assertNotIn("{{c4::", text)
+        self.assertNotIn("{{c8::", text)
+
+    def test_advanced_cloze_replaces_fully_colored_table_cells(self) -> None:
+        """Every uniformly marked cell becomes an independently styled whole-cell cloze."""
+        table = _block(
+            "table",
+            "table",
+            {"table_width": 3, "has_column_header": True, "has_row_header": True},
+            children=(
+                _block(
+                    "header-row",
+                    "table_row",
+                    {
+                        "cells": [
+                            [_text_item("Header A", annotations=_annotations(color="yellow_background"))],
+                            [_text_item("Header B")],
+                            [_text_item("Header C", annotations=_annotations(background_color="green"))],
+                        ]
+                    },
+                ),
+                _block(
+                    "row-one",
+                    "table_row",
+                    {
+                        "cells": [
+                            [_text_item("Row one", annotations=_annotations(background_color="blue"))],
+                            [
+                                _text_item("Split ", annotations=_annotations(color="yellow_background")),
+                                _text_item("cell", annotations=_annotations(background_color="yellow")),
+                            ],
+                            [
+                                _text_item("Partial", annotations=_annotations(background_color="yellow")),
+                                _text_item(" visible"),
+                            ],
+                        ]
+                    },
+                ),
+                _block(
+                    "row-two",
+                    "table_row",
+                    {
+                        "cells": [
+                            [_text_item("Row two")],
+                            [_text_item("Same column", annotations=_annotations(color="green_background"))],
+                            [_text_item("Another cell", annotations=_annotations(background_color="yellow"))],
+                        ]
+                    },
+                ),
+            ),
+        )
+        advanced_toggle = _block(
+            "advanced-table",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] Table")]},
+            children=(table,),
+        )
+
+        text = parse_page_to_cards("page-1", [advanced_toggle], enable_cloze=True)[0].fields["Text"]
+
+        self.assertIn("<table><thead>", text)
+        self.assertIn('<th scope="col">{{c1::Header A}}</th>', text)
+        self.assertIn('<th scope="col">{{c2::Header C}}</th>', text)
+        self.assertIn('<th scope="row">{{c3::Row one}}</th>', text)
+        self.assertIn('<td>{{c1::Split cell}}</td>', text)
+        self.assertIn('<td>{{c2::Same column}}</td>', text)
+        self.assertIn('<td>{{c1::Another cell}}</td>', text)
+        self.assertIn("<td>{{c1::Partial}} visible</td>", text)
+        self.assertNotIn('<td class="cloze">{{c1::Partial', text)
+
+    def test_table_only_advanced_cloze_accepts_enhanced_markdown_cell_colors(self) -> None:
+        """A table-only card remains discoverable when colors use Notion's short aliases."""
+        table = _block(
+            "table-short-colors",
+            "table",
+            {"table_width": 2, "has_column_header": False, "has_row_header": False},
+            children=(
+                _block(
+                    "table-short-colors-row",
+                    "table_row",
+                    {
+                        "cells": [
+                            [_text_item("Hidden", annotations=_annotations(color="yellow_bg"))],
+                            [_text_item("Visible")],
+                        ]
+                    },
+                ),
+            ),
+        )
+        advanced_toggle = _block(
+            "advanced-table-only",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] Table only")]},
+            children=(table,),
+        )
+
+        payload = parse_page_to_cards("page-1", [advanced_toggle], enable_cloze=True)[0]
+
+        self.assertIn('<td>{{c1::Hidden}}</td>', payload.fields["Text"])
+        self.assertIn("<td>Visible</td>", payload.fields["Text"])
+        self.assertTrue(ClozeCardParser().validate(payload).is_valid)
+
+    def test_enhanced_markdown_table_colors_are_merged_into_block_api_cells(self) -> None:
+        """Cell, row, and column colors from Markdown become table cloze markers."""
+        table = _block(
+            "table-markdown-colors",
+            "table",
+            {"table_width": 3, "has_column_header": True, "has_row_header": True},
+            children=(
+                _block(
+                    "table-markdown-row-1",
+                    "table_row",
+                    {"cells": [[_text_item("A")], [_text_item("B")], [_text_item("C")]]},
+                ),
+                _block(
+                    "table-markdown-row-2",
+                    "table_row",
+                    {"cells": [[_text_item("D")], [_text_item("E")], [_text_item("F")]]},
+                ),
+            ),
+        )
+        advanced_toggle = _block(
+            "advanced-markdown-table",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] Markdown table colors")]},
+            children=(table,),
+        )
+        markdown = """
+<table>
+<colgroup><col color="yellow_bg"><col><col color="purple_bg"></colgroup>
+<tr><td>A</td><td color="green_bg">B</td><td>C</td></tr>
+<tr color="blue_bg"><td>D</td><td>E</td><td>F</td></tr>
+</table>
+"""
+
+        enriched = merge_markdown_table_colors([advanced_toggle], markdown)
+        self.assertEqual(
+            enriched[0].children[0].children[0].raw["table_row"].get("_noteck_cell_colors"),
+            ["yellow_bg", "green_bg", "purple_bg"],
+        )
+        payload = parse_page_to_cards("page-1", enriched, enable_cloze=True)[0]
+        text = payload.fields["Text"]
+
+        self.assertIn('<th scope="col">{{c1::A}}</th>', text)
+        self.assertIn('<th scope="col">{{c2::B}}</th>', text)
+        self.assertIn('<th scope="col">{{c4::C}}</th>', text)
+        self.assertIn('<th scope="row">{{c3::D}}</th>', text)
+        self.assertIn('<td>{{c3::E}}</td>', text)
+        self.assertIn('<td>{{c3::F}}</td>', text)
 
     def test_advanced_cloze_container_without_markers_remains_cloze_payload(self) -> None:
         advanced_toggle = _block(

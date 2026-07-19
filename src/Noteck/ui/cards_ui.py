@@ -806,10 +806,20 @@ class CardsPage(QWidget):
 
     @staticmethod
     def _paragraph_has_cloze_marker(raw_payload: dict[str, Any], marker_colors: list[str]) -> bool:
-        """Return whether one paragraph contains cloze-marker rich-text annotations."""
+        """Return whether a paragraph uses a configured block or inline cloze marker."""
         paragraph_payload = raw_payload.get("paragraph")
         if not isinstance(paragraph_payload, dict):
             return False
+        selected_colors = {
+            str(color).strip().lower().removesuffix("_background")
+            for color in marker_colors
+        }
+
+        # Match parser behavior: block-level clozes require a background color.
+        block_color = str(paragraph_payload.get("color") or "").strip().lower()
+        if block_color.endswith("_background") and block_color.removesuffix("_background") in selected_colors:
+            return True
+
         rich_text = paragraph_payload.get("rich_text")
         if not isinstance(rich_text, list):
             return False
@@ -823,8 +833,10 @@ class CardsPage(QWidget):
             color = str(annotations.get("color") or "").strip().lower()
             background_color = str(annotations.get("background_color") or "").strip().lower()
             # Paragraph clozes use the same marker palette as advanced toggle clozes.
-            selected_colors = set(marker_colors)
-            if color.removesuffix("_background") in selected_colors or background_color.removesuffix("_background") in selected_colors:
+            if (
+                color.endswith("_background")
+                and color.removesuffix("_background") in selected_colors
+            ) or background_color.removesuffix("_background") in selected_colors:
                 return True
         return False
 

@@ -85,7 +85,7 @@ Top-level Notion toggle blocks are the main source of cards.
 
 #### Cloze
 
-- Created from top-level paragraph blocks, not from toggles
+- Created from top-level paragraph blocks or recognized advanced cloze toggles
 - Requires highlighted cloze markers (see cloze rules below)
 
 ## 5. Supported Notion content
@@ -127,8 +127,8 @@ Cloze cards, including toggle-based cloze cards, are generated only when cloze p
 Rules:
 
 - Source scope: top-level paragraph blocks only.
-- A paragraph must contain a supported highlighted cloze marker (yellow, green, blue, purple, pink, orange, red, or brown).
-- Only highlighted text becomes cloze markup, using the marker color's fixed `c1` through `c8` number.
+- A paragraph can use a supported marker in part of its rich text. A block background alone is not a top-level cloze marker because it provides no context.
+- An inline marker hides only its highlighted text using the marker color's fixed `c1` through `c8` number. Block backgrounds remain supported inside advanced cloze toggles.
 - Non-highlighted text remains normal text.
 
 Optional `Extra` behavior:
@@ -147,10 +147,13 @@ Toggle-based cloze behavior:
 - Top-level toggles whose title starts with `[cloze]` become cloze cards.
 - Top-level toggles with a gray background (`gray_background`) become cloze cards only when gray-toggle cloze parsing is enabled; gray text color alone does not qualify.
 - Child blocks render into `Text` with cloze-aware rich-text parsing.
+- A configured background on a supported child block hides its complete direct text while retaining its HTML structure: paragraphs, headings, nested toggles, bulleted/numbered list items, quotes, and callouts. A marked callout keeps its icon, container, and child layout; its direct and descendant text uses that marker's cloze number, unless a nested callout has its own configured block background.
+- Tables do not have a block color. A cell becomes a whole-cell cloze only when all of its non-empty rich-text fragments use the same configured marker; its `td`/`th` structure is retained and uses the same yellow styling as Anki cloze markers. Partial cell highlighting keeps the normal inline-cloze behavior.
 - Direct child paragraphs starting with `Extra:` render into `Extra`; `[extra]` toggles are rendered normally in `Text`.
 - Marker background colors map to fixed cloze numbers: yellow -> c1, green -> c2, blue -> c3, purple -> c4, pink -> c5, orange -> c6, red -> c7, brown -> c8.
 - Selected marker background colors are removed from exported HTML while normal formatting is preserved; colors excluded in Settings remain background styling.
 - Advanced containers without marker colors remain deterministic cloze payloads and do not fall back to another card type.
+- Code, equation, image, table/container, column, and divider blocks cannot carry a standalone complete block color in the current Notion API shape. When nested inside a marked callout, their textual content is hidden with the callout's cloze number while their supported surrounding structure remains.
 
 ## 7. Image Occlusion candidate rules
 

@@ -13,7 +13,7 @@ The renderer supports these block types:
 - `bulleted_list_item` (coalesced into `<ul>` sequences)
 - `numbered_list_item` (coalesced into `<ol>` sequences)
 - `quote`
-- `callout` (emoji icons are rendered)
+- `callout` (emoji, uploaded, and external icons are rendered)
 - `code` (language-aware highlighting for known languages)
 - `equation` (block equation rendering, rendered via Ankis MathJax)
 - `image` (safe HTTP/HTTPS URLs only)
@@ -48,6 +48,9 @@ The parser reads both Notion annotation fields:
 - `color` -> rendered as class `highlight-<color>`
 - `background_color` -> rendered as class `highlight-<background_color>_background`
 
+For cloze detection, the parser accepts both REST API names such as
+`yellow_background` and enhanced-Markdown aliases such as `yellow_bg`.
+
 Safety rule:
 
 - Highlight values are accepted only when they contain lowercase letters and underscores (`[a-z_]+`).
@@ -75,3 +78,28 @@ brown, mapped to cloze numbers `c1` through `c8` respectively.
 Only marked segments are converted into cloze markup with the color's fixed number.
 Consecutive marked rich-text fragments are merged into one cloze, even when Notion splits inline math into separate `equation` items.
 Inline equations inside the cloze field are rendered with Anki MathJax inline delimiters (`\(...\)`).
+
+### Block-level markers
+
+Notion returns a whole-block background through the block payload's `color`
+field. A configured value of `<color>_background` creates one cloze marker for
+the block's complete text; foreground-only values such as `yellow` do not
+trigger cloze conversion. A full block marker wins over any inline marker inside that
+same block, preventing nested deletions.
+
+Within an advanced cloze toggle, this behavior applies while retaining the
+recognizable renderer structure for `paragraph`, `heading_1` through
+`heading_3`, `bulleted_list_item`, `numbered_list_item`, `quote`, `callout`,
+and nested `toggle` blocks. A marked callout retains its icon, container, and
+child layout while its direct and descendant text uses the callout's cloze
+number. An explicitly marked nested callout starts its own cloze scope.
+
+The REST shape used by this add-on has no color field for `table` or
+`table_row`. A cell is treated as fully colored only when every non-empty
+rich-text fragment resolves to the same configured background marker. Its
+content becomes one cloze, its `td` or `th` remains in place, and it reuses the
+Anki `.cloze` yellow background. A partially highlighted or mixed-color cell
+continues to use normal inline cloze rendering. Code, equation, image, column,
+and divider blocks cannot currently carry a standalone complete block color.
+When nested in a marked callout, their textual content is hidden with the
+callout's cloze number while their supported renderer structure remains.

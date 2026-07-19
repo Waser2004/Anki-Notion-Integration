@@ -23,7 +23,7 @@ This document describes the Anki add-on architecture for Notion → Anki sync.
 
 ### Parser / Renderer
 - Toggle cards: `basic`, `basic_reversed`, `input`.
-- Cloze cards: top-level paragraphs with supported colored highlight markers, plus `[cloze]` and optionally gray-background top-level toggles.
+- Cloze cards: top-level paragraphs with inline background markers, plus `[cloze]` and optionally gray-background top-level toggles whose rendered children support inline, block, and table-cell markers.
 - Parsing is split into a coordinator, focused basic/cloze services, and a shared deterministic HTML renderer.
 - Image candidate extraction: image blocks outside toggles.
 
