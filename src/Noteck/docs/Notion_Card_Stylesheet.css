@@ -9,16 +9,20 @@
 	box-sizing: border-box;
 }
 
-html, body {
+html {
 	margin: 0;
 	padding: 0;
 	min-height: 100vh;
 	width: 100%;
+	background: var(--canvas) !important;
 }
 
 body {
 	line-height: 1.5;
-	background: var(--notion-bg) !important;
+	margin: 0;
+	/* Keep the card gutter inside the viewport so short cards do not overflow. */
+	padding: 1rem;
+	min-height: 100vh;
 }
 
 /* ============================================================
@@ -38,6 +42,7 @@ body {
 	--notion-code-text: rgba(44, 44, 43, 1);
 	--notion-divider-color: rgba(230, 229, 227, 1);
 	--notion-code-border: rgba(220, 218, 214, 1);
+	--notion-inherited-surface: rgba(55, 53, 47, 0.03);
 
 	/* Code syntax tokens (light) */
 	--syn-comment: rgba(130, 136, 149, 1);
@@ -90,6 +95,7 @@ html.night_mode,
 	--notion-code-text: rgba(240, 239, 237, 1);
 	--notion-divider-color: rgba(48, 48, 46, 1);
 	--notion-code-border: rgba(66, 66, 62, 1);
+	--notion-inherited-surface: rgba(255, 255, 255, 0.04);
 
 	/* Code syntax tokens (dark) */
 	--syn-comment: rgba(145, 152, 170, 1);
@@ -129,8 +135,8 @@ html.night_mode,
    Apply Theme Tokens (Global)
    ============================================================ */
 
-, html, body {
-	background: var(--notion-bg) !important;
+body {
+	background: var(--canvas) !important;
 	color: var(--notion-text) !important;
 }
 
@@ -148,7 +154,7 @@ hr, table, th, td {
 }
 
 blockquote {
-	margin-left: 0;
+	margin-inline: 0;
 	padding-inline: 14px;
 	border-inline-start: 3px solid;
 	border-left-color: var(--notion-quote-border) !important;
@@ -188,13 +194,62 @@ th {
    Card Wrappers
    ============================================================ */
 
+.notion-card {
+	/* Keep the Notion surface on the card while Anki retains its canvas. */
+	width: 100%;
+	max-width: 760px;
+	margin: 0 auto;
+	padding: 0 1.5rem;
+	border: 1px solid var(--notion-border);
+	border-radius: 12px;
+	background: var(--notion-bg) !important;
+}
+
+/* A validated root-toggle background is supplied by the managed Anki field. */
+.notion-card[class*="notion-card-background-"] {
+	/* Composite translucent Notion highlights over the normal Notion card surface. */
+	background:
+		linear-gradient(
+			var(--notion-block-background, transparent),
+			var(--notion-block-background, transparent)
+		),
+		var(--notion-bg) !important;
+}
+
+/* Only validated root colors activate backdrop-aware fixed block surfaces. */
+.notion-card-background-gray_background,
+.notion-card-background-brown_background,
+.notion-card-background-orange_background,
+.notion-card-background-yellow_background,
+.notion-card-background-green_background,
+.notion-card-background-blue_background,
+.notion-card-background-purple_background,
+.notion-card-background-pink_background,
+.notion-card-background-red_background {
+	--notion-fixed-block-surface: var(--notion-inherited-surface);
+}
+
+/* Code, Mermaid, and table headers reveal a colored root as they do in Notion. */
+.notion-card[class*="notion-card-background-"] pre.code {
+	background: var(--notion-fixed-block-surface, var(--notion-code-bg)) !important;
+}
+
+.notion-card[class*="notion-card-background-"] th {
+	background: var(--notion-fixed-block-surface, var(--notion-surface-2)) !important;
+}
+
+/* FrontSide introduces its own wrapper on answer templates; flatten that nested box. */
+.notion-card .notion-card {
+	display: contents;
+}
+
 .notion-front {
 	margin: 1em auto;
 	margin-top: 0;
-	padding-top: 3em;
+	padding-top: 1em;
 	font-weight: 600;
 	max-width: 700px;
-	background: var(--notion-bg) !important;
+	background: transparent !important;
 	color: var(--notion-text) !important;
 }
 
@@ -202,7 +257,7 @@ th {
 	margin: 0 auto;
 	max-width: 700px;
 	padding-bottom: 1em;
-	background: var(--notion-bg) !important;
+	background: transparent !important;
 	color: var(--notion-text) !important;
 }
 
@@ -344,7 +399,7 @@ code {
 }
 
 .code > code {
-	background: none;
+	background: none !important;
 	padding: 0;
 	font-size: 100%;
 	color: inherit;
@@ -551,6 +606,102 @@ html.night_mode .notion-mermaid .notion-mermaid-dark,
 
 .notion-toggle > :not(summary) {
 	margin-left: 1.25em;
+}
+
+/* ============================================================
+   Block-Level Notion Colors
+   ============================================================ */
+
+/* Foreground block colors use the same theme-aware palette as inline text. */
+.notion-block-color-gray { --notion-block-foreground: var(--hl-gray); }
+.notion-block-color-brown { --notion-block-foreground: var(--hl-brown); }
+.notion-block-color-orange { --notion-block-foreground: var(--hl-orange); }
+.notion-block-color-yellow { --notion-block-foreground: var(--hl-yellow); }
+.notion-block-color-green { --notion-block-foreground: var(--hl-green); }
+.notion-block-color-blue { --notion-block-foreground: var(--hl-blue); }
+.notion-block-color-purple { --notion-block-foreground: var(--hl-purple); }
+.notion-block-color-pink { --notion-block-foreground: var(--hl-pink); }
+.notion-block-color-red { --notion-block-foreground: var(--hl-red); }
+
+/* Background variables are shared by individual blocks and root card surfaces. */
+.notion-block-color-gray_background,
+.notion-card-background-gray_background { --notion-block-background: var(--hl-gray-bg); }
+.notion-block-color-brown_background,
+.notion-card-background-brown_background { --notion-block-background: var(--hl-brown-bg); }
+.notion-block-color-orange_background,
+.notion-card-background-orange_background { --notion-block-background: var(--hl-orange-bg); }
+.notion-block-color-yellow_background,
+.notion-card-background-yellow_background { --notion-block-background: var(--hl-yellow-bg); }
+.notion-block-color-green_background,
+.notion-card-background-green_background { --notion-block-background: var(--hl-green-bg); }
+.notion-block-color-blue_background,
+.notion-card-background-blue_background { --notion-block-background: var(--hl-blue-bg); }
+.notion-block-color-purple_background,
+.notion-card-background-purple_background { --notion-block-background: var(--hl-purple-bg); }
+.notion-block-color-pink_background,
+.notion-card-background-pink_background { --notion-block-background: var(--hl-pink-bg); }
+.notion-block-color-red_background,
+.notion-card-background-red_background { --notion-block-background: var(--hl-red-bg); }
+
+.notion-block-color {
+	color: var(--notion-block-foreground, var(--notion-text)) !important;
+}
+
+/* Container blocks render their visible title text through child elements. */
+.notion-block-color > summary,
+.notion-block-color > p,
+.notion-block-color > div > p {
+	color: inherit !important;
+}
+
+.notion-block-color-background {
+	border-radius: 4px;
+	background: var(--notion-block-background) !important;
+	color: var(--notion-text) !important;
+}
+
+/* Text-line blocks need compact padding similar to Notion's block highlights. */
+p.notion-block-color-background,
+h1.notion-block-color-background,
+h2.notion-block-color-background,
+h3.notion-block-color-background {
+	padding: 0.1em 0.3em;
+}
+
+/* Keep native markers and extend only the colored surface behind their marker box. */
+li.notion-block-color-background {
+	position: relative;
+	isolation: isolate;
+	padding-block: 0.1em;
+	background: transparent !important;
+}
+
+li.notion-block-color-background::before {
+	content: "";
+	position: absolute;
+	z-index: -1;
+	inset-block: 0;
+	inset-inline-end: 0;
+	border-radius: 4px;
+	background: var(--notion-block-background);
+}
+
+ul > li.notion-block-color-background::before {
+	inset-inline-start: -1.7em;
+}
+
+ol > li.notion-block-color-background::before {
+	inset-inline-start: -1.6em;
+}
+
+/* Notion keeps quote highlights square while retaining the quote border. */
+blockquote.notion-block-color-background {
+	border-radius: 0;
+}
+
+/* Block coloring must not reduce the existing Notion callout rounding. */
+.callout.notion-block-color-background {
+	border-radius: 10px;
 }
 
 /* ============================================================

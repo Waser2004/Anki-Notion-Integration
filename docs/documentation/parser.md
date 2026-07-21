@@ -23,6 +23,8 @@ See `cloze_card_parser.md` for the detailed cloze-parser architecture, control f
 - Optional cloze cards (`cloze`) from top-level paragraphs when `enable_cloze=True`.
 - Optional toggle-based cloze cards from top-level cloze containers when `enable_cloze=True`.
 
+Callers may pass a warning list to collect structured `CardParseWarning` values. A toggle with no usable title or body is skipped with a warning, and a rendering failure is isolated to that block so other cards can still be parsed.
+
 Each payload includes:
 
 - `notion_page_id`
@@ -39,6 +41,7 @@ Each payload includes:
 - Markers: yellow, green, blue, purple, pink, orange, red, and brown background annotations, mapped to `c1` through `c8` respectively. A paragraph block background alone is not a marker.
 - Only paragraphs containing at least one marker emit a cloze payload.
 - Block-level backgrounds remain supported for content inside advanced cloze containers, where the container supplies context.
+- A marked paragraph that produces no usable cloze text is skipped with a warning.
 - Inline equations inside cloze text are rendered with Anki MathJax delimiters (`\(...\)`).
 - Consecutive highlighted rich-text fragments are combined into one cloze deletion, even when inline equations split the rich-text items.
 - Optional `Extra` field source: the immediate next top-level paragraph whose plain text starts with `Extra:` (case-insensitive).

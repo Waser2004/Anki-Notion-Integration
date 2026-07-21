@@ -6,6 +6,7 @@
 - `notion_client.md`: Notion API client behavior and API reference.
 - `parser.md`: Card payload parsing rules and card-type behavior.
 - `cloze_card_parser.md`: Cloze parser architecture, rendering paths, payload contract, validation, and sync integration.
+- `sync.md`: Sync outcomes, warning/error classification, and stale-card behavior.
 - `notion_blocks_and_highlighting.md`: Supported Notion block types and rich-text highlight handling.
 
 Related high-level docs:

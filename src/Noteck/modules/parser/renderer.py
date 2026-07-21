@@ -22,6 +22,16 @@ _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _NUMBER_RE = re.compile(r"(?:0[xX][0-9A-Fa-f]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)")
 _OPERATOR_CHARS = frozenset("+-*/%=!<>|&^~?:")
 _PUNCTUATION_CHARS = frozenset("()[]{}.,;")
+_MEANINGFUL_NON_TEXT_HTML_RE = re.compile(r"<img\b", re.IGNORECASE)
+_NOTION_BLOCK_FOREGROUND_COLORS = frozenset(
+    {"gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red"}
+)
+_NOTION_BLOCK_BACKGROUND_COLORS = frozenset(
+    f"{color}_background" for color in _NOTION_BLOCK_FOREGROUND_COLORS
+)
+_NOTION_BLOCK_COLORS = frozenset(
+    {"default", *_NOTION_BLOCK_FOREGROUND_COLORS, *_NOTION_BLOCK_BACKGROUND_COLORS}
+)
 # Canonical language labels and aliases for common Notion code-block values.
 _LANGUAGE_ALIASES = {
     "py": "python",
@@ -449,7 +459,8 @@ def _render_paragraph(
         rich_text_renderer=rich_text_renderer,
         block_text_override=block_text_override,
     )
-    body = f"<p>{text_html}</p>"
+    class_attr = "" if block_text_override is not None else _block_color_class_attribute(block)
+    body = f"<p{class_attr}>{text_html}</p>"
     children_html = render_blocks_with_renderer(
         block.children,
         rich_text_renderer=rich_text_renderer,
@@ -473,7 +484,8 @@ def _render_heading(
         rich_text_renderer=rich_text_renderer,
         block_text_override=block_text_override,
     )
-    body = f"<h{level}>{text_html}</h{level}>"
+    class_attr = "" if block_text_override is not None else _block_color_class_attribute(block)
+    body = f"<h{level}{class_attr}>{text_html}</h{level}>"
     children_html = render_blocks_with_renderer(
         block.children,
         rich_text_renderer=rich_text_renderer,
@@ -503,7 +515,8 @@ def _render_quote(
         block_text_override=block_text_override,
         table_cell_override=table_cell_override,
     )
-    return f"<blockquote>{body}{children_html}</blockquote>"
+    class_attr = "" if block_text_override is not None else _block_color_class_attribute(block)
+    return f"<blockquote{class_attr}>{body}{children_html}</blockquote>"
 
 
 def _render_callout(
@@ -528,7 +541,12 @@ def _render_callout(
         block_text_override=block_text_override,
         table_cell_override=table_cell_override,
     )
-    return f'<div class="callout">{icon_html}<div>{body}{children_html}</div></div>'
+    class_attr = (
+        ' class="callout"'
+        if block_text_override is not None
+        else _block_color_class_attribute(block, base_class="callout")
+    )
+    return f'<div{class_attr}>{icon_html}<div>{body}{children_html}</div></div>'
 
 
 def _render_callout_icon(icon_payload: Any) -> str:
@@ -573,7 +591,12 @@ def _render_toggle_inline(
         block_text_override=block_text_override,
         table_cell_override=table_cell_override,
     )
-    return f'<details class="notion-toggle"><summary>{title_html}</summary>{children_html}</details>'
+    class_attr = (
+        ' class="notion-toggle"'
+        if block_text_override is not None
+        else _block_color_class_attribute(block, base_class="notion-toggle")
+    )
+    return f'<details{class_attr}><summary>{title_html}</summary>{children_html}</details>'
 
 
 def _render_code_block(
@@ -645,7 +668,8 @@ def _render_list_sequence(
             block_text_override=block_text_override,
             table_cell_override=table_cell_override,
         )
-        items.append(f"<li>{text_html}{children_html}</li>")
+        class_attr = "" if block_text_override is not None else _block_color_class_attribute(block)
+        items.append(f"<li{class_attr}>{text_html}{children_html}</li>")
         index += 1
 
     return f"<{list_tag}>{''.join(items)}</{list_tag}>", index
@@ -940,6 +964,52 @@ def _block_payload(block: NotionBlock) -> dict[str, Any]:
     if isinstance(payload, dict):
         return payload
     return {}
+
+
+def _block_color(block: NotionBlock) -> str:
+    """Return one documented Notion block color or the default value."""
+    color = _block_payload(block).get("color")
+    if not isinstance(color, str):
+        return "default"
+
+    normalized = color.strip().lower()
+    return normalized if normalized in _NOTION_BLOCK_COLORS else "default"
+
+
+def _block_background_color(block: NotionBlock) -> str:
+    """Return a root-card background only for Notion background variants."""
+    color = _block_color(block)
+    return color if color in _NOTION_BLOCK_BACKGROUND_COLORS else ""
+
+
+def _block_foreground_color(block: NotionBlock) -> str:
+    """Return a title color only for Notion foreground variants."""
+    color = _block_color(block)
+    return color if color in _NOTION_BLOCK_FOREGROUND_COLORS else "default"
+
+
+def _block_color_class_attribute(block: NotionBlock, *, base_class: str = "") -> str:
+    """Build safe semantic-element classes for one block-level color."""
+    classes = [base_class] if base_class else []
+    color = _block_color(block)
+    if color != "default":
+        classes.extend(("notion-block-color", f"notion-block-color-{color}"))
+        if color in _NOTION_BLOCK_BACKGROUND_COLORS:
+            classes.append("notion-block-color-background")
+    if not classes:
+        return ""
+    return f' class="{" ".join(classes)}"'
+
+
+def _has_usable_card_content(rendered_html: str) -> bool:
+    """Return whether rendered toggle contents contain text or an image."""
+    if not rendered_html:
+        return False
+
+    plain_text = re.sub(r"<[^>]+>", "", rendered_html)
+    if html.unescape(plain_text).replace("\u00a0", " ").strip():
+        return True
+    return _MEANINGFUL_NON_TEXT_HTML_RE.search(rendered_html) is not None
 
 
 def _block_rich_text(block: NotionBlock) -> list[dict[str, Any]]:

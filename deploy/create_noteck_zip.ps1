@@ -14,10 +14,16 @@ $ProjectRoot = Split-Path -Parent $ScriptDir
 $Source = Join-Path $ProjectRoot "src\Noteck"
 $DeployDir = Join-Path $ProjectRoot "deploy"
 $Requirements = Join-Path $ProjectRoot "requirements.txt"
+$ReleaseNotes = Join-Path $ProjectRoot "CHANGELOG.md"
+$ReleaseNoteAssets = Join-Path $ProjectRoot "docs\release-notes-assets"
 $VenvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 
 if (-not (Test-Path $Source)) {
     throw "Source folder not found: $Source"
+}
+
+if (-not (Test-Path $ReleaseNotes)) {
+    throw "Release notes not found: $ReleaseNotes"
 }
 
 if (-not (Test-Path $DeployDir)) {
@@ -42,6 +48,14 @@ try {
     robocopy $Source $StagingSource /MIR /XD "__pycache__" "_vendor" /XF "*.pyc" "*.pyo" /R:1 /W:1 /NFL /NDL /NJH /NJS
     if ($LASTEXITCODE -ge 8) {
         throw "Robocopy failed with exit code $LASTEXITCODE"
+    }
+
+    # Bundle the canonical changelog and optional local images beside the add-on.
+    Copy-Item -LiteralPath $ReleaseNotes -Destination (Join-Path $StagingSource "CHANGELOG.md")
+    if (Test-Path $ReleaseNoteAssets) {
+        $StagingAssets = Join-Path $StagingSource "docs\release-notes-assets"
+        New-Item -ItemType Directory -Force -Path $StagingAssets | Out-Null
+        Copy-Item -Path (Join-Path $ReleaseNoteAssets "*") -Destination $StagingAssets -Recurse -Force
     }
 
     if (Test-Path $Requirements) {

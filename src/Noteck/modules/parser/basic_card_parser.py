@@ -6,7 +6,12 @@ from typing import Any
 
 from . import parser as shared
 from ..card_types import BASIC_REVERSED, INPUT
-from ..cards import MODEL_NAME_BASIC, MODEL_NAME_BASIC_REVERSED, MODEL_NAME_INPUT
+from ..cards import (
+    MODEL_NAME_BASIC,
+    MODEL_NAME_BASIC_REVERSED,
+    MODEL_NAME_INPUT,
+    NOTION_CARD_BACKGROUND_FIELD,
+)
 from ..notion_client import NotionBlock
 
 class BasicCardParser:
@@ -16,7 +21,19 @@ class BasicCardParser:
         """Parse one top-level toggle using the selected non-cloze card type."""
         front_html = self._render_toggle_front(block)
         back_html  = shared.render_blocks(block.children)
-        fields     = self._build_fields(block.block_id, front_html, back_html, block.children, card_type)
+        if not shared._rich_text_to_plain(shared._block_rich_text(block)).strip():
+            raise ValueError("empty_toggle_title")
+        if not shared._has_usable_card_content(back_html):
+            raise ValueError("empty_toggle_content")
+
+        fields = self._build_fields(
+            block.block_id,
+            front_html,
+            back_html,
+            block.children,
+            card_type,
+            shared._block_background_color(block),
+        )
         model_name = self.model_name_for(card_type)
 
         return shared.ToggleCardPayload(
@@ -61,7 +78,12 @@ class BasicCardParser:
             raw          = {
                 "id": block.block_id,
                 "type": "paragraph",
-                "paragraph": {"rich_text": shared._block_rich_text(block)},
+                # Root backgrounds belong to the card surface; only foreground
+                # colors style the title rendered inside that surface.
+                "paragraph": {
+                    "rich_text": shared._block_rich_text(block),
+                    "color": shared._block_foreground_color(block),
+                },
             },
             children     = (),
         )
@@ -74,6 +96,7 @@ class BasicCardParser:
         back_html:   str,
         back_blocks: Any,
         card_type:   str,
+        card_background: str,
     ) -> dict[str, str]:
         """Build fields required by the selected Anki note type."""
         if card_type == INPUT:
@@ -82,6 +105,12 @@ class BasicCardParser:
                 "Back": back_html,
                 "Expected Answer": shared._raw_text_from_blocks(back_blocks),
                 "Notion Block ID": block_id,
+                NOTION_CARD_BACKGROUND_FIELD: card_background,
             }
         
-        return {"Front": front_html, "Back": back_html, "Notion Block ID": block_id}
+        return {
+            "Front": front_html,
+            "Back": back_html,
+            "Notion Block ID": block_id,
+            NOTION_CARD_BACKGROUND_FIELD: card_background,
+        }

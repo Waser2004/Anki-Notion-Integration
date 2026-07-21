@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.0 - 2026-07-14
+
+> [!WARNING]
+> **Parser and card template changes**
+>
+> This update introduces a new parser and updated card versions; See below for further details. Because all cards need to be reparsed, the first sync may take longer than usual, and automatic sync is disabled the first time you open this version so you can run it manually when convenient.
+
+![Notion Anki colored blocks visualsation](docs/release-notes-assets/notion_anki_colored_blocks_visualisation.png)
+
+- Added support for Notion block colors in Anki cards, including foreground and background colors for paragraphs, headings, list items, quotes, callouts, and nested toggles.
+- Top-level toggle colors are now reflected on the complete card surface or card title, matching the color used in Notion.
+- After upgrading, open **Settings** → **Cards** and select **Update card templates** so the new colors are displayed on your Anki cards.
+- Improved syncing for faster, more reliable updates.
+
 ## 1.2.0 - 2026-07-04
 
 - Added dynamic page-selection behavior so selecting or deselecting a parent page now keeps its descendant pages in sync.

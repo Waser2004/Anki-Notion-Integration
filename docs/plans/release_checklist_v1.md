@@ -22,10 +22,15 @@
 
 ## Packaging / export steps
 
-1. Ensure working tree contains only intended release changes.
-2. Run `deploy/deploy_anki_addon.ps1`.
-3. Verify deployed folder under `%APPDATA%\Anki2\addons21\Noteck`.
-4. Restart Anki and perform smoke test from installed location.
+1. Add the newest `## <version> - YYYY-MM-DD` entry at the top of `CHANGELOG.md`.
+2. Put optional local images in `docs/release-notes-assets/` and reference them with relative Markdown paths.
+3. Ensure the working tree contains only intended release changes.
+4. Run `deploy/deploy_anki_addon_test.ps1`, restart Anki, and verify the latest notes open once and render correctly.
+5. Verify the **Release Notes** footer button appears only on **Settings** and opens the complete history.
+6. Verify **Hide after updates** and **Show after updates** persist their automatic-popup preference, and a second restart does not repeat the popup.
+7. Run `deploy/deploy_anki_addon.ps1`.
+8. Verify `CHANGELOG.md` and optional assets exist under `%APPDATA%\Anki2\addons21\Noteck`.
+9. Restart Anki and perform the remaining smoke test from the installed location.
 
 ## Known non-goals for v1.0
 

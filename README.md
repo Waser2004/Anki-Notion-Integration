@@ -36,6 +36,27 @@ From repository root:
 ./.venv/Scripts/python.exe -m unittest discover -s tests
 ```
 
+## Writing release notes
+
+`CHANGELOG.md` is the single source for both repository history and the add-on's
+release-notes window. Put each new release first and use this format:
+
+```markdown
+## 1.4.0 - 2026-08-01
+
+### Highlights
+
+- Describe the user-visible change in plain language.
+- Add more sections or links when they help.
+
+![Optional interface overview](docs/release-notes-assets/1.4.0-overview.png)
+```
+
+Every level-two heading must contain a release version and ISO date. Lower-level
+headings, lists, emphasis, and links use normal Markdown. Optional local images belong
+in `docs/release-notes-assets/`; all deploy and ZIP scripts bundle them automatically.
+No Python version constant or structured data file needs to be updated.
+
 ## Diagnostic logs
 
 Noteck records detailed sync diagnostics (page decisions, excluded cards, card creation,

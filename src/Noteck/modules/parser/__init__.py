@@ -1,6 +1,8 @@
 """Public parser package API."""
 
 from .parser import (
+    CardParseResult,
+    CardParseWarning,
     ImageOcclusionCandidate,
     ToggleCardPayload,
     collect_image_occlusion_candidates,
@@ -11,6 +13,8 @@ from .parser import (
 from .renderer import render_blocks, render_rich_text
 
 __all__ = [
+    "CardParseResult",
+    "CardParseWarning",
     "ImageOcclusionCandidate",
     "ToggleCardPayload",
     "collect_image_occlusion_candidates",

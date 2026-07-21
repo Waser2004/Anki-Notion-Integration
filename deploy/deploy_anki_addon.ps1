@@ -4,6 +4,8 @@ $ScriptDir    = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot  = Split-Path -Parent $ScriptDir
 $Source      = Join-Path $ProjectRoot "src\Noteck"
 $Requirements = Join-Path $ProjectRoot "requirements.txt"
+$ReleaseNotes = Join-Path $ProjectRoot "CHANGELOG.md"
+$ReleaseNoteAssets = Join-Path $ProjectRoot "docs\release-notes-assets"
 
 # Change this to your add-on folder name (what you want it to be called in Anki)
 $AddonName   = "Noteck"
@@ -18,6 +20,10 @@ if (!(Test-Path $Source)) {
   throw "Source folder not found: $Source"
 }
 
+if (!(Test-Path $ReleaseNotes)) {
+  throw "Release notes not found: $ReleaseNotes"
+}
+
 # Ensure destination exists (robocopy wants it)
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 
@@ -30,6 +36,14 @@ robocopy $Source $Dest /MIR /XD "__pycache__" "_vendor" /R:1 /W:1 /NFL /NDL /NJH
 # Robocopy returns "weird" exit codes; >= 8 indicates a failure
 if ($LASTEXITCODE -ge 8) {
   throw "Robocopy failed with exit code $LASTEXITCODE"
+}
+
+# Bundle the canonical Markdown and optional images for offline rendering.
+Copy-Item -LiteralPath $ReleaseNotes -Destination (Join-Path $Dest "CHANGELOG.md") -Force
+if (Test-Path $ReleaseNoteAssets) {
+  $DestAssets = Join-Path $Dest "docs\release-notes-assets"
+  New-Item -ItemType Directory -Force -Path $DestAssets | Out-Null
+  Copy-Item -Path (Join-Path $ReleaseNoteAssets "*") -Destination $DestAssets -Recurse -Force
 }
 
 if (Test-Path $Requirements) {

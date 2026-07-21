@@ -14,11 +14,14 @@ from .basic_card_parser import BasicCardParser
 from .cloze_card_parser import ClozeCardParser
 from ..notion_client import NotionBlock
 from .renderer import (
+    _block_background_color,
+    _block_foreground_color,
     _block_payload,
     _block_rich_text,
     _extract_caption_items,
     _extract_image_url,
     _rich_text_to_plain,
+    _has_usable_card_content,
     render_blocks,
     render_rich_text,
 )
@@ -36,6 +39,23 @@ class ToggleCardPayload:
     fields:           dict[str, str] = field(default_factory=dict)
     content_hash:     str            = ""
     last_edited_time: str | None     = None
+
+
+@dataclass(frozen=True)
+class CardParseWarning:
+    """Describe one Notion block that could not produce a usable card."""
+
+    code: str
+    message: str
+    notion_block_id: str
+
+
+@dataclass(frozen=True)
+class CardParseResult:
+    """Return parsed payloads and recoverable block diagnostics together."""
+
+    payloads: tuple[ToggleCardPayload, ...]
+    warnings: tuple[CardParseWarning, ...]
 
 
 @dataclass(frozen=True)
@@ -63,6 +83,7 @@ def parse_page_to_cards(
     enable_gray_toggle_cloze: bool = True,
     cloze_marker_colors:      Collection[str] | None = None,
     include_block_ids:        Collection[str] | None = None,
+    warnings:                 list[CardParseWarning] | None = None,
 ) -> list[ToggleCardPayload]:
     """Coordinate the focused card parser services for one Notion page."""
     resolved_default_card_type           = normalize_default_selectable_card_type(default_card_type)
@@ -99,19 +120,59 @@ def parse_page_to_cards(
 
         # Apply a card-specific card type override and parse the toggle with the selected non-cloze card type.
         resolved_card_type = normalized_overrides.get(block.block_id, resolved_default_card_type)
-        payloads.append(basic_parser.parse(page_id, block, resolved_card_type))
+        try:
+            payloads.append(basic_parser.parse(page_id, block, resolved_card_type))
+        except ValueError as exc:
+            if warnings is not None:
+                warnings.append(
+                    CardParseWarning(
+                        code=str(exc),
+                        message=_parse_warning_message(str(exc)),
+                        notion_block_id=block.block_id,
+                    )
+                )
+        except Exception as exc:
+            if warnings is None:
+                raise
+            warnings.append(
+                CardParseWarning(
+                    code="card_parse_failed",
+                    message=f"Toggle could not be rendered: {exc}",
+                    notion_block_id=block.block_id,
+                )
+            )
 
     # parse top-level paragraphs for cloze
     if enable_cloze:
-        payloads.extend(
-            cloze_parser.parse_top_level_paragraphs(
-                page_id,
-                top_level_blocks,
-                include_block_ids=normalized_include_block_ids,
+        try:
+            payloads.extend(
+                cloze_parser.parse_top_level_paragraphs(
+                    page_id,
+                    top_level_blocks,
+                    include_block_ids=normalized_include_block_ids,
+                )
             )
-        )
+        except Exception as exc:
+            if warnings is None:
+                raise
+            warnings.append(
+                CardParseWarning(
+                    code="card_parse_failed",
+                    message=f"Cloze paragraphs could not be rendered: {exc}",
+                    notion_block_id=next(iter(normalized_include_block_ids or ()), ""),
+                )
+            )
 
     return payloads
+
+
+def _parse_warning_message(code: str) -> str:
+    """Return a stable human-readable message for a skipped basic card."""
+    if code == "empty_toggle_title":
+        return "Toggle has no usable title and was skipped."
+    if code == "empty_toggle_content":
+        return "Toggle has no usable card contents and was skipped."
+    return "Toggle could not be converted into a card."
 
 
 def normalize_typed_answer(value: str) -> str:

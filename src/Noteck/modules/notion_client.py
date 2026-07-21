@@ -2,27 +2,44 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import html
 import json
 import re
+import threading
+import time
 from typing import Any, Callable, Iterable, Mapping, Optional
-from urllib import request, parse
+from urllib import error, parse, request
 
 from .db import Database
 from .settings import SettingsStore
 
 
 NOTION_API_VERSION = "2026-03-11"
+NOTION_BLOCK_PAGE_SIZE = 100
+NOTION_TREE_WORKER_COUNT = 4
+NOTION_TREE_QUEUE_SIZE = NOTION_TREE_WORKER_COUNT * 2
+NOTION_PAGE_WORKER_COUNT = 4
+NOTION_PAGE_QUEUE_SIZE = NOTION_PAGE_WORKER_COUNT * 2
+NOTION_REQUESTS_PER_SECOND = 3.0
+NOTION_RATE_LIMIT_RETRIES = 5
 
 
 class NotionApiError(RuntimeError):
     """Raised when the Notion API returns an error response."""
 
-    def __init__(self, message: str, status: int | None = None, payload: Any | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        status:  int | None               = None,
+        payload: Any | None               = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.payload = payload
+        self.headers = dict(headers or {})
 
 
 class NotionTransportError(RuntimeError):
@@ -71,26 +88,31 @@ class NotionBlock:
     children: tuple["NotionBlock", ...] = ()
 
 
-_MARKDOWN_TABLE_RE     = re.compile(r"<table\b[^>]*>(?P<body>.*?)</table>", re.IGNORECASE | re.DOTALL)
-_MARKDOWN_COLGROUP_RE  = re.compile(r"<colgroup\b[^>]*>(?P<body>.*?)</colgroup>", re.IGNORECASE | re.DOTALL)
-_MARKDOWN_COL_RE       = re.compile(r"<col\b(?P<attrs>[^>]*)/?>", re.IGNORECASE)
-_MARKDOWN_ROW_RE       = re.compile(r"<tr\b(?P<attrs>[^>]*)>(?P<body>.*?)</tr>", re.IGNORECASE | re.DOTALL)
-_MARKDOWN_CELL_RE      = re.compile(r"<(?:td|th)\b(?P<attrs>[^>]*)>(?P<body>.*?)</(?:td|th)>", re.IGNORECASE | re.DOTALL)
-_MARKDOWN_ATTRIBUTE_RE = re.compile(r"([A-Za-z][\w-]*)\s*=\s*([\"'])(.*?)\2", re.DOTALL)
-_MARKDOWN_TAG_RE       = re.compile(r"<[^>]+>")
+_MARKDOWN_TABLE_RE = re.compile(
+    r"<table\b[^>]*>(?P<body>.*?)</table>", re.IGNORECASE | re.DOTALL
+)
+_MARKDOWN_COLGROUP_RE = re.compile(
+    r"<colgroup\b[^>]*>(?P<body>.*?)</colgroup>", re.IGNORECASE | re.DOTALL
+)
+_MARKDOWN_COL_RE = re.compile(r"<col\b(?P<attrs>[^>]*)/?>", re.IGNORECASE)
+_MARKDOWN_ROW_RE = re.compile(
+    r"<tr\b(?P<attrs>[^>]*)>(?P<body>.*?)</tr>", re.IGNORECASE | re.DOTALL
+)
+_MARKDOWN_CELL_RE = re.compile(
+    r"<(?:td|th)\b(?P<attrs>[^>]*)>(?P<body>.*?)</(?:td|th)>",
+    re.IGNORECASE | re.DOTALL,
+)
+_MARKDOWN_ATTRIBUTE_RE = re.compile(
+    r"([A-Za-z][\w-]*)\s*=\s*([\"'])(.*?)\2", re.DOTALL
+)
+_MARKDOWN_TAG_RE = re.compile(r"<[^>]+>")
 
 
 def merge_markdown_table_colors(
     blocks: Iterable[NotionBlock],
     markdown: str,
 ) -> list[NotionBlock]:
-    """Overlay enhanced-Markdown table colors onto the block-API tree.
-
-    The block API exposes table cells as rich text only, while the enhanced
-    Markdown endpoint exposes cell, row, and column colors.  Matching tables
-    by their normalized cell text keeps this bridge independent of block IDs,
-    which are intentionally absent from enhanced Markdown.
-    """
+    """Overlay enhanced-Markdown table colors onto the block-API tree."""
     markdown_tables = _extract_markdown_table_colors(markdown)
     if not markdown_tables:
         return list(blocks)
@@ -98,6 +120,7 @@ def merge_markdown_table_colors(
     used_tables: set[int] = set()
 
     def enrich(block: NotionBlock) -> NotionBlock:
+        """Recursively enrich tables without mutating cached block objects."""
         prepared_children = tuple(enrich(child) for child in block.children)
         current = block
         if block.block_type == "table":
@@ -105,25 +128,7 @@ def merge_markdown_table_colors(
             if table_index is not None:
                 current = _apply_table_colors(block, markdown_tables[table_index])
         if current is block and prepared_children != block.children:
-            current = NotionBlock(
-                block_id=current.block_id,
-                block_type=current.block_type,
-                has_children=current.has_children,
-                parent_id=current.parent_id,
-                parent_type=current.parent_type,
-                raw=current.raw,
-                children=prepared_children,
-            )
-        elif current is not block and block.block_type != "table" and prepared_children != current.children:
-            current = NotionBlock(
-                block_id=current.block_id,
-                block_type=current.block_type,
-                has_children=current.has_children,
-                parent_id=current.parent_id,
-                parent_type=current.parent_type,
-                raw=current.raw,
-                children=prepared_children,
-            )
+            current = _copy_block(block, children=prepared_children)
         return current
 
     return [enrich(block) for block in blocks]
@@ -132,7 +137,6 @@ def merge_markdown_table_colors(
 def _extract_markdown_table_colors(markdown: str) -> list[dict[str, Any]]:
     """Parse table color attributes from enhanced Markdown."""
     tables: list[dict[str, Any]] = []
-
     for table_match in _MARKDOWN_TABLE_RE.finditer(markdown or ""):
         body = table_match.group("body")
         column_colors: list[str | None] = []
@@ -145,27 +149,33 @@ def _extract_markdown_table_colors(markdown: str) -> list[dict[str, Any]]:
 
         rows: list[dict[str, Any]] = []
         for row_match in _MARKDOWN_ROW_RE.finditer(body):
-            row_color = _markdown_color(_markdown_attributes(row_match.group("attrs")).get("color"))
-            
-            cells: list[dict[str, Any]] = []
-            for cell_match in _MARKDOWN_CELL_RE.finditer(row_match.group("body")):
-                cell_attrs = _markdown_attributes(cell_match.group("attrs"))
-                cell_text  = _normalize_table_text(cell_match.group("body"))
-                cells.append({"text": cell_text, "color": _markdown_color(cell_attrs.get("color"))})
-            
+            row_color = _markdown_color(
+                _markdown_attributes(row_match.group("attrs")).get("color")
+            )
+            cells = [
+                {
+                    "text": _normalize_table_text(cell_match.group("body")),
+                    "color": _markdown_color(
+                        _markdown_attributes(cell_match.group("attrs")).get("color")
+                    ),
+                }
+                for cell_match in _MARKDOWN_CELL_RE.finditer(row_match.group("body"))
+            ]
             rows.append({"color": row_color, "cells": cells})
         tables.append({"column_colors": column_colors, "rows": rows})
-
     return tables
 
 
 def _markdown_attributes(raw_attributes: str) -> dict[str, str]:
     """Return lowercase enhanced-Markdown attributes from one tag."""
-    return {name.lower(): value.strip() for name, _, value in _MARKDOWN_ATTRIBUTE_RE.findall(raw_attributes)}
+    return {
+        name.lower(): value.strip()
+        for name, _, value in _MARKDOWN_ATTRIBUTE_RE.findall(raw_attributes)
+    }
 
 
 def _markdown_color(value: Any) -> str | None:
-    """Normalize enhanced-Markdown color aliases while retaining foreground colors."""
+    """Normalize an enhanced-Markdown color value."""
     color = str(value or "").strip().lower()
     return color or None
 
@@ -187,11 +197,11 @@ def _table_text_matrix(block: NotionBlock) -> list[list[str]]:
         row_text: list[str] = []
         for cell in cells if isinstance(cells, list) else []:
             fragments = cell if isinstance(cell, list) else []
-            values = []
-            for item in fragments:
-                if not isinstance(item, dict):
-                    continue
-                values.append(str(item.get("plain_text") or item.get("text", {}).get("content") or ""))
+            values = [
+                str(item.get("plain_text") or item.get("text", {}).get("content") or "")
+                for item in fragments
+                if isinstance(item, dict)
+            ]
             row_text.append(_normalize_table_text("".join(values)))
         matrix.append(row_text)
     return matrix
@@ -202,12 +212,14 @@ def _match_markdown_table(
     tables: list[dict[str, Any]],
     used_tables: set[int],
 ) -> int | None:
-    """Find the enhanced-Markdown table with the same cell text matrix."""
+    """Find the unused enhanced-Markdown table with the same cell text."""
     block_matrix = _table_text_matrix(block)
     for index, table in enumerate(tables):
         if index in used_tables:
             continue
-        markdown_matrix = [[cell["text"] for cell in row["cells"]] for row in table["rows"]]
+        markdown_matrix = [
+            [cell["text"] for cell in row["cells"]] for row in table["rows"]
+        ]
         if markdown_matrix == block_matrix:
             used_tables.add(index)
             return index
@@ -224,46 +236,125 @@ def _apply_table_colors(block: NotionBlock, table: dict[str, Any]) -> NotionBloc
         if child.block_type != "table_row" or row_index >= len(rows):
             prepared_children.append(child)
             continue
+
         row = rows[row_index]
         payload = child.raw.get("table_row")
         if not isinstance(payload, dict):
             prepared_children.append(child)
             row_index += 1
             continue
+
         colors = [
-            cell["color"] or row["color"] or (column_colors[index] if index < len(column_colors) else None)
+            cell["color"]
+            or row["color"]
+            or (column_colors[index] if index < len(column_colors) else None)
             for index, cell in enumerate(row["cells"])
         ]
         raw = dict(child.raw)
         row_payload = dict(payload)
         row_payload["_noteck_cell_colors"] = colors
         raw["table_row"] = row_payload
-        prepared_children.append(
-            NotionBlock(
-                block_id=child.block_id,
-                block_type=child.block_type,
-                has_children=child.has_children,
-                parent_id=child.parent_id,
-                parent_type=child.parent_type,
-                raw=raw,
-                children=child.children,
-            )
-        )
+        prepared_children.append(_copy_block(child, raw=raw))
         row_index += 1
-    raw = dict(block.raw)
+
+    return _copy_block(block, children=tuple(prepared_children))
+
+
+def _copy_block(
+    block: NotionBlock,
+    *,
+    raw: dict[str, Any] | None = None,
+    children: tuple[NotionBlock, ...] | None = None,
+) -> NotionBlock:
+    """Copy one immutable normalized block with selected replacements."""
     return NotionBlock(
         block_id=block.block_id,
         block_type=block.block_type,
         has_children=block.has_children,
         parent_id=block.parent_id,
         parent_type=block.parent_type,
-        raw=raw,
-        children=tuple(prepared_children),
+        raw=block.raw if raw is None else raw,
+        children=block.children if children is None else children,
     )
+
+
+@dataclass(frozen=True)
+class NotionMarkdownSnapshot:
+    """Complete enhanced-Markdown response for one Notion page or subtree."""
+
+    page_id: str
+    markdown: str
+    truncated: bool
+    unknown_block_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class NotionPageSyncData:
+    """Notion source data required before one page can be reconciled."""
+
+    page_id: str
+    last_edited_time: str | None
+    markdown_snapshot: NotionMarkdownSnapshot
+    shallow_blocks: tuple[NotionBlock, ...]
+
+
+@dataclass(frozen=True)
+class NotionPageFetchResult:
+    """One page-preparation result, including an isolated fetch failure."""
+
+    page_id: str
+    data: NotionPageSyncData | None = None
+    error: Exception | None = None
+
+
+@dataclass(frozen=True)
+class _BlockFetchJob:
+    """One page-tree queue item identifying a parent whose children are needed."""
+
+    page_id:         str
+    parent_block_id: str
+
+
+@dataclass(frozen=True)
+class _BlockFetchResult:
+    """One completed fetch plus jobs discovered while processing it."""
+
+    job:        _BlockFetchJob
+    child_jobs: tuple[_BlockFetchJob, ...]
+    error:      Exception | None = None
+
+
+class _AsyncRateLimiter:
+    """Serialize request starts to a shared average requests-per-second limit."""
+
+    def __init__(self, requests_per_second: float) -> None:
+        self._interval = 1.0 / requests_per_second
+        self._next_request_at = 0.0
+
+        self._next_request_at_lock = threading.Lock()
+
+    async def acquire(self) -> None:
+        """Wait until the next request may start."""
+        while True:
+            with self._next_request_at_lock:
+                now = time.monotonic()
+                delay = self._next_request_at - now
+                if delay <= 0:
+                    self._next_request_at = now + self._interval
+                    return
+
+            await asyncio.sleep(delay)
+
+    async def defer(self, delay_seconds: float) -> None:
+        """Prevent every worker from retrying before a shared server deadline."""
+        with self._next_request_at_lock:
+            retry_at              = time.monotonic() + max(0.0, delay_seconds)
+            self._next_request_at = max(self._next_request_at, retry_at)
 
 
 # Keep this alias Python 3.9-compatible because it is evaluated at import time.
 Transport = Callable[[str, str, dict[str, str], Optional[bytes], float], NotionResponse]
+PageFetchProgressCallback = Callable[[int, int], None]
 
 
 class NotionClient:
@@ -287,6 +378,7 @@ class NotionClient:
         self._transport = transport or self._default_transport
         self._block_parent_page_cache: dict[str, str | None] = {}
         self._page_parent_type_cache: dict[str, str | None] = {}
+        self._tree_rate_limiter = _AsyncRateLimiter(NOTION_REQUESTS_PER_SECOND)
 
     @classmethod
     def from_settings(
@@ -382,17 +474,57 @@ class NotionClient:
 
     def get_page_content(self, page_id: str) -> list[NotionBlock]:
         """Return the full block tree for a page."""
-        return self._fetch_block_children_recursive(page_id)
+        return asyncio.run(self._fetch_page_tree(page_id))
 
-    def get_page_markdown(self, page_id: str) -> str:
-        """Return enhanced Markdown content, including table cell colors."""
-        payload = self._request_json("GET", f"/pages/{page_id}/markdown", None)
-        markdown = payload.get("markdown")
-        return markdown if isinstance(markdown, str) else ""
+    def get_pages_sync_data(
+        self,
+        page_ids: Iterable[str],
+        *,
+        progress_callback: PageFetchProgressCallback | None = None,
+    ) -> dict[str, NotionPageFetchResult]:
+        """Fetch sync inputs for pages through a bounded asynchronous queue."""
+        ordered_page_ids = tuple(dict.fromkeys(str(page_id) for page_id in page_ids))
+        if not ordered_page_ids:
+            return {}
+
+        return asyncio.run(
+            self._fetch_pages_sync_data(
+                ordered_page_ids,
+                progress_callback=progress_callback,
+            )
+        )
+
+    def get_page_markdown(self, page_id: str) -> NotionMarkdownSnapshot:
+        """Return a page's complete enhanced Markdown representation."""
+        payload = asyncio.run(
+            self._request_json_with_rate_limit_retry(
+                "GET",
+                f"/pages/{page_id}/markdown",
+                None,
+                limiter=self._tree_rate_limiter,
+            )
+        )
+        unknown_block_ids = payload.get("unknown_block_ids")
+        if not isinstance(unknown_block_ids, list):
+            unknown_block_ids = []
+
+        return NotionMarkdownSnapshot(
+            page_id=str(payload.get("id") or page_id),
+            markdown=str(payload.get("markdown") or ""),
+            truncated=bool(payload.get("truncated")),
+            unknown_block_ids=tuple(str(block_id) for block_id in unknown_block_ids),
+        )
 
     def get_page_last_edited_time(self, page_id: str) -> str | None:
-        """Return the page `last_edited_time` used for fast-sync decisions."""
-        payload = self._request_json("GET", f"/pages/{page_id}", None)
+        """Return page-level edit metadata for sync diagnostics and persistence."""
+        payload = asyncio.run(
+            self._request_json_with_rate_limit_retry(
+                "GET",
+                f"/pages/{page_id}",
+                None,
+                limiter=self._tree_rate_limiter,
+            )
+        )
         last_edited_time = payload.get("last_edited_time")
         if isinstance(last_edited_time, str) and last_edited_time:
             return last_edited_time
@@ -400,10 +532,12 @@ class NotionClient:
 
     def get_page_blocks_shallow(self, page_id: str) -> list[NotionBlock]:
         """Return the page's direct child blocks without expanding nested children."""
-        blocks: list[NotionBlock] = []
-        for payload in self._fetch_block_children(page_id):
-            blocks.append(self._normalize_block(payload))
-        return blocks
+        return asyncio.run(
+            self._fetch_block_children_async(
+                page_id,
+                limiter=self._tree_rate_limiter,
+            )
+        )
 
     def get_block(self, block_id: str) -> NotionBlock:
         """Return a single Notion block without expanding its children."""
@@ -412,7 +546,7 @@ class NotionClient:
 
     def get_block_children_recursive(self, block_id: str) -> list[NotionBlock]:
         """Return the full block tree under the given block id."""
-        return self._fetch_block_children_recursive(block_id)
+        return asyncio.run(self._fetch_page_tree(block_id))
 
     def update_toggle(self, block_id: str, title: str, body: str) -> None:
         """Update a toggle block title and replace its child blocks."""
@@ -599,6 +733,95 @@ class NotionClient:
         
         return "Untitled"
 
+    async def _fetch_pages_sync_data(
+        self,
+        page_ids: tuple[str, ...],
+        *,
+        progress_callback: PageFetchProgressCallback | None,
+    ) -> dict[str, NotionPageFetchResult]:
+        """Prepare multiple pages concurrently while sharing the API limiter."""
+        jobs:    asyncio.Queue[str] = asyncio.Queue(maxsize=NOTION_PAGE_QUEUE_SIZE)
+        results: dict[str, NotionPageFetchResult] = {}
+        completed_count = 0
+
+        async def worker() -> None:
+            """Fetch the metadata, Markdown, and shallow roots for queued pages."""
+            nonlocal completed_count
+            while True:
+                page_id = await jobs.get()
+                try:
+                    try:
+                        data = await self._fetch_page_sync_data(page_id)
+                        results[page_id] = NotionPageFetchResult(page_id=page_id, data=data)
+                    except Exception as exc:
+                        results[page_id] = NotionPageFetchResult(page_id=page_id, error=exc)
+                finally:
+                    # All workers run on one event loop, so this update cannot
+                    # interleave with another worker between read and write.
+                    completed_count += 1
+                    if progress_callback is not None:
+                        try:
+                            progress_callback(completed_count, len(page_ids))
+                        except Exception:
+                            pass
+
+                    jobs.task_done()
+
+        workers = [
+            asyncio.create_task(worker())
+            for _ in range(NOTION_PAGE_WORKER_COUNT)
+        ]
+
+        try:
+            # Workers must already be consuming before the bounded queue is filled.
+            for page_id in page_ids:
+                await jobs.put(page_id)
+            await jobs.join()
+        finally:
+            for task in workers:
+                task.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+
+        return results
+
+    async def _fetch_page_sync_data(self, page_id: str) -> NotionPageSyncData:
+        """Fetch all non-recursive Notion inputs used by one sync page."""
+        page_payload = await self._request_json_with_rate_limit_retry(
+            "GET",
+            f"/pages/{page_id}",
+            None,
+            limiter=self._tree_rate_limiter,
+        )
+        markdown_payload = await self._request_json_with_rate_limit_retry(
+            "GET",
+            f"/pages/{page_id}/markdown",
+            None,
+            limiter=self._tree_rate_limiter,
+        )
+        shallow_blocks = await self._fetch_block_children_async(
+            page_id,
+            limiter=self._tree_rate_limiter,
+        )
+
+        unknown_block_ids = markdown_payload.get("unknown_block_ids")
+        if not isinstance(unknown_block_ids, list):
+            unknown_block_ids = []
+        last_edited_time = page_payload.get("last_edited_time")
+        if not isinstance(last_edited_time, str) or not last_edited_time:
+            last_edited_time = None
+
+        return NotionPageSyncData(
+            page_id           = page_id,
+            last_edited_time  = last_edited_time,
+            markdown_snapshot = NotionMarkdownSnapshot(
+                page_id           = str(markdown_payload.get("id") or page_id),
+                markdown          = str(markdown_payload.get("markdown") or ""),
+                truncated         = bool(markdown_payload.get("truncated")),
+                unknown_block_ids = tuple(str(block_id) for block_id in unknown_block_ids),
+            ),
+            shallow_blocks    = tuple(shallow_blocks),
+        )
+
     def _normalize_icon(self, icon_payload: dict[str, Any] | None) -> dict[str, Any] | None:
         """Return the icon payload if present."""
         if not icon_payload:
@@ -608,29 +831,194 @@ class NotionClient:
         
         return icon_payload
 
-    def _fetch_block_children_recursive(self, block_id: str) -> list[NotionBlock]:
-        """Fetch blocks recursively starting from a parent block."""
-        blocks: list[NotionBlock] = []
+    async def _fetch_page_tree(self, page_id: str) -> list[NotionBlock]:
+        """Fetch a complete block tree with a bounded asynchronous worker queue."""
+        jobs:               asyncio.Queue[_BlockFetchJob]                  = asyncio.Queue(maxsize=NOTION_TREE_QUEUE_SIZE)
+        completed:          asyncio.Queue[_BlockFetchResult]               = asyncio.Queue()
+        children_by_parent: dict[tuple[str, str], tuple[NotionBlock, ...]] = {}
+        errors:             list[Exception]                                = []
 
-        # fetch child blocks of given parent block
-        for payload in self._fetch_block_children(block_id):
-            block = self._normalize_block(payload)
+        await jobs.put(_BlockFetchJob(page_id=page_id, parent_block_id=page_id))
 
-            # add children to NotionBlock if present
-            if block.has_children:
-                children = self._fetch_block_children_recursive(block.block_id)
-                block = NotionBlock(
-                    block_id     = block.block_id,
-                    block_type   = block.block_type,
-                    has_children = block.has_children,
-                    parent_id    = block.parent_id,
-                    parent_type  = block.parent_type,
-                    raw          = block.raw,
-                    children     = tuple(children),
+        async def worker() -> None:
+            """Fetch jobs and report their newly discovered child jobs."""
+            while True:
+                job = await jobs.get()
+
+                try:
+                    blocks = tuple(
+                        await self._fetch_block_children_async(
+                            job.parent_block_id,
+                            limiter=self._tree_rate_limiter,
+                        )
+                    )
+                    # Workers store shallow results before descendants are queued.
+                    children_by_parent[(job.page_id, job.parent_block_id)] = blocks
+                    child_jobs = tuple(
+                        _BlockFetchJob(
+                            page_id=job.page_id,
+                            parent_block_id=block.block_id,
+                        )
+                        for block in blocks
+                        if block.has_children
+                    )
+                    await completed.put(_BlockFetchResult(job=job, child_jobs=child_jobs))
+                except Exception as exc:
+                    await completed.put(_BlockFetchResult(job=job, child_jobs=(), error=exc))
+
+        async def enqueue_discovered_jobs() -> None:
+            """Feed descendants into the bounded queue and settle parent jobs."""
+            while True:
+                result = await completed.get()
+
+                try:
+                    if result.error is not None:
+                        errors.append(result.error)
+                    else:
+                        for child_job in result.child_jobs:
+                            await jobs.put(child_job)
+                finally:
+                    # A job remains unfinished until all descendants it discovered
+                    # have entered the queue, so queue.join() cannot return early.
+                    jobs.task_done()
+                    completed.task_done()
+
+        workers = [
+            asyncio.create_task(worker())
+            for _ in range(NOTION_TREE_WORKER_COUNT)
+        ]
+        enqueuer = asyncio.create_task(enqueue_discovered_jobs())
+
+        # Wait for all jobs to be processed
+        try:
+            await jobs.join()
+            await completed.join()
+        # Cancel workers and enqueuer if the caller cancels the operation
+        finally:
+            for task in workers:
+                task.cancel()
+            enqueuer.cancel()
+            await asyncio.gather(*workers, enqueuer, return_exceptions=True)
+
+        if errors:
+            raise errors[0]
+        return self._assemble_block_tree(
+            page_id=page_id,
+            parent_block_id=page_id,
+            children_by_parent=children_by_parent,
+        )
+
+    async def _fetch_block_children_async(
+        self,
+        block_id: str,
+        *,
+        limiter: _AsyncRateLimiter,
+    ) -> list[NotionBlock]:
+        """Return every direct child using page_size=100 and shared throttling."""
+        blocks:      list[NotionBlock] = []
+        next_cursor: str | None        = None
+
+        while True:
+            path = (
+                f"/blocks/{block_id}/children"
+                f"?page_size={NOTION_BLOCK_PAGE_SIZE}"
+            )
+            if next_cursor:
+                path = (
+                    f"{path}&start_cursor={parse.quote(next_cursor)}"
                 )
 
-            blocks.append(block)
-        
+            response = await self._request_json_with_rate_limit_retry(
+                "GET",
+                path,
+                None,
+                limiter=limiter,
+            )
+            blocks.extend(
+                self._normalize_block(payload)
+                for payload in response.get("results", [])
+            )
+            if not response.get("has_more"):
+                return blocks
+
+            next_cursor = response.get("next_cursor")
+            if not next_cursor:
+                return blocks
+
+    async def _request_json_with_rate_limit_retry(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        *,
+        limiter: _AsyncRateLimiter,
+    ) -> dict[str, Any]:
+        """Make a throttled request, respecting Retry-After on HTTP 429."""
+        for retry_index in range(NOTION_RATE_LIMIT_RETRIES + 1):
+            await limiter.acquire()
+            try:
+                return await asyncio.to_thread(
+                    self._request_json_once,
+                    method,
+                    path,
+                    payload,
+                )
+            except NotionApiError as exc:
+                if exc.status != 429 or retry_index >= NOTION_RATE_LIMIT_RETRIES:
+                    raise
+                await limiter.defer(self._retry_after_seconds(exc, retry_index))
+
+        raise RuntimeError("Notion rate-limit retry loop ended unexpectedly.")
+
+    def _retry_after_seconds(self, error: NotionApiError, retry_index: int) -> float:
+        """Return Retry-After seconds, with bounded backoff for invalid headers."""
+        retry_after = next(
+            (
+                value
+                for key, value in error.headers.items()
+                if key.lower() == "retry-after"
+            ),
+            None,
+        )
+        if retry_after is not None:
+            try:
+                return max(0.0, float(retry_after))
+            except (TypeError, ValueError):
+                pass
+        return float(min(2 ** retry_index, 8))
+
+    def _assemble_block_tree(
+        self,
+        *,
+        page_id: str,
+        parent_block_id: str,
+        children_by_parent: Mapping[tuple[str, str], tuple[NotionBlock, ...]],
+        ancestors: frozenset[str] = frozenset(),
+    ) -> list[NotionBlock]:
+        """Rebuild immutable nested blocks from the workers' shallow results."""
+        blocks: list[NotionBlock] = []
+        for block in children_by_parent.get((page_id, parent_block_id), ()):
+            children: tuple[NotionBlock, ...] = ()
+            if block.has_children and block.block_id not in ancestors:
+                children = tuple(
+                    self._assemble_block_tree(
+                        page_id=page_id,
+                        parent_block_id=block.block_id,
+                        children_by_parent=children_by_parent,
+                        ancestors=ancestors | {block.block_id},
+                    )
+                )
+            blocks.append(
+                NotionBlock(
+                    block_id=block.block_id,
+                    block_type=block.block_type,
+                    has_children=block.has_children,
+                    parent_id=block.parent_id,
+                    parent_type=block.parent_type,
+                    raw=block.raw,
+                    children=children,
+                )
+            )
         return blocks
 
     def _fetch_block_children(self, block_id: str) -> Iterable[dict[str, Any]]:
@@ -776,7 +1164,12 @@ class NotionClient:
         # handle error responses
         if response.status >= 400:
             message = data.get("message") or f"Notion API error ({response.status})"
-            raise NotionApiError(message, status=response.status, payload=data)
+            raise NotionApiError(
+                message,
+                status  = response.status,
+                payload = data,
+                headers = response.headers,
+            )
         
         return data
 
@@ -800,7 +1193,16 @@ class NotionClient:
                     headers=dict(response.headers.items()),
                     body=raw_body,
                 )
-        
+
+        # urllib represents HTTP error responses as exceptions. Preserve the
+        # response so API errors such as 429 can use status and Retry-After.
+        except error.HTTPError as exc:
+            return NotionResponse(
+                status=exc.code,
+                headers=dict(exc.headers.items()) if exc.headers else {},
+                body=exc.read(),
+            )
+
         # transport failed
         except Exception as exc:
             raise NotionTransportError(str(exc)) from exc
