@@ -200,23 +200,31 @@ class ClozeCardParser:
         """Parse one advanced cloze toggle into an Anki cloze payload."""
         text_blocks, extra_blocks = self._split_advanced_children(block.children)
         text_blocks = self._prepare_advanced_blocks(text_blocks)
-        extra_blocks = self._prepare_advanced_blocks(extra_blocks)
+        text = render_blocks_with_renderer(
+            text_blocks,
+            rich_text_renderer=self._rich_text_to_advanced_cloze_html,
+            block_text_override=self._render_block_level_cloze_html,
+            table_cell_override=self._render_table_cell_cloze_html,
+        )
         fields = {
-            "Text":            render_blocks_with_renderer(
-                text_blocks,
-                rich_text_renderer=self._rich_text_to_advanced_cloze_html,
-                block_text_override=self._render_block_level_cloze_html,
-                table_cell_override=self._render_table_cell_cloze_html,
-            ),
-            "Extra":           render_blocks_with_renderer(
-                extra_blocks,
-                rich_text_renderer=self._rich_text_to_advanced_cloze_html,
-                block_text_override=self._render_block_level_cloze_html,
-                table_cell_override=self._render_table_cell_cloze_html,
-            ),
+            "Text":            self._wrap_advanced_root_foreground(block, text),
+            "Extra":           shared.render_blocks(extra_blocks),
             "Notion Block ID": block.block_id,
         }
         return self._payload_for_fields(page_id, block, fields)
+
+    def _wrap_advanced_root_foreground(self, block: NotionBlock, text: str) -> str:
+        """Apply a root toggle foreground to its visible advanced-cloze content."""
+        foreground_color = shared._block_foreground_color(block)
+        if foreground_color == "default":
+            return text
+
+        # The advanced toggle title is intentionally hidden, so its validated
+        # foreground becomes the semantic color scope for the visible Text field.
+        return (
+            '<div class="notion-cloze-root-foreground notion-block-color '
+            f'notion-block-color-{foreground_color}">{text}</div>'
+        )
 
     def _split_advanced_children(self, children: Iterable[NotionBlock]) -> tuple[list[NotionBlock], list[NotionBlock]]:
         text_blocks:  list[NotionBlock] = []

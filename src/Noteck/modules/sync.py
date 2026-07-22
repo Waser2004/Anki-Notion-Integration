@@ -102,7 +102,7 @@ _MERMAID_FIGURE_RE = re.compile(
 )
 _HTTP_TIMEOUT_SECONDS = 20.0
 _CLOZE_REFRESH_REVISION_SETTING_KEY = "_internal_cloze_refresh_revision"
-_CLOZE_REFRESH_REVISION = "2026-07-cloze-block-colors-v7" # reset to v1 before release as this has been updated to v7 for testing only
+_CLOZE_REFRESH_REVISION = "2026-07-cloze-block-colors-v8" # reset to v1 before release as this has been updated to v8 for testing only
 _TOGGLE_REFRESH_REVISION_SETTING_KEY = "_internal_toggle_refresh_revision"
 _TOGGLE_REFRESH_REVISION = "2026-07-block-colors-v1"
 _GRAY_TOGGLE_CLOZE_ENABLED_SETTING_KEY = "_internal_gray_toggle_cloze_enabled"

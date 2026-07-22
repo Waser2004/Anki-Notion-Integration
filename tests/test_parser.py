@@ -1599,6 +1599,67 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(payloads[0].fields["Extra"], "<p>Shown on back</p>")
         self.assertNotIn("Shown on back", payloads[0].fields["Text"])
 
+    def test_advanced_cloze_extra_marker_colors_remain_visual(self) -> None:
+        """An Extra block never converts configured marker colors into cloze syntax."""
+        advanced_toggle = _block(
+            "advanced-toggle",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] Colored extra")]},
+            children=(
+                _block(
+                    "text-p",
+                    "paragraph",
+                    {"rich_text": [_text_item("Front", annotations=_annotations(background_color="yellow"))]},
+                ),
+                _block(
+                    "extra-p",
+                    "paragraph",
+                    {
+                        "color": "yellow_background",
+                        "rich_text": [
+                            _text_item("Extra: "),
+                            _text_item("Shown", annotations=_annotations(background_color="green")),
+                        ],
+                    },
+                ),
+            ),
+        )
+
+        payload = parse_page_to_cards("page-1", [advanced_toggle], enable_cloze=True)[0]
+
+        self.assertIn("{{c1::Front}}", payload.fields["Text"])
+        self.assertNotIn("{{c", payload.fields["Extra"])
+        self.assertIn("notion-block-color-yellow_background", payload.fields["Extra"])
+        self.assertIn('class="highlight-green_background"', payload.fields["Extra"])
+        self.assertNotIn("Extra:", payload.fields["Extra"])
+
+    def test_advanced_cloze_root_foreground_wraps_visible_text(self) -> None:
+        """A hidden root toggle title passes its foreground color to visible content."""
+        advanced_toggle = _block(
+            "advanced-toggle",
+            "toggle",
+            {
+                "color": "red",
+                "rich_text": [_text_item("[cloze] Foreground")],
+            },
+            children=(
+                _block(
+                    "text-p",
+                    "paragraph",
+                    {"rich_text": [_text_item("Front", annotations=_annotations(background_color="yellow"))]},
+                ),
+            ),
+        )
+
+        payload = parse_page_to_cards("page-1", [advanced_toggle], enable_cloze=True)[0]
+
+        self.assertEqual(payload.fields["Notion Card Background"], "")
+        self.assertIn(
+            'class="notion-cloze-root-foreground notion-block-color notion-block-color-red"',
+            payload.fields["Text"],
+        )
+        self.assertIn("<p>{{c1::Front}}</p>", payload.fields["Text"])
+
     def test_advanced_cloze_extra_toggle_is_rendered_normally(self) -> None:
         """The obsolete ``[extra]`` toggle convention no longer populates Extra."""
         extra_toggle = _block(

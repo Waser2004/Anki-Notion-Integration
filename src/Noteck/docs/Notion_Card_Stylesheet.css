@@ -653,6 +653,16 @@ html.night_mode .notion-mermaid .notion-mermaid-dark,
 	color: inherit !important;
 }
 
+/* Advanced cloze titles stay hidden, so a root toggle foreground colors the
+   visible card contents while nested block colors can override the variable. */
+.notion-cloze-root-foreground :is(h1, h2, h3, h4, h5, h6, p, li, td, th, summary) {
+	color: var(--notion-block-foreground, var(--notion-text)) !important;
+}
+
+.notion-cloze-root-foreground .notion-block-color-background {
+	--notion-block-foreground: var(--notion-text);
+}
+
 .notion-block-color-background {
 	border-radius: 4px;
 	background: var(--notion-block-background) !important;

@@ -142,8 +142,10 @@ An advanced source is a root `toggle` matching either convention:
 The title is only a recognition marker. It is not included in `Text`. A gray
 foreground text annotation is not equivalent to a gray block background.
 The root toggle background is stored as the complete card surface, including
-the gray background used for container recognition. A root foreground has no
-visible target because the title remains excluded.
+the gray background used for container recognition. Because the title remains
+excluded, a validated root foreground instead becomes a semantic color scope
+around the visible `Text` contents. Explicit nested block and inline colors
+continue to take precedence over that inherited foreground.
 
 All direct child blocks normally render into `Text` through the shared block
 renderer. This preserves its supported paragraphs, headings, lists, tables,
@@ -181,7 +183,10 @@ HTML structure is retained.
 A direct child paragraph whose text starts with `Extra:` is rendered into
 `Extra`, with the case-insensitive prefix removed. Unlike normal paragraph
 clozes, the extra paragraph is inside the advanced cloze toggle rather than the
-next top-level block. Toggles titled `[extra]` are rendered normally in `Text`.
+next top-level block. Extra paragraphs always use the ordinary shared renderer:
+configured marker backgrounds and inline marker colors remain visual styling
+and never produce `{{cN::...}}` markup in `Extra`. Toggles titled `[extra]` are
+rendered normally in `Text`.
 
 ### Color-to-number mapping
 

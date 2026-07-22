@@ -23,6 +23,7 @@ from Noteck.modules.cards import (  # noqa: E402
     _MODEL_DEFINITIONS,
     _build_managed_css,
     _ensure_model,
+    _load_model_css,
     _model_differs_from_defaults,
     _model_template_status,
     _strip_template_version,
@@ -289,6 +290,19 @@ class CardModelTests(unittest.TestCase):
         # Keep the active rule after the fallback as an additional safeguard;
         # its table context also gives it strictly greater specificity.
         self.assertLess(css.index(root_header_rule), css.index(active_cloze_rule))
+
+    def test_advanced_cloze_root_foreground_styles_visible_block_text(self) -> None:
+        """Bundled CSS propagates the hidden toggle title color to visible contents."""
+        css = _load_model_css()
+
+        self.assertIn(
+            ".notion-cloze-root-foreground :is(h1, h2, h3, h4, h5, h6, p, li, td, th, summary)",
+            css,
+        )
+        self.assertIn(
+            ".notion-cloze-root-foreground .notion-block-color-background",
+            css,
+        )
 
     def test_existing_template_html_and_css_are_preserved(self) -> None:
         definition = _MODEL_DEFINITIONS[0]
