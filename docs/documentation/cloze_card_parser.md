@@ -259,8 +259,9 @@ come from the shallow top-level block list and need no recursive expansion.
 
 Database exclusions are applied before parsing: excluded toggles are not
 expanded, and excluded paragraph IDs are omitted with `include_block_ids`.
-Validation failures are reported against the source block ID and do not produce
-a partial Anki write.
+Validation failures are emitted as structured `invalid_cloze_card` sync warnings
+against the source block ID and do not produce a partial Anki write. They do not
+turn an otherwise successful sync into an infrastructure error.
 
 Sync also stores internal revision markers for one-time cloze reparsing after
 parser behavior changes and for changes to the gray-toggle option. If output

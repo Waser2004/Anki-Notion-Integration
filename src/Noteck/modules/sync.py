@@ -89,6 +89,7 @@ SyncDoneCallback = Callable[[SyncResult], None]
 SyncProgressCallback = Callable[[str], None]
 SyncCancelCheck = Callable[[], bool]
 _sync_is_running = False
+_sync_done_callbacks: list[SyncDoneCallback] = []
 _LOG = logging.getLogger("noteck.sync")
 _IMAGE_TAG_RE = re.compile(r'<img(?P<before>[^>]*?)\ssrc="(?P<src>[^"]+)"(?P<after>[^>]*)>', re.IGNORECASE)
 # Match Mermaid placeholders even if attributes or whitespace shift slightly during HTML processing.
@@ -155,7 +156,7 @@ def sync_notion_to_anki(
         )
         cloze_settings_refresh_pending = enable_cloze and (
             _load_gray_toggle_cloze_enabled(db) != enable_gray_toggle_cloze
-            or _load_cloze_marker_colors(db) != cloze_marker_colors
+            or cloze_marker_colors_need_sync(db, cloze_marker_colors)
         )
         # Keep existing parser revision markers for upgrade bookkeeping. The full
         # content scan now makes timestamp-specific refresh branches unnecessary.
@@ -470,11 +471,33 @@ def run_notion_sync_with_progress(
             result = SyncResult(ok=False, message=f"Sync failed: {exc}", errors=(str(exc),))
         finally:
             finish()
+        _notify_sync_done(result)
         if on_done is not None:
             on_done(result)
 
     run_in_background(work, done)
     return True
+
+
+def register_sync_done_callback(callback: SyncDoneCallback) -> None:
+    """Register a UI callback that runs after any progress-based Notion sync."""
+    if callback not in _sync_done_callbacks:
+        _sync_done_callbacks.append(callback)
+
+
+def unregister_sync_done_callback(callback: SyncDoneCallback) -> None:
+    """Stop notifying a previously registered Notion-sync callback."""
+    if callback in _sync_done_callbacks:
+        _sync_done_callbacks.remove(callback)
+
+
+def _notify_sync_done(result: SyncResult) -> None:
+    """Notify live UI observers without allowing one observer to break sync."""
+    for callback in tuple(_sync_done_callbacks):
+        try:
+            callback(result)
+        except Exception:
+            _LOG.exception("A Notion sync completion callback failed.")
 
 
 def trigger_startup_sync(
@@ -1363,6 +1386,11 @@ def _load_cloze_marker_colors(db: Database) -> list[str] | None:
     return raw_value.split(",") if raw_value is not None else list(CLOZE_MARKER_COLORS)
 
 
+def cloze_marker_colors_need_sync(db: Database, colors: list[str]) -> bool:
+    """Return whether current marker colors differ from the last successful sync."""
+    return _load_cloze_marker_colors(db) != list(colors)
+
+
 def _set_cloze_marker_colors(db: Database, colors: list[str]) -> None:
     """Persist the marker-color selection used by this successful sync."""
     db.set_setting(_CLOZE_MARKER_COLORS_SETTING_KEY, ",".join(colors))
@@ -1417,11 +1445,15 @@ def _sync_one_payload(
         validation = ClozeCardParser().validate(payload)
         if not validation.is_valid:
             message = "; ".join(validation.errors)
-            return (
+            stats = _add_warning(
                 stats,
-                [f"Block {payload.notion_block_id}: invalid cloze card: {message}"],
-                False,
+                warnings,
+                code="invalid_cloze_card",
+                message=f"Invalid cloze card was skipped: {message}",
+                page_id=page_id,
+                block_id=payload.notion_block_id,
             )
+            return _replace_stats(stats, cards_skipped=stats.cards_skipped + 1), [], False
 
     try:
         model_name = payload.model_name or MODEL_NAME_BASIC
@@ -1506,6 +1538,10 @@ def _sync_one_payload(
         prepared_payload, stats = _prepare_payload_media_with_warnings(collection, payload, stats, warnings)
         _apply_payload_to_note(note, prepared_payload)
         _update_note(collection, note)
+        if payload.card_type == CLOZE:
+            # Updating a cloze note creates missing ordinals but Anki requires a
+            # separate empty-card pass to remove ordinals no longer in Text.
+            _remove_empty_cards_for_note(collection, note_id)
         _upsert_card_mapping(db, prepared_payload, note_id, page_id)
         _LOG.info("Card updated. page_id=%s block_id=%s note_id=%s reason=content_changed", page_id, payload.notion_block_id, note_id)
         return _replace_stats(stats, cards_updated=stats.cards_updated + 1), [], False
@@ -2132,6 +2168,24 @@ def _card_ids_for_note(collection: Any, note_id: int) -> list[int]:
             rows = all_rows("SELECT id FROM cards WHERE nid = ?", (note_id,))
         return [int(row[0]) for row in rows]
     return []
+
+
+def _remove_empty_cards_for_note(collection: Any, note_id: int) -> None:
+    """Remove obsolete generated cards belonging to one updated cloze note."""
+    get_empty_cards = getattr(collection, "get_empty_cards", None)
+    remove_cards = getattr(collection, "remove_cards_and_orphaned_notes", None)
+    if not callable(get_empty_cards) or not callable(remove_cards):
+        return
+
+    report = get_empty_cards()
+    empty_card_ids = [
+        int(card_id)
+        for empty_note in getattr(report, "notes", ())
+        if int(getattr(empty_note, "note_id", 0)) == note_id
+        for card_id in getattr(empty_note, "card_ids", ())
+    ]
+    if empty_card_ids:
+        remove_cards(empty_card_ids)
 
 
 def _update_note(collection: Any, note: Any) -> None:

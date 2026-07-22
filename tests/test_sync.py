@@ -6,6 +6,7 @@ import base64
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -125,6 +126,8 @@ class _FakeCollection:
         self._next_note_id = 1000
         self.notes: dict[int, _FakeNote] = {}
         self.media = _FakeMedia(media_dir) if media_dir is not None else None
+        self.empty_cards_report = SimpleNamespace(notes=[])
+        self.removed_card_ids: list[int] = []
 
     def new_note(self, model: dict[str, str]) -> _FakeNote:
         _ = model
@@ -143,6 +146,14 @@ class _FakeCollection:
         if note.id is None:
             raise RuntimeError("note id missing")
         self.notes[note.id] = note
+
+    def get_empty_cards(self) -> SimpleNamespace:
+        """Return Anki-like empty-card report data for cleanup tests."""
+        return self.empty_cards_report
+
+    def remove_cards_and_orphaned_notes(self, card_ids: list[int]) -> None:
+        """Record card IDs removed by cloze reconciliation."""
+        self.removed_card_ids.extend(card_ids)
 
 
 class _FakeMw:
@@ -679,6 +690,77 @@ class SyncTests(unittest.TestCase):
             last_edited_time="2026-02-04T00:00:00.000Z",
         )
 
+    def test_cloze_marker_sync_status_survives_database_reopen(self) -> None:
+        """The settings warning must compare against durable last-sync state."""
+        _SYNC_MODULE._set_cloze_marker_colors(self._db, ["yellow", "green"])
+
+        reopened_db = Database(self._db_path)
+        self.assertFalse(
+            _SYNC_MODULE.cloze_marker_colors_need_sync(
+                reopened_db, ["yellow", "green"]
+            )
+        )
+        self.assertTrue(
+            _SYNC_MODULE.cloze_marker_colors_need_sync(reopened_db, ["yellow"])
+        )
+
+    def test_sync_removes_only_obsolete_cards_from_updated_cloze_note(self) -> None:
+        """Removed cloze ordinals must not leave empty cards or affect other notes."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        existing_note = collection.new_note({"name": "Notion (Cloze)"})
+        collection.add_note(existing_note, deck_id=1)
+        collection.empty_cards_report = SimpleNamespace(
+            notes=[
+                SimpleNamespace(note_id=existing_note.id, card_ids=[101, 102]),
+                SimpleNamespace(note_id=9999, card_ids=[201]),
+            ]
+        )
+
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                INSERT INTO cards (
+                    notion_block_id, notion_page_id, anki_note_id, card_type, content_hash
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("block-1", "page-1", existing_note.id, "cloze", "old-hash"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        cloze_payload = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="block-1",
+            card_type="cloze",
+            model_name="Notion (Cloze)",
+            fields={
+                "Text": "{{c1::Current deletion}}",
+                "Extra": "",
+                "Notion Block ID": "block-1",
+                "Notion Card Background": "",
+            },
+            content_hash="new-hash",
+        )
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[cloze_payload],
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_updated, 1)
+        self.assertEqual(collection.removed_card_ids, [101, 102])
+
     def test_sync_creates_note_and_mapping(self) -> None:
         collection = _FakeCollection()
         mw = _FakeMw(collection)
@@ -709,8 +791,8 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(str(row["notion_block_id"]), "block-1")
         self.assertGreater(int(row["anki_note_id"]), 0)
 
-    def test_sync_rejects_markerless_cloze_before_creating_an_anki_note(self) -> None:
-        """A deterministic parser payload without a deletion must not reach Anki."""
+    def test_sync_warns_for_markerless_cloze_without_creating_an_anki_note(self) -> None:
+        """Invalid cloze content is a card-local warning and must not reach Anki."""
         collection = _FakeCollection()
         mw = _FakeMw(collection)
         invalid_cloze = ToggleCardPayload(
@@ -737,10 +819,15 @@ class SyncTests(unittest.TestCase):
         ):
             result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
 
-        self.assertFalse(result.ok)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.errors, ())
         self.assertEqual(collection.notes, {})
-        self.assertIn("invalid cloze card", result.errors[0])
-        self.assertIn("at least one deletion", result.errors[0])
+        self.assertEqual(result.stats.cards_warned, 1)
+        self.assertEqual(result.stats.cards_skipped, 1)
+        self.assertEqual([warning.code for warning in result.warnings], ["invalid_cloze_card"])
+        self.assertEqual(result.warnings[0].page_id, "page-1")
+        self.assertEqual(result.warnings[0].block_id, "markerless-cloze")
+        self.assertIn("at least one deletion", result.warnings[0].message)
 
     def test_sync_reset_failure_returns_structured_warning(self) -> None:
         collection = _FakeCollection()
@@ -2677,21 +2764,28 @@ class SyncTests(unittest.TestCase):
         collection = _FakeCollection()
         mw = _FakeMwWithTaskman(collection)
         captured_result: list[SyncResult] = []
+        observed_result: list[SyncResult] = []
+        observer = observed_result.append
         mock_sync = Mock(return_value=SyncResult(ok=True, message="done", stats=SyncStats()))
 
-        with patch.object(_SYNC_MODULE, "sync_notion_to_anki", mock_sync):
-            started = run_notion_sync_with_progress(
-                mw=mw,
-                db_path=self._db_path,
-                on_done=lambda result: captured_result.append(result),
-                parent=object(),
-            )
+        _SYNC_MODULE.register_sync_done_callback(observer)
+        try:
+            with patch.object(_SYNC_MODULE, "sync_notion_to_anki", mock_sync):
+                started = run_notion_sync_with_progress(
+                    mw=mw,
+                    db_path=self._db_path,
+                    on_done=lambda result: captured_result.append(result),
+                    parent=object(),
+                )
+        finally:
+            _SYNC_MODULE.unregister_sync_done_callback(observer)
 
         self.assertTrue(started)
         self.assertEqual(len(mw.progress.start_calls), 1)
         self.assertEqual(mw.progress.finish_calls, 1)
         self.assertEqual(len(captured_result), 1)
         self.assertEqual(captured_result[0].message, "done")
+        self.assertEqual(observed_result, captured_result)
         self.assertIn("progress_callback", mock_sync.call_args.kwargs)
         self.assertIn("should_cancel", mock_sync.call_args.kwargs)
 

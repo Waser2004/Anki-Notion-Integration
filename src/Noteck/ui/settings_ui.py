@@ -19,6 +19,7 @@ from aqt.qt import (
     QFormLayout,
     QFrame,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -54,7 +55,13 @@ from ..modules.settings import (
     SettingsStore,
     load_settings_schema,
 )
-from ..modules.sync import run_notion_sync_with_progress, sync_notion_to_anki
+from ..modules.sync import (
+    cloze_marker_colors_need_sync,
+    register_sync_done_callback,
+    run_notion_sync_with_progress,
+    sync_notion_to_anki,
+    unregister_sync_done_callback,
+)
 from .ui import UiContext
 
 
@@ -163,15 +170,24 @@ class SettingsPage(QWidget):
         self._schema: SettingsSchema = load_settings_schema()
 
         # The DB is initialized on profile open; keep this lightweight and just bind to it.
-        db = Database(context.db_path)
+        self._db = Database(context.db_path)
 
         # Use the active Anki profile name (if available) to namespace keyring secrets.
         profile_name = self._resolve_profile_name(context)
-        self._store = SettingsStore(db, profile_name=profile_name, schema=self._schema)
+        self._store = SettingsStore(self._db, profile_name=profile_name, schema=self._schema)
 
         self._bindings: dict[str, _WidgetBinding] = {}
         self._description_labels: dict[str, QLabel] = {}
+        self._cloze_marker_sync_warning_callout: QWidget | None = None
         self._is_loading = False
+
+        # Keep a stable bound-method reference so it can be unregistered when
+        # Qt destroys this lazily loaded Settings page.
+        self._sync_done_callback = self._on_notion_sync_done
+        register_sync_done_callback(self._sync_done_callback)
+        self.destroyed.connect(
+            lambda _object=None: unregister_sync_done_callback(self._sync_done_callback)
+        )
 
         # build the UI
         root_layout = QVBoxLayout(self)
@@ -222,6 +238,12 @@ class SettingsPage(QWidget):
                         description_label.setStyleSheet("font-style: italic;")
                         self._description_labels[setting.key] = description_label
                         form_layout.addRow(description_label)
+                    # add a warning callout for cloze marker colors that need a Notion sync
+                    elif setting.key == "cloze_marker_colors":
+                        warning_callout = self._build_cloze_marker_sync_warning(group)
+                        warning_callout.setVisible(False)
+                        self._cloze_marker_sync_warning_callout = warning_callout
+                        form_layout.addRow(warning_callout)
 
                 self._wire_autosave(setting.key, input_widget)
 
@@ -250,6 +272,40 @@ class SettingsPage(QWidget):
         layout.addLayout(form)
 
         return group, form
+
+    def _build_cloze_marker_sync_warning(self, parent: QWidget) -> QWidget:
+        """Build a Notion-style yellow warning callout with icon and message."""
+        dark_theme = self.palette().window().color().lightness() < 128
+        background = "#494327" if dark_theme else "#fbf3db"
+        foreground = "#f5f5f5" if dark_theme else "#2f2f2f"
+
+        callout = QWidget(parent)
+        callout.setStyleSheet(
+            f"background-color: {background}; color: {foreground}; border-radius: 5px;"
+        )
+        layout = QHBoxLayout(callout)
+        layout.setContentsMargins(12, 9, 12, 9)
+        layout.setSpacing(10)
+
+        icon = QLabel("⚠️", callout)
+        icon.setStyleSheet("background: transparent; font-size: 18px;")
+        alignment_flag = getattr(Qt, "AlignmentFlag", None)
+        align_top = (
+            alignment_flag.AlignTop
+            if alignment_flag is not None
+            else getattr(Qt, "AlignTop")
+        )
+        icon.setAlignment(align_top)
+        layout.addWidget(icon, 0)
+
+        message = QLabel(
+            "Marker-color changes apply to existing cards only after syncing Notion again.",
+            callout,
+        )
+        message.setWordWrap(True)
+        message.setStyleSheet(f"background: transparent; color: {foreground};")
+        layout.addWidget(message, 1)
+        return callout
 
     def _build_setting_widget(self, setting: SettingDefinition) -> QWidget:
         """Return an input widget for a setting definition."""
@@ -370,6 +426,7 @@ class SettingsPage(QWidget):
                     widget.setText("" if value is None else str(value))
         finally:
             self._is_loading = False
+        self._refresh_cloze_marker_sync_warning()
         self._refresh_card_template_action()
 
     def _on_dropdown_changed(self, key: str) -> None:
@@ -419,6 +476,24 @@ class SettingsPage(QWidget):
             self._store.set_value(key, new_value)
         except SettingsError as exc:
             self._show_error(f"Failed to save setting '{key}'.\n\n{exc}")
+            return
+
+        if key == "cloze_marker_colors":
+            self._refresh_cloze_marker_sync_warning()
+
+    def _refresh_cloze_marker_sync_warning(self) -> None:
+        """Show whether marker-color changes still need a successful Notion sync."""
+        callout = self._cloze_marker_sync_warning_callout
+        binding = self._bindings.get("cloze_marker_colors")
+        if callout is None or binding is None or not isinstance(binding.widget, _MultiSelectDropdown):
+            return
+        callout.setVisible(
+            cloze_marker_colors_need_sync(self._db, binding.widget.selected_values())
+        )
+
+    def _on_notion_sync_done(self, _result: Any) -> None:
+        """Refresh the callout after startup, Anki-button, or manual Notion sync."""
+        self._refresh_cloze_marker_sync_warning()
 
     def _trigger_action(self, key: str) -> None:
         """Execute non-persistent action settings that are rendered as buttons."""
@@ -528,6 +603,7 @@ class SettingsPage(QWidget):
             # Always restore button state, regardless of success/failure/cancel.
             button.setEnabled(True)
             button.setText(original_text)
+            self._refresh_cloze_marker_sync_warning()
             _ = result
 
         started = run_notion_sync_with_progress(
