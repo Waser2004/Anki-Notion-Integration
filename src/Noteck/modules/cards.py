@@ -181,7 +181,10 @@ _MODEL_DEFINITIONS: tuple[ModelDefinition, ...] = (
                 back=_with_template_version(
                     _with_card_wrapper(
                         '<div class="notion-front">{{cloze:Text}}</div>'
-                        '<div class="notion-back" style="font-style: italic">{{Extra}}</div>',
+                        # Omit the padded back container when the optional field is empty.
+                        '{{#Extra}}'
+                        '<div class="notion-back" style="font-style: italic">{{Extra}}</div>'
+                        '{{/Extra}}',
                         use_background_field=True,
                     )
                 ),

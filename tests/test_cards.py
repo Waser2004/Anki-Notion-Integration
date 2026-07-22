@@ -119,6 +119,17 @@ class CardModelTests(unittest.TestCase):
                     self.assertIn(dynamic_class, template.front)
                     self.assertIn(dynamic_class, template.back)
 
+    def test_cloze_back_omits_empty_extra_container(self) -> None:
+        """Anki should add the padded back section only for a populated Extra field."""
+        definition = next(item for item in _MODEL_DEFINITIONS if item.name == MODEL_NAME_CLOZE)
+        back = definition.templates[0].back
+
+        self.assertIn(
+            '{{#Extra}}<div class="notion-back" style="font-style: italic">'
+            '{{Extra}}</div>{{/Extra}}',
+            back,
+        )
+
     def test_existing_cloze_model_adds_background_field_without_overwriting_templates(self) -> None:
         definition = next(item for item in _MODEL_DEFINITIONS if item.name == MODEL_NAME_CLOZE)
         model = {

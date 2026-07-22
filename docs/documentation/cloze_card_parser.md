@@ -224,6 +224,10 @@ Both modes produce a `ToggleCardPayload` with:
 - a content hash computed from page ID, source block ID, card type, model name,
   and the complete fields mapping
 
+The cloze back template conditionally renders its styled extra container only
+when `Extra` is populated. Empty extras therefore add no padding or height to
+the back of the card.
+
 The source block ID is the paragraph ID for normal cards and the outer toggle
 ID for advanced cards. The extra paragraph does not receive a
 separate mapping. Deterministic rendering and hashing let sync distinguish real

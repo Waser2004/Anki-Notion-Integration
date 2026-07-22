@@ -159,6 +159,7 @@ Optional `Extra` behavior:
 - `Extra:` is case-insensitive.
 - The `Extra:` prefix is removed.
 - Formatting in the remaining text is preserved.
+- The back-side extra section is omitted entirely when the field is empty, keeping both card sides the same size.
 - This extra paragraph is consumed and not turned into another cloze card.
 
 Nested cloze-like content inside toggles is ignored for cloze card generation.
