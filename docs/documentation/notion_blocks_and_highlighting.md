@@ -65,6 +65,12 @@ These values have explicit CSS styles in the bundled card stylesheet:
 
 For advanced cloze toggle detection, only the toggle block background color `gray_background` qualifies. A toggle with the `gray` text color is not converted to a cloze card for this reason.
 
+For every cloze source, a validated root background is exported through the
+managed `Notion Card Background` field and colors the complete Anki card
+surface. A top-level paragraph foreground styles its visible cloze text. An
+advanced toggle foreground is not rendered because its title remains a source
+marker rather than card content.
+
 ## Cloze marker highlighting
 
 Cloze parsing treats text as a cloze marker when either condition is true:
@@ -87,6 +93,10 @@ the block's complete text; foreground-only values such as `yellow` do not
 trigger cloze conversion. A full block marker wins over any inline marker inside that
 same block, preventing nested deletions.
 
+This replacement occurs only when the background color is enabled in the
+cloze-marker setting. An excluded block background is visual styling and keeps
+the same semantic element and block-color classes used by basic cards.
+
 Within an advanced cloze toggle, this behavior applies while retaining the
 recognizable renderer structure for `paragraph`, `heading_1` through
 `heading_3`, `bulleted_list_item`, `numbered_list_item`, `quote`, `callout`,
@@ -99,7 +109,9 @@ The REST shape used by this add-on has no color field for `table` or
 rich-text fragment resolves to the same configured background marker. Its
 content becomes one cloze, its `td` or `th` remains in place, and it reuses the
 Anki `.cloze` yellow background. A partially highlighted or mixed-color cell
-continues to use normal inline cloze rendering. Code, equation, image, column,
+continues to use normal inline cloze rendering. A whole-cell Markdown color
+excluded from marker parsing remains visible on the cell surface. Code,
+equation, image, column,
 and divider blocks cannot currently carry a standalone complete block color.
 When nested in a marked callout, their textual content is hidden with the
 callout's cloze number while their supported renderer structure remains.

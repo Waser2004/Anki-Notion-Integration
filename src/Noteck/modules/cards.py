@@ -25,7 +25,7 @@ INPUT_CARD_NAME = "Notion (Input)"
 CLOZE_CARD_NAME = "Notion (Cloze)"
 
 # Increment when bundled HTML or CSS changes so installed note types can offer an update.
-CARD_TEMPLATE_VERSION = 2
+CARD_TEMPLATE_VERSION = 3
 CARD_TEMPLATE_STATUS_CURRENT = "current"
 CARD_TEMPLATE_STATUS_UPDATE_AVAILABLE = "update_available"
 CARD_TEMPLATE_STATUS_USER_MODIFIED = "user_modified"
@@ -168,17 +168,21 @@ _MODEL_DEFINITIONS: tuple[ModelDefinition, ...] = (
     # Cloze card type
     ModelDefinition(
         name=MODEL_NAME_CLOZE,
-        fields=("Text", "Extra", NOTION_BLOCK_ID_FIELD),
+        fields=("Text", "Extra", NOTION_BLOCK_ID_FIELD, NOTION_CARD_BACKGROUND_FIELD),
         templates=(
             ModelTemplate(
                 name=CLOZE_CARD_NAME,
                 front=_with_template_version(
-                    _with_card_wrapper('<div class="notion-front">{{cloze:Text}}</div>')
+                    _with_card_wrapper(
+                        '<div class="notion-front">{{cloze:Text}}</div>',
+                        use_background_field=True,
+                    )
                 ),
                 back=_with_template_version(
                     _with_card_wrapper(
                         '<div class="notion-front">{{cloze:Text}}</div>'
-                        '<div class="notion-back" style="font-style: italic">{{Extra}}</div>'
+                        '<div class="notion-back" style="font-style: italic">{{Extra}}</div>',
+                        use_background_field=True,
                     )
                 ),
             ),

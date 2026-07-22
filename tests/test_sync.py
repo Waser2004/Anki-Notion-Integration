@@ -2477,6 +2477,7 @@ class SyncTests(unittest.TestCase):
                 "Text": "{{c1::Included}}",
                 "Extra": "",
                 "Notion Block ID": "cloze-included",
+                "Notion Card Background": "brown_background",
             },
             content_hash="hash-updated",
             last_edited_time="2026-02-04T00:00:00.000Z",
@@ -2496,6 +2497,7 @@ class SyncTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertEqual(result.stats.cards_updated, 1)
+        self.assertEqual(existing_note["Notion Card Background"], "brown_background")
         parse_mock.assert_called_once()
         include_block_ids = parse_mock.call_args.kwargs.get("include_block_ids")
         self.assertEqual(set(include_block_ids), {"cloze-included", "cloze-excluded"})

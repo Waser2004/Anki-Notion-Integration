@@ -272,9 +272,8 @@ th {
 	color: var(--hl-yellow);
 }
 
-/* Color only the table cell containing Anki's currently hidden cloze. */
-td:has(.cloze),
-th:has(.cloze) {
+/* Color the currently hidden cloze cells in yellow background */
+.notion-card table :is(td, th):has(.cloze) {
 	background: var(--hl-yellow-bg) !important;
 }
 
@@ -745,6 +744,18 @@ blockquote.notion-block-color-background {
 .highlight-purple_background { background: var(--hl-purple-bg) !important; }
 .highlight-pink_background { background: var(--hl-pink-bg) !important; }
 .highlight-red_background { background: var(--hl-red-bg) !important; }
+
+/* Root-colored cards give table headers a backdrop-aware surface with the
+   same important specificity. Keep explicit cell colors authoritative. */
+.notion-card :is(th, td).highlight-gray_background { background: var(--hl-gray-bg) !important; }
+.notion-card :is(th, td).highlight-brown_background { background: var(--hl-brown-bg) !important; }
+.notion-card :is(th, td).highlight-orange_background { background: var(--hl-orange-bg) !important; }
+.notion-card :is(th, td).highlight-yellow_background { background: var(--hl-yellow-bg) !important; }
+.notion-card :is(th, td).highlight-green_background { background: var(--hl-green-bg) !important; }
+.notion-card :is(th, td).highlight-blue_background { background: var(--hl-blue-bg) !important; }
+.notion-card :is(th, td).highlight-purple_background { background: var(--hl-purple-bg) !important; }
+.notion-card :is(th, td).highlight-pink_background { background: var(--hl-pink-bg) !important; }
+.notion-card :is(th, td).highlight-red_background { background: var(--hl-red-bg) !important; }
 
 /* Ensure text remains readable on colored backgrounds */
 .highlight-gray_background,

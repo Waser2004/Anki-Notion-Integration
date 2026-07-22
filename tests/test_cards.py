@@ -110,17 +110,44 @@ class CardModelTests(unittest.TestCase):
         self.assertRegex(css, r"body\s*\{[^}]*padding:\s*1rem;[^}]*min-height:\s*100vh;")
         self.assertRegex(css, r"\.notion-card\s*\{[^}]*width:\s*100%;[^}]*margin:\s*0 auto;")
 
-    def test_toggle_templates_use_the_managed_card_background_field(self) -> None:
+    def test_all_templates_use_the_managed_card_background_field(self) -> None:
         for definition in _MODEL_DEFINITIONS:
-            if definition.name == MODEL_NAME_CLOZE:
-                self.assertNotIn(NOTION_CARD_BACKGROUND_FIELD, definition.fields)
-                continue
             self.assertIn(NOTION_CARD_BACKGROUND_FIELD, definition.fields)
             for template in definition.templates:
                 with self.subTest(model=definition.name, template=template.name):
                     dynamic_class = f"notion-card-background-{{{{{NOTION_CARD_BACKGROUND_FIELD}}}}}"
                     self.assertIn(dynamic_class, template.front)
                     self.assertIn(dynamic_class, template.back)
+
+    def test_existing_cloze_model_adds_background_field_without_overwriting_templates(self) -> None:
+        definition = next(item for item in _MODEL_DEFINITIONS if item.name == MODEL_NAME_CLOZE)
+        model = {
+            "name": MODEL_NAME_CLOZE,
+            "flds": [
+                {"name": name}
+                for name in definition.fields
+                if name != NOTION_CARD_BACKGROUND_FIELD
+            ],
+            "tmpls": [
+                {
+                    "name": definition.templates[0].name,
+                    "qfmt": "<custom-cloze-front>",
+                    "afmt": "<custom-cloze-back>",
+                }
+            ],
+            "type": definition.model_type,
+            "css": "/* custom cloze css */",
+        }
+        models = _FakeModels(model)
+
+        _ensure_model(models, definition, "/* default css */")
+
+        self.assertTrue(models.updated)
+        fields_by_name = {field["name"]: field for field in model["flds"]}
+        self.assertIs(fields_by_name[NOTION_CARD_BACKGROUND_FIELD]["collapsed"], True)
+        self.assertEqual(model["tmpls"][0]["qfmt"], "<custom-cloze-front>")
+        self.assertEqual(model["tmpls"][0]["afmt"], "<custom-cloze-back>")
+        self.assertEqual(model["css"], "/* custom cloze css */")
 
     def test_existing_model_adds_background_field_without_overwriting_templates(self) -> None:
         definition = _MODEL_DEFINITIONS[0]
@@ -215,6 +242,42 @@ class CardModelTests(unittest.TestCase):
         self.assertNotIn("mix-blend-mode", css)
         self.assertIn(".code > code {", css)
         self.assertIn("background: none !important;", css)
+
+    def test_table_cell_highlights_override_root_card_header_surfaces(self) -> None:
+        """Explicit cell colors must beat the root-card fallback on th and td elements."""
+        css_path = Path(__file__).resolve().parents[1] / "src" / "Noteck" / "docs" / "Notion_Card_Stylesheet.css"
+        css = css_path.read_text(encoding="utf-8")
+
+        for color in (
+            "gray",
+            "brown",
+            "orange",
+            "yellow",
+            "green",
+            "blue",
+            "purple",
+            "pink",
+            "red",
+        ):
+            with self.subTest(color=color):
+                self.assertIn(
+                    f".notion-card :is(th, td).highlight-{color}_background "
+                    f"{{ background: var(--hl-{color}-bg) !important; }}",
+                    css,
+                )
+
+    def test_active_table_cloze_overrides_root_card_header_surface(self) -> None:
+        """A hidden cloze inside th/td must retain Anki's yellow cell surface."""
+        css_path = Path(__file__).resolve().parents[1] / "src" / "Noteck" / "docs" / "Notion_Card_Stylesheet.css"
+        css = css_path.read_text(encoding="utf-8")
+        root_header_rule = '.notion-card[class*="notion-card-background-"] th {'
+        active_cloze_rule = '.notion-card table :is(td, th):has(.cloze) {'
+
+        self.assertIn(active_cloze_rule, css)
+        self.assertIn("background: var(--hl-yellow-bg) !important;", css)
+        # Keep the active rule after the fallback as an additional safeguard;
+        # its table context also gives it strictly greater specificity.
+        self.assertLess(css.index(root_header_rule), css.index(active_cloze_rule))
 
     def test_existing_template_html_and_css_are_preserved(self) -> None:
         definition = _MODEL_DEFINITIONS[0]

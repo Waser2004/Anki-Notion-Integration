@@ -439,11 +439,26 @@ def _render_block_text(
     block_text_override: BlockTextOverride | None,
 ) -> str:
     """Render direct rich text, allowing advanced cloze callers to replace it."""
+    rendered, _ = _render_block_text_with_status(
+        block,
+        rich_text_renderer=rich_text_renderer,
+        block_text_override=block_text_override,
+    )
+    return rendered
+
+
+def _render_block_text_with_status(
+    block: NotionBlock,
+    *,
+    rich_text_renderer: RichTextRenderer,
+    block_text_override: BlockTextOverride | None,
+) -> tuple[str, bool]:
+    """Render direct rich text and report whether a cloze override supplied it."""
     if block_text_override is not None:
         overridden_text = block_text_override(block)
         if overridden_text is not None:
-            return overridden_text
-    return rich_text_renderer(_block_rich_text(block))
+            return overridden_text, True
+    return rich_text_renderer(_block_rich_text(block)), False
 
 
 def _render_paragraph(
@@ -454,12 +469,12 @@ def _render_paragraph(
     table_cell_override: TableCellOverride | None,
 ) -> str:
     """Render a paragraph block and any nested children."""
-    text_html = _render_block_text(
+    text_html, text_was_overridden = _render_block_text_with_status(
         block,
         rich_text_renderer=rich_text_renderer,
         block_text_override=block_text_override,
     )
-    class_attr = "" if block_text_override is not None else _block_color_class_attribute(block)
+    class_attr = "" if text_was_overridden else _block_color_class_attribute(block)
     body = f"<p{class_attr}>{text_html}</p>"
     children_html = render_blocks_with_renderer(
         block.children,
@@ -479,12 +494,12 @@ def _render_heading(
     table_cell_override: TableCellOverride | None,
 ) -> str:
     """Render a heading block (levels 1-3) and any nested children."""
-    text_html = _render_block_text(
+    text_html, text_was_overridden = _render_block_text_with_status(
         block,
         rich_text_renderer=rich_text_renderer,
         block_text_override=block_text_override,
     )
-    class_attr = "" if block_text_override is not None else _block_color_class_attribute(block)
+    class_attr = "" if text_was_overridden else _block_color_class_attribute(block)
     body = f"<h{level}{class_attr}>{text_html}</h{level}>"
     children_html = render_blocks_with_renderer(
         block.children,
@@ -503,7 +518,7 @@ def _render_quote(
     table_cell_override: TableCellOverride | None,
 ) -> str:
     """Render a quote block."""
-    text_html = _render_block_text(
+    text_html, text_was_overridden = _render_block_text_with_status(
         block,
         rich_text_renderer=rich_text_renderer,
         block_text_override=block_text_override,
@@ -515,7 +530,7 @@ def _render_quote(
         block_text_override=block_text_override,
         table_cell_override=table_cell_override,
     )
-    class_attr = "" if block_text_override is not None else _block_color_class_attribute(block)
+    class_attr = "" if text_was_overridden else _block_color_class_attribute(block)
     return f"<blockquote{class_attr}>{body}{children_html}</blockquote>"
 
 
@@ -529,7 +544,7 @@ def _render_callout(
     """Render a callout block with optional leading icon."""
     payload = _block_payload(block)
     icon_html = _render_callout_icon(payload.get("icon"))
-    text_html = _render_block_text(
+    text_html, text_was_overridden = _render_block_text_with_status(
         block,
         rich_text_renderer=rich_text_renderer,
         block_text_override=block_text_override,
@@ -543,7 +558,7 @@ def _render_callout(
     )
     class_attr = (
         ' class="callout"'
-        if block_text_override is not None
+        if text_was_overridden
         else _block_color_class_attribute(block, base_class="callout")
     )
     return f'<div{class_attr}>{icon_html}<div>{body}{children_html}</div></div>'
@@ -580,7 +595,7 @@ def _render_toggle_inline(
     table_cell_override: TableCellOverride | None,
 ) -> str:
     """Render a nested toggle for inline display in parent cards."""
-    title_html = _render_block_text(
+    title_html, text_was_overridden = _render_block_text_with_status(
         block,
         rich_text_renderer=rich_text_renderer,
         block_text_override=block_text_override,
@@ -593,7 +608,7 @@ def _render_toggle_inline(
     )
     class_attr = (
         ' class="notion-toggle"'
-        if block_text_override is not None
+        if text_was_overridden
         else _block_color_class_attribute(block, base_class="notion-toggle")
     )
     return f'<details{class_attr}><summary>{title_html}</summary>{children_html}</details>'
@@ -657,7 +672,7 @@ def _render_list_sequence(
 
     while index < len(blocks) and blocks[index].block_type == block_type:
         block = blocks[index]
-        text_html = _render_block_text(
+        text_html, text_was_overridden = _render_block_text_with_status(
             block,
             rich_text_renderer=rich_text_renderer,
             block_text_override=block_text_override,
@@ -668,7 +683,7 @@ def _render_list_sequence(
             block_text_override=block_text_override,
             table_cell_override=table_cell_override,
         )
-        class_attr = "" if block_text_override is not None else _block_color_class_attribute(block)
+        class_attr = "" if text_was_overridden else _block_color_class_attribute(block)
         items.append(f"<li{class_attr}>{text_html}{children_html}</li>")
         index += 1
 
@@ -797,6 +812,15 @@ def _table_row_cells(row_block: NotionBlock, table_width: int | None) -> list[li
                     )
                     for item in cell_items
                 ]
+                if not cell_items:
+                    cell_items.append(
+                        {
+                            "type": "text",
+                            "text": {"content": ""},
+                            "plain_text": "",
+                            TABLE_CELL_CLOZE_COLOR_KEY: color,
+                        }
+                    )
             cells.append(cell_items)
         else:
             cells.append([])
@@ -826,9 +850,14 @@ def _render_table_row(
             cell_html = rich_text_renderer(cell_rich_text)
         else:
             cell_html = cell_override
-        # Keep this class-free: CSS observes Anki's dynamically rendered child
-        # `.cloze`, so a visible c1 cell is not highlighted on another card.
-        cell_class = ""
+        # Selected whole-cell markers stay class-free because CSS observes
+        # Anki's dynamically rendered `.cloze` child. Unselected Markdown
+        # colors instead remain visible as normal theme-aware cell styling.
+        cell_class = (
+            ""
+            if cell_override is not None
+            else _table_cell_color_class_attribute(cell_rich_text)
+        )
         if has_column_header and row_index == 0:
             parts.append(f'<th scope="col"{cell_class}>{cell_html}</th>')
             continue
@@ -837,6 +866,29 @@ def _render_table_row(
             continue
         parts.append(f"<td{cell_class}>{cell_html}</td>")
     return f"<tr>{''.join(parts)}</tr>"
+
+
+def _table_cell_color_class_attribute(cell_rich_text: Iterable[dict[str, Any]]) -> str:
+    """Return a safe visual background class for one Markdown-colored cell."""
+    colors = {
+        color
+        for item in cell_rich_text
+        if (color := _normalize_table_cell_background(item.get(TABLE_CELL_CLOZE_COLOR_KEY)))
+    }
+    if len(colors) != 1:
+        return ""
+    return f' class="highlight-{next(iter(colors))}"'
+
+
+def _normalize_table_cell_background(value: Any) -> str:
+    """Normalize enhanced-Markdown cell colors to a supported CSS background."""
+    color = str(value or "").strip().lower()
+    if color.endswith("_bg"):
+        color = f"{color.removesuffix('_bg')}_background"
+    elif color in _NOTION_BLOCK_FOREGROUND_COLORS:
+        # Table color metadata represents a cell surface, not text foreground.
+        color = f"{color}_background"
+    return color if color in _NOTION_BLOCK_BACKGROUND_COLORS else ""
 
 
 def _render_image(

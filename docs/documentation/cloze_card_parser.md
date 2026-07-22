@@ -97,6 +97,12 @@ Normal cloze rendering is intentionally lighter than the shared HTML renderer:
 - the paragraph is stored without a wrapping `<p>` element;
 - unmarked content remains outside cloze markup.
 
+The no-wrapper rule remains true for default and background-colored source
+paragraphs. A validated foreground block color adds the shared semantic `<p>`
+wrapper so the visible cloze text receives the same foreground styling as a
+basic-card title. A source background is stored separately as the card-surface
+field rather than being duplicated on the paragraph.
+
 These rendering limits apply to the inline-marker path. A block-level paragraph
 marker uses the shared rich-text item renderer inside its single deletion so
 the revealed answer retains safe formatting and links.
@@ -117,7 +123,9 @@ block supplies `Extra` and is consumed.
 
 The prefix is removed from the first text rich-text item that contains it. The
 remaining items are rendered with the shared rich-text HTML renderer, so their
-formatting is preserved. The parser does not search past an intervening block.
+formatting is preserved. A colored Extra paragraph uses the shared block
+renderer as well, retaining its foreground or background class. The parser does
+not search past an intervening block.
 A consumed extra paragraph cannot also become its own cloze card, even if it
 contains a supported marker. An `include_block_ids` filter does not prevent a
 selected source paragraph from reading its adjacent extra block.
@@ -133,6 +141,9 @@ An advanced source is a root `toggle` matching either convention:
 
 The title is only a recognition marker. It is not included in `Text`. A gray
 foreground text annotation is not equivalent to a gray block background.
+The root toggle background is stored as the complete card surface, including
+the gray background used for container recognition. A root foreground has no
+visible target because the title remains excluded.
 
 All direct child blocks normally render into `Text` through the shared block
 renderer. This preserves its supported paragraphs, headings, lists, tables,
@@ -148,6 +159,8 @@ HTML. A colored callout keeps its icon, container, and child layout while its
 direct and descendant text uses the callout's cloze number. An explicitly
 colored nested callout starts its own cloze scope. The block-level marker wins
 over inner inline markers, preventing nested deletions.
+If a block background is not among the configured marker colors, the override
+does not apply and the shared renderer keeps its normal semantic color classes.
 
 Notion's block API has no table-cell color field. During cloze sync, the add-on
 also reads the page's enhanced Markdown representation and overlays its cell,
@@ -157,6 +170,8 @@ same effective configured marker. The cell contents become one deletion while
 their `td`/`th` and header semantics remain. CSS highlights only the cell
 containing Anki's dynamically rendered hidden `.cloze` child, and keeps the
 child text itself transparent.
+Whole-cell colors excluded from the marker setting remain visible as
+theme-aware background classes on their `td` or `th`, including empty cells.
 Partial or mixed-color cells use the existing inline behavior. Code, equation,
 image, table/container, column, and divider blocks have no standalone complete
 block-color strategy. If they are descendants of a marked callout, their
@@ -204,7 +219,7 @@ Both modes produce a `ToggleCardPayload` with:
 
 - `card_type = "cloze"`
 - `model_name = "Notion (Cloze)"`
-- fields `Text`, `Extra`, and `Notion Block ID`
+- fields `Text`, `Extra`, `Notion Block ID`, and `Notion Card Background`
 - the source block's `last_edited_time`, normalized to an optional string
 - a content hash computed from page ID, source block ID, card type, model name,
   and the complete fields mapping
@@ -248,6 +263,11 @@ parser behavior changes and for changes to the gray-toggle option. If output
 semantics change again, updating the relevant refresh revision in
 `modules/sync.py` may be necessary so otherwise unchanged mapped notes are
 regenerated.
+
+The cloze note type uses `Notion Card Background` in both bundled template
+wrappers. Model setup adds and collapses the field on existing note types but
+does not overwrite custom HTML or CSS. The template version advertises the
+bundled update when an older managed template is installed.
 
 ## Extension checklist
 

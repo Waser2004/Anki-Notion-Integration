@@ -127,9 +127,16 @@ Notion card surface in Anki. A foreground-only toggle color applies to the card 
 Child blocks with their own background color remain visible above the card surface.
 Code blocks, Mermaid diagrams, and tables use translucent surfaces on root-colored cards so
 the root backdrop remains visible; their normal uncolored-card appearance is unchanged.
+The same card-surface behavior applies to cloze source blocks. A top-level paragraph-cloze
+foreground colors its visible text, while an advanced cloze toggle's title and foreground
+remain hidden. Inside advanced clozes, configured marker backgrounds create deletions and
+lose their visual marker color; backgrounds excluded from cloze parsing render as ordinary
+block colors.
 The managed `Notion Block ID` and `Notion Card Background` metadata fields are collapsed in Anki's note editor by default.
 After upgrading, Noteck performs one successful parser refresh of existing toggle-derived
-cards so color changes are applied even when their Notion edit timestamps have not changed.
+and cloze cards so color changes are applied even when their Notion edit timestamps have not
+changed. The bundled cloze template must be updated to display the new background field;
+custom templates are preserved and can add the same managed class manually.
 
 Unsupported or unknown block types are ignored in rendered card content.
 
@@ -142,6 +149,8 @@ Rules:
 - Source scope: top-level paragraph blocks only.
 - A paragraph can use a supported marker in part of its rich text. A block background alone is not a top-level cloze marker because it provides no context.
 - An inline marker hides only its highlighted text using the marker color's fixed `c1` through `c8` number. Block backgrounds remain supported inside advanced cloze toggles.
+- A background on the source paragraph or advanced toggle colors the complete card surface;
+  it does not create a deletion. A foreground on a source paragraph styles its visible text.
 - Non-highlighted text remains normal text.
 
 Optional `Extra` behavior:
@@ -164,7 +173,7 @@ Toggle-based cloze behavior:
 - Tables do not have a block color. A cell becomes a whole-cell cloze only when all of its non-empty rich-text fragments use the same configured marker; its `td`/`th` structure is retained and uses the same yellow styling as Anki cloze markers. Partial cell highlighting keeps the normal inline-cloze behavior.
 - Direct child paragraphs starting with `Extra:` render into `Extra`; `[extra]` toggles are rendered normally in `Text`.
 - Marker background colors map to fixed cloze numbers: yellow -> c1, green -> c2, blue -> c3, purple -> c4, pink -> c5, orange -> c6, red -> c7, brown -> c8.
-- Selected marker background colors are removed from exported HTML while normal formatting is preserved; colors excluded in Settings remain background styling.
+- Selected marker background colors are removed from exported HTML while normal formatting is preserved; inline and block colors excluded in Settings remain ordinary styling.
 - Advanced containers without marker colors remain deterministic cloze payloads and do not fall back to another card type.
 - Code, equation, image, table/container, column, and divider blocks cannot carry a standalone complete block color in the current Notion API shape. When nested inside a marked callout, their textual content is hidden with the callout's cloze number while their supported surrounding structure remains.
 

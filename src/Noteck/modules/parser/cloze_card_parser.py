@@ -9,7 +9,7 @@ from typing import Any, Iterable
 
 from . import parser as shared
 from ..card_types import CLOZE
-from ..cards import MODEL_NAME_CLOZE
+from ..cards import MODEL_NAME_CLOZE, NOTION_CARD_BACKGROUND_FIELD
 from ..notion_client import NotionBlock
 from .renderer import (
     TABLE_CELL_CLOZE_COLOR_KEY,
@@ -98,7 +98,7 @@ class ClozeCardParser:
             
             # Convert only the marked rich-text runs. Block-level colors remain
             # available for descendants of advanced cloze containers.
-            text = self._rich_text_to_cloze_text(rich_text)
+            text = self._render_top_level_cloze_text(block, rich_text)
             if not text.strip():
                 continue
 
@@ -116,7 +116,39 @@ class ClozeCardParser:
         return block.block_type == "paragraph" and _EXTRA_PREFIX_RE.search(self._plain_text(self._rich_text(block))) is not None
 
     def _render_extra_without_prefix(self, block: NotionBlock) -> str:
-        return render_rich_text(self._rich_text(self._without_extra_prefix(block)))
+        stripped_block = self._without_extra_prefix(block)
+
+        has_block_color = bool(
+            shared._block_background_color(stripped_block)
+            or shared._block_foreground_color(stripped_block) != "default"
+        )
+        if has_block_color:
+            return shared.render_blocks([stripped_block])
+        
+        return render_rich_text(self._rich_text(stripped_block))
+
+    def _render_top_level_cloze_text(
+        self,
+        block: NotionBlock,
+        rich_text: Iterable[dict[str, Any]],
+    ) -> str:
+        """Render a paragraph cloze, adding a semantic wrapper only for foreground color."""
+        text = self._rich_text_to_cloze_text(rich_text)
+        foreground_color = shared._block_foreground_color(block)
+        if foreground_color == "default":
+            return text
+
+        # Root backgrounds belong to the card surface. Render only a validated
+        # foreground color on the visible paragraph text, matching basic titles.
+        raw     = dict(block.raw)
+        payload = dict(self._payload(block))
+        payload["color"] = foreground_color
+        raw[block.block_type] = payload
+        foreground_block = replace(block, raw=raw, has_children=False, children=())
+        return render_blocks_with_renderer(
+            [foreground_block],
+            rich_text_renderer=self._rich_text_to_cloze_text,
+        )
 
     def _rich_text_to_cloze_text(self, rich_text: Iterable[dict[str, Any]]) -> str:
         parts:  list[str]  = []  
@@ -239,7 +271,8 @@ class ClozeCardParser:
             content = f"\\({html.escape(expression_text)}\\)" if expression_text else ""
         else:
             content = self._rich_text_to_html_without_marker_colors(self._block_cloze_rich_text(block))
-        return self._cloze_markup(number, content) or None
+
+        return self._cloze_markup(number, content)
 
     def _render_table_cell_cloze_html(
         self,
@@ -375,18 +408,21 @@ class ClozeCardParser:
         return ClozeValidationResult(not errors, tuple(errors))
 
     def _payload_for_fields(self, page_id: str, block: NotionBlock, fields: dict[str, str]) -> "shared.ToggleCardPayload":
+        payload_fields = dict(fields)
+        payload_fields[NOTION_CARD_BACKGROUND_FIELD] = shared._block_background_color(block)
+        
         return shared.ToggleCardPayload(
             notion_page_id   = page_id,
             notion_block_id  = block.block_id,
             card_type        = CLOZE,
             model_name       = MODEL_NAME_CLOZE,
-            fields           = fields,
+            fields           = payload_fields,
             content_hash     = shared._compute_payload_content_hash(
                 page_id    = page_id,
                 block_id   = block.block_id,
                 card_type  = CLOZE,
                 model_name = MODEL_NAME_CLOZE,
-                fields     = fields,
+                fields     = payload_fields,
             ),
             last_edited_time = shared._as_optional_string(block.raw.get("last_edited_time")),
         )

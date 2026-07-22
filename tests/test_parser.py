@@ -748,6 +748,114 @@ class ParserTests(unittest.TestCase):
         self.assertIn("{{c1::Answer}}", payload.fields["Text"])
         self.assertIn('class="highlight-blue_background"', payload.fields["Text"])
 
+    def test_cloze_sources_use_validated_root_backgrounds_for_card_surfaces(self) -> None:
+        """Both cloze source conventions expose their root background to Anki templates."""
+        paragraph = _block(
+            "paragraph-cloze",
+            "paragraph",
+            {
+                "color": "brown_background",
+                "rich_text": [
+                    _text_item("Answer", annotations=_annotations(background_color="yellow")),
+                ],
+            },
+        )
+        advanced_toggle = _block(
+            "advanced-toggle",
+            "toggle",
+            {"color": "gray_background", "rich_text": [_text_item("Gray cloze")]},
+            children=(
+                _block(
+                    "advanced-answer",
+                    "paragraph",
+                    {"rich_text": [_text_item("Answer", annotations=_annotations(background_color="yellow"))]},
+                ),
+            ),
+        )
+
+        paragraph_payload = parse_page_to_cards("page-1", [paragraph], enable_cloze=True)[0]
+        advanced_payload = parse_page_to_cards("page-1", [advanced_toggle], enable_cloze=True)[0]
+
+        self.assertEqual(paragraph_payload.fields["Notion Card Background"], "brown_background")
+        self.assertEqual(advanced_payload.fields["Notion Card Background"], "gray_background")
+
+        uncolored_paragraph = _block(
+            "paragraph-cloze",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item("Answer", annotations=_annotations(background_color="yellow")),
+                ],
+            },
+        )
+        uncolored_payload = parse_page_to_cards("page-1", [uncolored_paragraph], enable_cloze=True)[0]
+        self.assertNotEqual(paragraph_payload.content_hash, uncolored_payload.content_hash)
+
+    def test_paragraph_cloze_root_foreground_styles_visible_text_only(self) -> None:
+        colored = _block(
+            "paragraph-foreground",
+            "paragraph",
+            {
+                "color": "blue",
+                "rich_text": [
+                    _text_item("Capital is "),
+                    _text_item("Paris", annotations=_annotations(background_color="yellow")),
+                ],
+            },
+        )
+        unsafe = _block(
+            "paragraph-unsafe",
+            "paragraph",
+            {
+                "color": "url(bad)",
+                "rich_text": [
+                    _text_item("Capital is "),
+                    _text_item("Paris", annotations=_annotations(background_color="yellow")),
+                ],
+            },
+        )
+
+        colored_payload = parse_page_to_cards("page-1", [colored], enable_cloze=True)[0]
+        unsafe_payload = parse_page_to_cards("page-1", [unsafe], enable_cloze=True)[0]
+
+        self.assertEqual(colored_payload.fields["Notion Card Background"], "")
+        self.assertIn('class="notion-block-color notion-block-color-blue"', colored_payload.fields["Text"])
+        self.assertIn("{{c1::Paris}}", colored_payload.fields["Text"])
+        self.assertEqual(unsafe_payload.fields["Text"], "Capital is {{c1::Paris}}")
+        self.assertEqual(unsafe_payload.fields["Notion Card Background"], "")
+
+    def test_colored_paragraph_cloze_extra_uses_shared_block_renderer(self) -> None:
+        cloze_paragraph = _block(
+            "paragraph-cloze",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item("Paris", annotations=_annotations(background_color="yellow")),
+                ],
+            },
+        )
+        extra_paragraph = _block(
+            "paragraph-extra",
+            "paragraph",
+            {
+                "color": "green_background",
+                "rich_text": [_text_item("Extra: Located in Europe.")],
+            },
+        )
+
+        payload = parse_page_to_cards(
+            "page-1",
+            [cloze_paragraph, extra_paragraph],
+            enable_cloze=True,
+        )[0]
+
+        self.assertIn(
+            'class="notion-block-color notion-block-color-green_background notion-block-color-background"',
+            payload.fields["Extra"],
+        )
+        self.assertIn("Located in Europe.", payload.fields["Extra"])
+        self.assertNotIn("Extra:", payload.fields["Extra"])
+
     def test_parse_page_to_cards_cloze_preserves_non_highlighted_inline_math(self) -> None:
         cloze_paragraph = _block(
             "paragraph-cloze",
@@ -1313,6 +1421,44 @@ class ParserTests(unittest.TestCase):
         self.assertIn("{{c1::Answer}}", payload.fields["Text"])
         self.assertIn('class="highlight-blue_background"', payload.fields["Text"])
         self.assertNotIn("{{c3::", payload.fields["Text"])
+
+    def test_advanced_cloze_excluded_block_color_uses_normal_block_rendering(self) -> None:
+        """An excluded whole-block background retains the shared renderer's semantic classes."""
+        advanced_toggle = _block(
+            "toggle-colors",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] Colors")]},
+            children=(
+                _block(
+                    "answer",
+                    "paragraph",
+                    {
+                        "color": "yellow_background",
+                        "rich_text": [_text_item("Answer")],
+                    },
+                ),
+                _block(
+                    "styled-context",
+                    "quote",
+                    {
+                        "color": "blue_background",
+                        "rich_text": [_text_item("Visible context")],
+                    },
+                ),
+            ),
+        )
+
+        payload = parse_page_to_cards(
+            "page-1",
+            [advanced_toggle],
+            enable_cloze=True,
+            cloze_marker_colors=["yellow"],
+        )[0]
+
+        self.assertIn("<p>{{c1::Answer}}</p>", payload.fields["Text"])
+        self.assertNotIn("notion-block-color-yellow_background", payload.fields["Text"])
+        self.assertIn("notion-block-color-blue_background", payload.fields["Text"])
+        self.assertIn("<blockquote", payload.fields["Text"])
 
     def test_advanced_cloze_allows_repeated_and_skipped_cloze_numbers(self) -> None:
         advanced_toggle = _block(
@@ -1962,6 +2108,90 @@ class ParserTests(unittest.TestCase):
         self.assertIn('<th scope="row">{{c3::D}}</th>', text)
         self.assertIn('<td>{{c3::E}}</td>', text)
         self.assertIn('<td>{{c3::F}}</td>', text)
+
+    def test_unselected_markdown_table_cell_colors_remain_visible(self) -> None:
+        """Whole-cell colors excluded from cloze markers render on td/th elements."""
+        table = _block(
+            "table-visual-colors",
+            "table",
+            {"table_width": 3, "has_column_header": True, "has_row_header": False},
+            children=(
+                _block(
+                    "table-visual-row",
+                    "table_row",
+                    {
+                        "cells": [
+                            [_text_item("Selected")],
+                            [_text_item("Red context")],
+                            [_text_item("Pink context")],
+                        ]
+                    },
+                ),
+            ),
+        )
+        advanced_toggle = _block(
+            "advanced-visual-table",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] Visual table colors")]},
+            children=(table,),
+        )
+        markdown = """
+<table>
+<tr><th color="yellow_bg">Selected</th><th color="red_bg">Red context</th><th color="pink_bg">Pink context</th></tr>
+</table>
+"""
+
+        enriched = merge_markdown_table_colors([advanced_toggle], markdown)
+        payload = parse_page_to_cards(
+            "page-1",
+            enriched,
+            enable_cloze=True,
+            cloze_marker_colors=["yellow"],
+        )[0]
+        text = payload.fields["Text"]
+
+        self.assertIn('<th scope="col">{{c1::Selected}}</th>', text)
+        self.assertIn('<th scope="col" class="highlight-red_background">Red context</th>', text)
+        self.assertIn('<th scope="col" class="highlight-pink_background">Pink context</th>', text)
+        self.assertNotIn("{{c7::", text)
+        self.assertNotIn("{{c5::", text)
+
+    def test_unselected_markdown_color_renders_on_empty_table_cell(self) -> None:
+        """Color metadata survives even when the block API cell has no rich text."""
+        table = _block(
+            "table-empty-color",
+            "table",
+            {"table_width": 2, "has_column_header": False, "has_row_header": False},
+            children=(
+                _block(
+                    "table-empty-row",
+                    "table_row",
+                    {"cells": [[_text_item("Answer")], []]},
+                ),
+            ),
+        )
+        advanced_toggle = _block(
+            "advanced-empty-table",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] Empty colored cell")]},
+            children=(table,),
+        )
+        markdown = """
+<table>
+<tr><td color="yellow_bg">Answer</td><td color="red_bg"></td></tr>
+</table>
+"""
+
+        enriched = merge_markdown_table_colors([advanced_toggle], markdown)
+        text = parse_page_to_cards(
+            "page-1",
+            enriched,
+            enable_cloze=True,
+            cloze_marker_colors=["yellow"],
+        )[0].fields["Text"]
+
+        self.assertIn('<td>{{c1::Answer}}</td>', text)
+        self.assertIn('<td class="highlight-red_background"></td>', text)
 
     def test_advanced_cloze_container_without_markers_remains_cloze_payload(self) -> None:
         advanced_toggle = _block(
