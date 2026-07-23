@@ -183,7 +183,8 @@ _MODEL_DEFINITIONS: tuple[ModelDefinition, ...] = (
                         '<div class="notion-front">{{cloze:Text}}</div>'
                         # Omit the padded back container when the optional field is empty.
                         '{{#Extra}}'
-                        '<div class="notion-back" style="font-style: italic">{{Extra}}</div>'
+                        '<hr id="answer">'
+                        '<div class="notion-back">{{Extra}}</div>'
                         '{{/Extra}}',
                         use_background_field=True,
                     )

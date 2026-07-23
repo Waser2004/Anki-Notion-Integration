@@ -142,6 +142,18 @@ class _FakeCollection:
     def get_note(self, note_id: int) -> _FakeNote | None:
         return self.notes.get(note_id)
 
+    def find_notes(self, query: str) -> list[int]:
+        """Support exact Noteck block-id field searches used for mapping repair."""
+        prefix = '"Notion Block ID:'
+        if not query.startswith(prefix) or not query.endswith('"'):
+            return []
+        block_id = query[len(prefix):-1].replace('\\"', '"').replace("\\\\", "\\")
+        return [
+            note_id
+            for note_id, note in self.notes.items()
+            if note.get("Notion Block ID") == block_id
+        ]
+
     def update_note(self, note: _FakeNote) -> None:
         if note.id is None:
             raise RuntimeError("note id missing")
@@ -2118,6 +2130,89 @@ class SyncTests(unittest.TestCase):
             connection.close()
         self.assertIsNotNone(row)
         self.assertNotEqual(int(row["anki_note_id"]), 123456)
+
+    def test_sync_relinks_existing_note_when_mapping_is_missing(self) -> None:
+        """A lost local mapping must not duplicate a note with the same block id."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        existing_note = collection.new_note({"name": "Notion (Basic)"})
+        existing_note["Front"] = "<p>old front</p>"
+        existing_note["Back"] = "<p>old back</p>"
+        existing_note["Notion Block ID"] = "block-1"
+        collection.add_note(existing_note, deck_id=1)
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[self._payload(content_hash="new-hash")],
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_created, 0)
+        self.assertEqual(result.stats.cards_updated, 1)
+        self.assertEqual(len(collection.notes), 1)
+        self.assertEqual(existing_note["Front"], "<p>front</p>")
+        self.assertEqual(
+            [warning.code for warning in result.warnings],
+            ["existing_anki_note_relinked"],
+        )
+        mapping = _SYNC_MODULE._load_existing_cards_for_page(
+            self._db,
+            "page-1",
+        )["block-1"]
+        self.assertEqual(int(mapping["anki_note_id"]), existing_note.id)
+
+    def test_sync_relinks_existing_note_when_mapped_note_id_is_stale(self) -> None:
+        """A profile restore may invalidate IDs while leaving the Noteck note."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        restored_note = collection.new_note({"name": "Notion (Basic)"})
+        restored_note["Front"] = "<p>restored front</p>"
+        restored_note["Back"] = "<p>restored back</p>"
+        restored_note["Notion Block ID"] = "block-1"
+        collection.add_note(restored_note, deck_id=1)
+
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                INSERT INTO cards (
+                    notion_block_id, notion_page_id, anki_note_id, card_type, content_hash
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("block-1", "page-1", 123456, "basic", "old-hash"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[self._payload(content_hash="new-hash")],
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_missing_note, 1)
+        self.assertEqual(result.stats.cards_created, 0)
+        self.assertEqual(result.stats.cards_updated, 1)
+        self.assertEqual(len(collection.notes), 1)
+        mapping = _SYNC_MODULE._load_existing_cards_for_page(
+            self._db,
+            "page-1",
+        )["block-1"]
+        self.assertEqual(int(mapping["anki_note_id"]), restored_note.id)
 
     def test_sync_preserves_cloze_mapping_when_cloze_parsing_is_disabled(self) -> None:
         collection = _FakeCollection()

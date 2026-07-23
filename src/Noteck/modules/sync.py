@@ -102,7 +102,7 @@ _MERMAID_FIGURE_RE = re.compile(
 )
 _HTTP_TIMEOUT_SECONDS = 20.0
 _CLOZE_REFRESH_REVISION_SETTING_KEY = "_internal_cloze_refresh_revision"
-_CLOZE_REFRESH_REVISION = "2026-07-cloze-block-colors-v8" # reset to v1 before release as this has been updated to v8 for testing only
+_CLOZE_REFRESH_REVISION = "2026-07-cloze-block-colors-v10" # reset to v1 before release as this has been updated to v9 for testing only
 _TOGGLE_REFRESH_REVISION_SETTING_KEY = "_internal_toggle_refresh_revision"
 _TOGGLE_REFRESH_REVISION = "2026-07-block-colors-v1"
 _GRAY_TOGGLE_CLOZE_ENABLED_SETTING_KEY = "_internal_gray_toggle_cloze_enabled"
@@ -1462,6 +1462,24 @@ def _sync_one_payload(
             raise SyncError(f"Anki note type '{model_name}' is not available.")
 
         if mapping is None:
+            recovered = _find_existing_note_for_payload(collection, payload)
+            if recovered is not None:
+                recovered_note_id, recovered_note, candidate_count = recovered
+                stats = _relink_existing_note(
+                    db              = db,
+                    collection      = collection,
+                    page_id         = page_id,
+                    deck_id         = deck_id,
+                    payload         = payload,
+                    note_id         = recovered_note_id,
+                    note            = recovered_note,
+                    candidate_count = candidate_count,
+                    stats           = stats,
+                    warnings        = warnings,
+                    reason          = "missing_mapping",
+                )
+                return stats, [], False
+
             prepared_payload, stats = _prepare_payload_media_with_warnings(collection, payload, stats, warnings)
             note_id = _create_note(collection, model, deck_id, prepared_payload)
             _upsert_card_mapping(db, prepared_payload, note_id, page_id)
@@ -1470,6 +1488,24 @@ def _sync_one_payload(
 
         note_id = mapping["anki_note_id"]
         if note_id is None:
+            recovered = _find_existing_note_for_payload(collection, payload)
+            if recovered is not None:
+                recovered_note_id, recovered_note, candidate_count = recovered
+                stats = _relink_existing_note(
+                    db              = db,
+                    collection      = collection,
+                    page_id         = page_id,
+                    deck_id         = deck_id,
+                    payload         = payload,
+                    note_id         = recovered_note_id,
+                    note            = recovered_note,
+                    candidate_count = candidate_count,
+                    stats           = stats,
+                    warnings        = warnings,
+                    reason          = "mapping_without_note_id",
+                )
+                return stats, [], False
+
             prepared_payload, stats = _prepare_payload_media_with_warnings(collection, payload, stats, warnings)
             note_id = _create_note(collection, model, deck_id, prepared_payload)
             _upsert_card_mapping(db, prepared_payload, note_id, page_id)
@@ -1487,6 +1523,24 @@ def _sync_one_payload(
         note = _get_note(collection, note_id)
         if note is None:
             stats = _replace_stats(stats, cards_missing_note=stats.cards_missing_note + 1)
+            recovered = _find_existing_note_for_payload(collection, payload)
+            if recovered is not None:
+                recovered_note_id, recovered_note, candidate_count = recovered
+                stats = _relink_existing_note(
+                    db              = db,
+                    collection      = collection,
+                    page_id         = page_id,
+                    deck_id         = deck_id,
+                    payload         = payload,
+                    note_id         = recovered_note_id,
+                    note            = recovered_note,
+                    candidate_count = candidate_count,
+                    stats           = stats,
+                    warnings        = warnings,
+                    reason          = "stale_note_id",
+                )
+                return stats, [], False
+
             prepared_payload, stats = _prepare_payload_media_with_warnings(collection, payload, stats, warnings)
             note_id = _create_note(collection, model, deck_id, prepared_payload)
             _upsert_card_mapping(db, prepared_payload, note_id, page_id)
@@ -2097,6 +2151,105 @@ def _get_note(collection: Any, note_id: int) -> Any | None:
             return None
         raise
     return None
+
+
+def _find_existing_note_for_payload(
+    collection: Any,
+    payload: ToggleCardPayload,
+) -> tuple[int, Any, int] | None:
+    """Find a compatible Noteck note by its durable Notion block identity."""
+    find_notes = getattr(collection, "find_notes", None)
+    if not callable(find_notes):
+        return None
+
+    # search anki cards to find card with "Notion Block ID" field equal to notion block id
+    query         = f'"Notion Block ID:{payload.notion_block_id}"'
+    candidate_ids = sorted({int(note_id) for note_id in find_notes(query)})
+
+    compatible_candidates: list[tuple[int, Any]] = []
+    for candidate_id in candidate_ids:
+        note = _get_note(collection, candidate_id)
+        if note is not None and _note_supports_payload(note, payload):
+            compatible_candidates.append((candidate_id, note))
+
+    if not compatible_candidates:
+        return None
+
+    # Preserve the oldest note when a previous failure already left duplicates;
+    note_id, note = compatible_candidates[0]
+    return note_id, note, len(compatible_candidates)
+
+
+def _note_supports_payload(note: Any, payload: ToggleCardPayload) -> bool:
+    """Return whether a note exposes every field required by a payload."""
+    required_fields = (
+        tuple(payload.fields)
+        if payload.fields
+        else ("Front", "Back", "Notion Block ID")
+    )
+
+    for field_name in required_fields:
+        try:
+            note[field_name]
+        except Exception:
+            return False
+    return True
+
+
+def _relink_existing_note(
+    *,
+    db:              Database,
+    collection:      Any,
+    page_id:         str,
+    deck_id:         int,
+    payload:         ToggleCardPayload,
+    note_id:         int,
+    note:            Any,
+    candidate_count: int,
+    stats:           SyncStats,
+    warnings:        list[SyncWarning] | None,
+    reason:          str,
+) -> SyncStats:
+    """Relink and refresh an existing Noteck note instead of duplicating it."""
+    prepared_payload, stats = _prepare_payload_media_with_warnings(
+        collection,
+        payload,
+        stats,
+        warnings,
+    )
+    _apply_payload_to_note(note, prepared_payload)
+    _update_note(collection, note)
+    if payload.card_type == CLOZE:
+        _remove_empty_cards_for_note(collection, note_id)
+    _ensure_note_cards_in_deck(collection, note_id, deck_id)
+    _upsert_card_mapping(db, prepared_payload, note_id, page_id)
+
+    if candidate_count > 1:
+        detail = (
+            f"{candidate_count} compatible notes already existed; the oldest was "
+            "relinked and the others were preserved."
+        )
+    else:
+        detail = "An existing note with the same Notion Block ID was relinked."
+    _LOG.warning(
+        "Card mapping recovered. page_id=%s block_id=%s note_id=%s "
+        "card_type=%s reason=%s candidates=%s",
+        page_id,
+        payload.notion_block_id,
+        note_id,
+        payload.card_type,
+        reason,
+        candidate_count,
+    )
+    stats = _add_warning(
+        stats,
+        warnings,
+        code="existing_anki_note_relinked",
+        message=f"{detail} No new note was created.",
+        page_id=page_id,
+        block_id=payload.notion_block_id,
+    )
+    return _replace_stats(stats, cards_updated=stats.cards_updated + 1)
 
 
 def _delete_note(collection: Any, note_id: int) -> None:

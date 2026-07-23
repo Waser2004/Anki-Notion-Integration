@@ -304,6 +304,23 @@ class CardModelTests(unittest.TestCase):
             css,
         )
 
+    def test_advanced_cloze_extra_toggle_color_styles_exported_section(self) -> None:
+        """Bundled CSS scopes Extra foregrounds and complete backgrounds."""
+        css = _load_model_css()
+
+        self.assertIn(
+            ".notion-cloze-extra-color :is(h1, h2, h3, h4, h5, h6, p, li, td, th, summary)",
+            css,
+        )
+        self.assertIn(
+            ".notion-cloze-extra-color.notion-block-color-background",
+            css,
+        )
+        self.assertIn("margin-block: 0.85em;", css)
+        self.assertIn("padding: 0.25em 0.7em;", css)
+        self.assertIn(".notion-cloze-extra-color > :first-child", css)
+        self.assertIn(".notion-cloze-extra-color > :last-child", css)
+
     def test_existing_template_html_and_css_are_preserved(self) -> None:
         definition = _MODEL_DEFINITIONS[0]
         model = {

@@ -663,10 +663,42 @@ html.night_mode .notion-mermaid .notion-mermaid-dark,
 	--notion-block-foreground: var(--notion-text);
 }
 
+/* Extra toggle titles are omitted, so their foreground colors scope the
+   exported body while explicit nested block and inline colors still win. */
+.notion-cloze-extra-color :is(h1, h2, h3, h4, h5, h6, p, li, td, th, summary) {
+	color: var(--notion-block-foreground, var(--notion-text)) !important;
+}
+
+.notion-cloze-extra-color .notion-block-color-background {
+	--notion-block-foreground: var(--notion-text);
+}
+
+/* Keep independently exported Extra sources visually separate, including
+   when the preceding paragraph has its own block background. */
+.notion-cloze-extra-color {
+	margin-block: 0.85em;
+}
+
 .notion-block-color-background {
 	border-radius: 4px;
 	background: var(--notion-block-background) !important;
 	color: var(--notion-text) !important;
+}
+
+/* A colored Extra toggle represents one complete visual section, not a set of
+   separately highlighted child lines. */
+.notion-cloze-extra-color.notion-block-color-background {
+	padding: 0.25em 0.7em;
+}
+
+/* Child blocks already provide normal rhythm. Tighten only the outer edges so
+   a one-line colored Extra does not become an unnecessarily tall panel. */
+.notion-cloze-extra-color > :first-child {
+	margin-block-start: 0.25em;
+}
+
+.notion-cloze-extra-color > :last-child {
+	margin-block-end: 0.25em;
 }
 
 /* Text-line blocks need compact padding similar to Notion's block highlights. */

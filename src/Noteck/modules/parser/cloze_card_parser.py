@@ -19,8 +19,8 @@ from .renderer import (
 )
 
 
-_CLOZE_CONTAINER_PREFIX_RE = re.compile(r"^\s*\[cloze\]", re.IGNORECASE)
-_EXTRA_PREFIX_RE           = re.compile(r"^\s*extra\s*:\s*", re.IGNORECASE)
+_CLOZE_CONTAINER_PREFIX_RE = re.compile(r"^\s*(?:cloze\s*:|\[cloze\])(?:\s|$)", re.IGNORECASE) # search for "cloze:" or "[cloze]" in a toggle title
+_EXTRA_PREFIX_RE           = re.compile(r"^\s*(?:extra\s*:|\[extra\])(?:\s|$)", re.IGNORECASE) # search for "extra:" or "[extra]" in a toggle title and top level paragraph
 
 _CLOZE_NUMBERS = {
     "yellow": 1,
@@ -64,6 +64,13 @@ class ClozeValidationResult:
     """Result of checking one payload against Anki cloze field requirements."""
     is_valid: bool
     errors:   tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _AdvancedExtraSection:
+    """One ordinary-rendered Extra group with an optional toggle color scope."""
+    blocks: tuple[NotionBlock, ...]
+    color:  str = "default"
 
 
 class ClozeCardParser:
@@ -198,7 +205,7 @@ class ClozeCardParser:
 
     def parse_advanced(self, page_id: str, block: NotionBlock) -> "shared.ToggleCardPayload":
         """Parse one advanced cloze toggle into an Anki cloze payload."""
-        text_blocks, extra_blocks = self._split_advanced_children(block.children)
+        text_blocks, extra_sections = self._split_advanced_children(block.children)
         text_blocks = self._prepare_advanced_blocks(text_blocks)
         text = render_blocks_with_renderer(
             text_blocks,
@@ -208,7 +215,7 @@ class ClozeCardParser:
         )
         fields = {
             "Text":            self._wrap_advanced_root_foreground(block, text),
-            "Extra":           shared.render_blocks(extra_blocks),
+            "Extra":           self._render_advanced_extra(extra_sections),
             "Notion Block ID": block.block_id,
         }
         return self._payload_for_fields(page_id, block, fields)
@@ -226,19 +233,98 @@ class ClozeCardParser:
             f'notion-block-color-{foreground_color}">{text}</div>'
         )
 
-    def _split_advanced_children(self, children: Iterable[NotionBlock]) -> tuple[list[NotionBlock], list[NotionBlock]]:
-        text_blocks:  list[NotionBlock] = []
-        extra_blocks: list[NotionBlock] = []
+    def _split_advanced_children(
+        self,
+        children: Iterable[NotionBlock],
+    ) -> tuple[list[NotionBlock], list[_AdvancedExtraSection]]:
+        """Separate advanced-cloze text from paragraph and toggle extras."""
+        text_blocks:    list[NotionBlock]           = []
+        extra_sections: list[_AdvancedExtraSection] = []
 
         for child in children:
-            # Check if the child is a "extra" paragraph add it to extra blocks
+            # Direct Extra paragraphs keep the established concise convention.
             if self._is_extra_paragraph(child):
-                extra_blocks.append(self._without_extra_prefix(child))
+                extra_sections.append(_AdvancedExtraSection((self._without_extra_prefix(child),)))
                 continue
 
-            text_blocks.append(child)
+            # Extract nexted Extra toggles from the visible text content while preserving their color scope.
+            text_block, nested_extras = self._extract_extra_toggles(child)
+            if text_block is not None:
+                text_blocks.append(text_block)
+            extra_sections.extend(nested_extras)
 
-        return text_blocks, extra_blocks
+        return text_blocks, extra_sections
+
+    def _extract_extra_toggles(
+        self,
+        block: NotionBlock,
+    ) -> tuple[NotionBlock | None, list[_AdvancedExtraSection]]:
+        """Remove marked nested toggles from Text and return only their contents."""
+        # if toggle is extra toggle extract foreground and background color and return
+        if self._is_extra_toggle(block):
+            background = shared._block_background_color(block)
+            foreground = shared._block_foreground_color(block)
+            color = background or foreground
+            return None, [_AdvancedExtraSection(block.children, color)]
+
+        # block has no children, return block and empty list for extra sections
+        if not block.children:
+            return block, []
+
+        # recursively extract extra toggles from children and return block with retained children and extra sections
+        retained_children: list[NotionBlock] = []
+        extra_sections:    list[_AdvancedExtraSection] = []
+        for child in block.children:
+            retained_child, child_extras = self._extract_extra_toggles(child)
+            if retained_child is not None:
+                retained_children.append(retained_child)
+            extra_sections.extend(child_extras)
+
+        # Preserve any non-extra wrapper and its styling while removing the marked toggle subtree from the front-side content.
+        retained_tuple = tuple(retained_children)
+        return (
+            replace(
+                block,
+                children     = retained_tuple,
+                has_children = bool(retained_tuple),
+            ),
+            extra_sections,
+        )
+
+    def _render_advanced_extra(
+        self,
+        sections: Iterable[_AdvancedExtraSection],
+    ) -> str:
+        """Render Extra groups while retaining a marked toggle's block color."""
+        parts: list[str] = []
+        for section in sections:
+            rendered = shared.render_blocks(section.blocks)
+            if not rendered:
+                continue
+            if section.color == "default":
+                parts.append(rendered)
+                continue
+
+            # apply block color classes to the rendered extra section
+            classes = [
+                "notion-cloze-extra-color",
+                "notion-block-color",
+                f"notion-block-color-{section.color}",
+            ]
+            if section.color.endswith("_background"):
+                classes.append("notion-block-color-background")
+            parts.append(f'<div class="{" ".join(classes)}">{rendered}</div>')
+
+        return "".join(parts)
+
+    def _is_extra_toggle(self, block: NotionBlock) -> bool:
+        """Recognize nested Extra toggles by either supported title prefix."""
+        if block.block_type != "toggle":
+            return False
+        
+        return _EXTRA_PREFIX_RE.search(
+            self._plain_text(self._rich_text(block)),
+        ) is not None
 
     def _rich_text_to_advanced_cloze_html(self, rich_text: Iterable[dict[str, Any]]) -> str:
         parts:  list[str]  = []

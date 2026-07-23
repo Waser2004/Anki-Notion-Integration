@@ -183,10 +183,24 @@ HTML structure is retained.
 A direct child paragraph whose text starts with `Extra:` is rendered into
 `Extra`, with the case-insensitive prefix removed. Unlike normal paragraph
 clozes, the extra paragraph is inside the advanced cloze toggle rather than the
-next top-level block. Extra paragraphs always use the ordinary shared renderer:
-configured marker backgrounds and inline marker colors remain visual styling
-and never produce `{{cN::...}}` markup in `Extra`. Toggles titled `[extra]` are
-rendered normally in `Text`.
+next top-level block.
+
+A nested toggle whose title starts with either `Extra:` or `[extra]`, ignoring
+leading whitespace and case, also supplies `Extra`. The marker title and toggle
+shell are omitted; only its child blocks are exported. Matching toggles are
+recognized at any depth below the advanced cloze root, which lets Extra contain
+the shared renderer's supported images, tables, callouts, lists, and other rich
+block structures. Any unmarked ancestor remains in `Text`, minus the extracted
+toggle subtree. Each matching toggle creates an independent color scope around
+only its own exported child blocks. A validated background colors that child
+group, while a foreground color scopes its visible text. The color never leaks
+to direct `Extra:` paragraphs or sibling Extra toggles. Explicit nested block
+colors and inline highlights continue to override the inherited toggle color.
+
+All advanced Extra blocks use the ordinary shared renderer: configured marker
+backgrounds and inline marker colors remain visual styling and never produce
+`{{cN::...}}` markup in `Extra`. Top-level paragraph clozes retain their narrower
+adjacent-`Extra:`-paragraph or adjacent-`[extra]`-paragraph convention and do not consume toggles.
 
 ### Color-to-number mapping
 

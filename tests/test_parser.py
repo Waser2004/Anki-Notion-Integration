@@ -1660,8 +1660,8 @@ class ParserTests(unittest.TestCase):
         )
         self.assertIn("<p>{{c1::Front}}</p>", payload.fields["Text"])
 
-    def test_advanced_cloze_extra_toggle_is_rendered_normally(self) -> None:
-        """The obsolete ``[extra]`` toggle convention no longer populates Extra."""
+    def test_advanced_cloze_extra_toggle_exports_only_its_children(self) -> None:
+        """A direct nested ``[extra]`` toggle contributes only its body to Extra."""
         extra_toggle = _block(
             "extra-toggle",
             "toggle",
@@ -1677,15 +1677,16 @@ class ParserTests(unittest.TestCase):
 
         payload = parse_page_to_cards("page-1", [advanced_toggle], enable_cloze=True)[0]
 
-        self.assertEqual(payload.fields["Extra"], "")
-        self.assertIn("<summary>[extra] Details</summary>", payload.fields["Text"])
-        self.assertIn("<p>Toggle body</p>", payload.fields["Text"])
+        self.assertEqual(payload.fields["Extra"], "<p>Toggle body</p>")
+        self.assertNotIn("[extra] Details", payload.fields["Text"])
+        self.assertNotIn("Toggle body", payload.fields["Text"])
 
-    def test_advanced_cloze_nested_extra_toggle_is_rendered_normally(self) -> None:
+    def test_advanced_cloze_deep_extra_toggle_preserves_wrapper_in_text(self) -> None:
+        """A marked toggle nested below another block is extracted recursively."""
         nested_extra = _block(
             "nested-extra",
             "toggle",
-            {"rich_text": [_text_item("[extra] Nested")]},
+            {"rich_text": [_text_item("Extra: Nested")]},
             children=(_block("nested-p", "paragraph", {"rich_text": [_text_item("Nested body")]}),),
         )
         wrapper_toggle = _block(
@@ -1708,9 +1709,195 @@ class ParserTests(unittest.TestCase):
         )
 
         self.assertIn("<summary>Wrapper</summary>", payloads[0].fields["Text"])
-        self.assertIn("<summary>[extra] Nested</summary>", payloads[0].fields["Text"])
-        self.assertIn("<p>Nested body</p>", payloads[0].fields["Text"])
-        self.assertEqual(payloads[0].fields["Extra"], "")
+        self.assertNotIn("Extra: Nested", payloads[0].fields["Text"])
+        self.assertNotIn("Nested body", payloads[0].fields["Text"])
+        self.assertEqual(payloads[0].fields["Extra"], "<p>Nested body</p>")
+
+    def test_advanced_cloze_extra_toggle_renders_structured_content_normally(self) -> None:
+        """Extra toggle bodies support rich blocks without creating deletions."""
+        extra_toggle = _block(
+            "extra-toggle",
+            "toggle",
+            {"rich_text": [_text_item(" [ExTrA] Explanation")]},
+            children=(
+                _block(
+                    "extra-table",
+                    "table",
+                    {"has_column_header": True, "has_row_header": False},
+                    children=(
+                        _block(
+                            "extra-row",
+                            "table_row",
+                            {
+                                "cells": [
+                                    [_text_item("Reason")],
+                                    [_text_item("Because", annotations=_annotations(background_color="yellow"))],
+                                ],
+                            },
+                        ),
+                    ),
+                ),
+                _block(
+                    "extra-image",
+                    "image",
+                    {
+                        "type": "external",
+                        "external": {"url": "https://example.com/explanation.png"},
+                        "caption": [_text_item("Diagram")],
+                    },
+                ),
+            ),
+        )
+        advanced_toggle = _block(
+            "advanced-toggle",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] Structured extra")]},
+            children=(
+                _block(
+                    "text-p",
+                    "paragraph",
+                    {"rich_text": [_text_item("Front", annotations=_annotations(background_color="yellow"))]},
+                ),
+                extra_toggle,
+            ),
+        )
+
+        payload = parse_page_to_cards("page-1", [advanced_toggle], enable_cloze=True)[0]
+
+        self.assertIn("{{c1::Front}}", payload.fields["Text"])
+        self.assertNotIn("{{c", payload.fields["Extra"])
+        self.assertIn("<table>", payload.fields["Extra"])
+        self.assertIn('class="highlight-yellow_background"', payload.fields["Extra"])
+        self.assertIn('<figure class="notion-image">', payload.fields["Extra"])
+        self.assertNotIn("[ExTrA] Explanation", payload.fields["Extra"])
+
+    def test_advanced_cloze_extra_toggle_color_scopes_exported_body(self) -> None:
+        """Toggle block colors wrap Extra while inline highlights remain explicit."""
+        for block_color, expected_class in (
+            ("red_background", "notion-block-color-background"),
+            ("green", "notion-block-color-green"),
+        ):
+            with self.subTest(block_color=block_color):
+                extra_toggle = _block(
+                    f"extra-{block_color}",
+                    "toggle",
+                    {
+                        "color": block_color,
+                        "rich_text": [_text_item("[extra] Colored section")],
+                    },
+                    children=(
+                        _block(
+                            "extra-body",
+                            "paragraph",
+                            {
+                                "rich_text": [
+                                    _text_item("Inherited "),
+                                    _text_item("override", annotations=_annotations(color="blue")),
+                                    _text_item(
+                                        " background override",
+                                        annotations=_annotations(background_color="yellow"),
+                                    ),
+                                ],
+                            },
+                        ),
+                    ),
+                )
+                advanced_toggle = _block(
+                    "advanced-toggle",
+                    "toggle",
+                    {"rich_text": [_text_item("[cloze] Colored Extra")]},
+                    children=(extra_toggle,),
+                )
+
+                extra = parse_page_to_cards(
+                    "page-1",
+                    [advanced_toggle],
+                    enable_cloze=True,
+                )[0].fields["Extra"]
+
+                self.assertIn('class="notion-cloze-extra-color notion-block-color ', extra)
+                self.assertIn(f"notion-block-color-{block_color}", extra)
+                self.assertIn(expected_class, extra)
+                self.assertIn('<span class="highlight-blue">override</span>', extra)
+                self.assertIn(
+                    '<span class="highlight-yellow_background"> background override</span>',
+                    extra,
+                )
+                self.assertNotIn("[extra] Colored section", extra)
+
+    def test_advanced_cloze_extra_toggle_colors_do_not_leak_to_siblings(self) -> None:
+        """Each Extra toggle colors only its own exported child blocks."""
+        advanced_toggle = _block(
+            "advanced-toggle",
+            "toggle",
+            {"rich_text": [_text_item("[cloze] Isolated Extra colors")]},
+            children=(
+                _block(
+                    "plain-extra",
+                    "paragraph",
+                    {"rich_text": [_text_item("Extra: Plain sibling")]},
+                ),
+                _block(
+                    "red-extra",
+                    "toggle",
+                    {
+                        "color": "red_background",
+                        "rich_text": [_text_item("[extra] Red section")],
+                    },
+                    children=(
+                        _block(
+                            "red-body",
+                            "paragraph",
+                            {"rich_text": [_text_item("Red child only")]},
+                        ),
+                    ),
+                ),
+                _block(
+                    "uncolored-extra",
+                    "toggle",
+                    {"rich_text": [_text_item("[extra] Plain section")]},
+                    children=(
+                        _block(
+                            "plain-body",
+                            "paragraph",
+                            {"rich_text": [_text_item("Uncolored toggle child")]},
+                        ),
+                    ),
+                ),
+                _block(
+                    "green-extra",
+                    "toggle",
+                    {
+                        "color": "green",
+                        "rich_text": [_text_item("[extra] Green section")],
+                    },
+                    children=(
+                        _block(
+                            "green-body",
+                            "paragraph",
+                            {"rich_text": [_text_item("Green child only")]},
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        extra = parse_page_to_cards(
+            "page-1",
+            [advanced_toggle],
+            enable_cloze=True,
+        )[0].fields["Extra"]
+
+        self.assertEqual(
+            extra,
+            '<p>Plain sibling</p>'
+            '<div class="notion-cloze-extra-color notion-block-color '
+            'notion-block-color-red_background notion-block-color-background">'
+            '<p>Red child only</p></div>'
+            '<p>Uncolored toggle child</p>'
+            '<div class="notion-cloze-extra-color notion-block-color '
+            'notion-block-color-green"><p>Green child only</p></div>',
+        )
 
     def test_paragraph_cloze_maps_all_marker_colors_to_toggle_cloze_numbers(self) -> None:
         """Normal paragraphs use the same fixed color-to-number mapping as toggles."""

@@ -42,7 +42,11 @@ whether an Anki note needs to be created or updated.
 
 Advanced cloze toggles are reconciled by the root-toggle pass and are excluded
 from stale top-level-paragraph cleanup. If a mapped Anki note is missing, the
-toggle is expanded and recreated even when its Markdown source hash is unchanged.
+toggle is expanded even when its Markdown source hash is unchanged. Before
+creating a replacement, Noteck searches the managed `Notion Block ID` field and
+relinks the oldest compatible existing note. This protects against duplicates
+when a profile restore or local database reset invalidates only Noteck's numeric
+note mapping. A replacement is created only when no compatible note remains.
 Parser revision refreshes also expand root toggles once so mappings detached by
 an earlier parser or reconciliation bug can be recovered.
 
