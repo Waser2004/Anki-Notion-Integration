@@ -316,10 +316,14 @@ class CardModelTests(unittest.TestCase):
             ".notion-cloze-extra-color.notion-block-color-background",
             css,
         )
-        self.assertIn("margin-block: 0.85em;", css)
-        self.assertIn("padding: 0.25em 0.7em;", css)
+        self.assertIn("display: block;", css)
+        self.assertIn("margin: 0.5em 0;", css)
+        self.assertIn("padding: 5px;", css)
+        self.assertIn("border-radius: 0;", css)
         self.assertIn(".notion-cloze-extra-color > :first-child", css)
         self.assertIn(".notion-cloze-extra-color > :last-child", css)
+        self.assertIn("margin-block-start: 0;", css)
+        self.assertIn("margin-block-end: 0;", css)
 
     def test_existing_template_html_and_css_are_preserved(self) -> None:
         definition = _MODEL_DEFINITIONS[0]

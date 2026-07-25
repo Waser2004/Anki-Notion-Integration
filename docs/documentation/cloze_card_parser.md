@@ -193,7 +193,8 @@ the shared renderer's supported images, tables, callouts, lists, and other rich
 block structures. Any unmarked ancestor remains in `Text`, minus the extracted
 toggle subtree. Each matching toggle creates an independent color scope around
 only its own exported child blocks. A validated background colors that child
-group, while a foreground color scopes its visible text. The color never leaks
+group as one block with ordinary paragraph spacing and a five-pixel content
+inset, while a foreground color scopes its visible text. The color never leaks
 to direct `Extra:` paragraphs or sibling Extra toggles. Explicit nested block
 colors and inline highlights continue to override the inherited toggle color.
 

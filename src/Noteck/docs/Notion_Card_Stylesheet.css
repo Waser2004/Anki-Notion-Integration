@@ -673,10 +673,10 @@ html.night_mode .notion-mermaid .notion-mermaid-dark,
 	--notion-block-foreground: var(--notion-text);
 }
 
-/* Keep independently exported Extra sources visually separate, including
-   when the preceding paragraph has its own block background. */
+/* Give exported Extra groups the same vertical rhythm as ordinary text blocks. */
 .notion-cloze-extra-color {
-	margin-block: 0.85em;
+	display: block;
+	margin: 0.5em 0;
 }
 
 .notion-block-color-background {
@@ -685,20 +685,19 @@ html.night_mode .notion-mermaid .notion-mermaid-dark,
 	color: var(--notion-text) !important;
 }
 
-/* A colored Extra toggle represents one complete visual section, not a set of
-   separately highlighted child lines. */
+/* A colored Extra toggle is one Notion-like block surface around its children. */
 .notion-cloze-extra-color.notion-block-color-background {
-	padding: 0.25em 0.7em;
+	padding: 5px;
+	border-radius: 4px;
 }
 
-/* Child blocks already provide normal rhythm. Tighten only the outer edges so
-   a one-line colored Extra does not become an unnecessarily tall panel. */
+/* Let the wrapper's padding alone define the inset at its outer edges. */
 .notion-cloze-extra-color > :first-child {
-	margin-block-start: 0.25em;
+	margin-block-start: 0;
 }
 
 .notion-cloze-extra-color > :last-child {
-	margin-block-end: 0.25em;
+	margin-block-end: 0;
 }
 
 /* Text-line blocks need compact padding similar to Notion's block highlights. */
