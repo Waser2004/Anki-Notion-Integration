@@ -1261,6 +1261,33 @@ class SyncTests(unittest.TestCase):
         )["advanced-toggle"]
         self.assertEqual(mapping["card_type"], "basic")
 
+    def test_disabling_cloze_parsing_preserves_advanced_toggle_mapping(self) -> None:
+        """A recognized cloze toggle stays a cloze source while parsing is paused."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        client = _SelectiveAdvancedClozeClient()
+        self._db.set_setting("enable_cloze_parsing", "1")
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ):
+            created = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            self._db.set_setting("enable_cloze_parsing", "0")
+            paused = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(created.ok)
+        self.assertTrue(paused.ok)
+        self.assertEqual(paused.stats.cards_unchanged, 1)
+        self.assertEqual(client.recursive_calls, 1)
+        mapping = _SYNC_MODULE._load_existing_cards_for_page(
+            self._db,
+            "page-1",
+        )["advanced-toggle"]
+        self.assertEqual(mapping["card_type"], "cloze")
+        self.assertIn(int(mapping["anki_note_id"]), collection.notes)
+
     def test_markdown_snapshots_fetch_only_new_or_changed_toggles(self) -> None:
         collection = _FakeCollection()
         mw = _FakeMw(collection)

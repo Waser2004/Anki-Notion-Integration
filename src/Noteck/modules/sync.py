@@ -817,7 +817,6 @@ def _sync_page_content_selective(
             toggle,
             default_card_type=default_card_type,
             card_type_overrides=card_type_overrides,
-            enable_cloze=enable_cloze,
             enable_gray_toggle_cloze=enable_gray_toggle_cloze,
             cloze_parser=cloze_parser,
         )
@@ -1584,12 +1583,11 @@ def _expected_card_type_for_toggle(
     *,
     default_card_type:        str,
     card_type_overrides:      dict[str, str],
-    enable_cloze:             bool,
     enable_gray_toggle_cloze: bool,
     cloze_parser:             ClozeCardParser,
 ) -> str:
-    """Resolve the type a shallow root toggle will produce when parsed."""
-    if enable_cloze and cloze_parser.is_advanced_container(
+    """Resolve a shallow root toggle's intrinsic card type."""
+    if cloze_parser.is_advanced_container(
         toggle,
         enable_gray_toggle_cloze=enable_gray_toggle_cloze,
     ):
