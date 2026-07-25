@@ -889,7 +889,7 @@ def _sync_page_content_selective(
             children=tuple(children),
         )
         enriched_toggle = merge_markdown_table_colors(
-            [expanded_toggle], snapshot.markdown
+            [expanded_toggle], source_markdown
         )[0]
         parse_result = _parse_cards_with_warnings(
             page_id=page_id,
@@ -2480,7 +2480,11 @@ def _find_existing_note_for_payload(
 
 
 def _note_supports_payload(note: Any, payload: ToggleCardPayload) -> bool:
-    """Return whether a note exposes every field required by a payload."""
+    """Return whether a note has the expected model and every required field."""
+    model_name = _note_model_name(note)
+    if model_name != payload.model_name:
+        return False
+
     required_fields = (
         tuple(payload.fields)
         if payload.fields
@@ -2493,6 +2497,23 @@ def _note_supports_payload(note: Any, payload: ToggleCardPayload) -> bool:
         except Exception:
             return False
     return True
+
+
+def _note_model_name(note: Any) -> str | None:
+    """Return an Anki note's model name across current and legacy APIs."""
+    for accessor_name in ("note_type", "model"):
+        accessor = getattr(note, accessor_name, None)
+        if not callable(accessor):
+            continue
+        try:
+            model = accessor()
+        except Exception:
+            continue
+        if isinstance(model, dict):
+            name = model.get("name")
+            if isinstance(name, str) and name:
+                return name
+    return None
 
 
 def _relink_existing_note(

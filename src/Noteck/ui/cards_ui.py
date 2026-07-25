@@ -32,7 +32,10 @@ from ..modules.cards_store import CardsStore
 from ..modules.db import Database
 from ..modules.notion_client import NotionClient
 from ..modules.pages import PagesStore, StoredPage
-from ..modules.parser.cloze_card_parser import ClozeCardParser
+from ..modules.parser.cloze_card_parser import (
+    ClozeCardParser,
+    paragraph_has_cloze_marker,
+)
 from ..modules.settings import SettingsStore
 from .context_menu_schema import ContextMenuEntry, load_context_menu_schema
 from .ui import UiContext
@@ -248,7 +251,7 @@ class CardsPage(QWidget):
                         }
                     )
                     continue
-                if block.block_type == "paragraph" and self._paragraph_has_cloze_marker(
+                if block.block_type == "paragraph" and paragraph_has_cloze_marker(
                     block.raw, cloze_marker_colors
                 ):
                     cards.append(
@@ -803,42 +806,6 @@ class CardsPage(QWidget):
             if isinstance(plain_text, str) and plain_text:
                 parts.append(plain_text)
         return "".join(parts)
-
-    @staticmethod
-    def _paragraph_has_cloze_marker(raw_payload: dict[str, Any], marker_colors: list[str]) -> bool:
-        """Return whether a paragraph uses a configured block or inline cloze marker."""
-        paragraph_payload = raw_payload.get("paragraph")
-        if not isinstance(paragraph_payload, dict):
-            return False
-        selected_colors = {
-            str(color).strip().lower().removesuffix("_background")
-            for color in marker_colors
-        }
-
-        # Match parser behavior: block-level clozes require a background color.
-        block_color = str(paragraph_payload.get("color") or "").strip().lower()
-        if block_color.endswith("_background") and block_color.removesuffix("_background") in selected_colors:
-            return True
-
-        rich_text = paragraph_payload.get("rich_text")
-        if not isinstance(rich_text, list):
-            return False
-
-        for item in rich_text:
-            if not isinstance(item, dict):
-                continue
-            annotations = item.get("annotations")
-            if not isinstance(annotations, dict):
-                continue
-            color = str(annotations.get("color") or "").strip().lower()
-            background_color = str(annotations.get("background_color") or "").strip().lower()
-            # Paragraph clozes use the same marker palette as advanced toggle clozes.
-            if (
-                color.endswith("_background")
-                and color.removesuffix("_background") in selected_colors
-            ) or background_color.removesuffix("_background") in selected_colors:
-                return True
-        return False
 
     @staticmethod
     def _resolve_profile_name(context: UiContext) -> str | None:

@@ -59,6 +59,41 @@ _CALLOUT_TEXTUAL_DESCENDANT_BLOCK_TYPES = _COLORABLE_RENDERED_BLOCK_TYPES | froz
 )
 
 
+def paragraph_has_cloze_marker(
+    raw_payload: dict[str, Any],
+    marker_colors: Iterable[str],
+) -> bool:
+    """Return whether a raw paragraph has a configured inline cloze marker."""
+    paragraph_payload = raw_payload.get("paragraph")
+    if not isinstance(paragraph_payload, dict):
+        return False
+
+    selected_colors = {
+        str(color).strip().lower().removesuffix("_background")
+        for color in marker_colors
+    }
+    rich_text = paragraph_payload.get("rich_text")
+    if not isinstance(rich_text, list):
+        return False
+
+    for item in rich_text:
+        if not isinstance(item, dict):
+            continue
+        annotations = item.get("annotations")
+        if not isinstance(annotations, dict):
+            continue
+        color = str(annotations.get("color") or "").strip().lower()
+        background_color = str(
+            annotations.get("background_color") or ""
+        ).strip().lower()
+        if (
+            color.endswith("_background")
+            and color.removesuffix("_background") in selected_colors
+        ) or background_color.removesuffix("_background") in selected_colors:
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class ClozeValidationResult:
     """Result of checking one payload against Anki cloze field requirements."""

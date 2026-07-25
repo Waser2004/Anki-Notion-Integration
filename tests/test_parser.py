@@ -9,7 +9,10 @@ import unittest
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from Noteck.modules.notion_client import NotionBlock, merge_markdown_table_colors
-from Noteck.modules.parser.cloze_card_parser import ClozeCardParser
+from Noteck.modules.parser.cloze_card_parser import (
+    ClozeCardParser,
+    paragraph_has_cloze_marker,
+)
 from Noteck.modules.parser import (
     collect_image_occlusion_candidates,
     normalize_typed_answer,
@@ -1989,6 +1992,25 @@ class ParserTests(unittest.TestCase):
             [],
         )
         self.assertEqual(parse_page_to_cards("page-1", [foreground_only], enable_cloze=True), [])
+
+    def test_cards_ui_marker_detection_ignores_paragraph_block_background(self) -> None:
+        """Cards-list eligibility must require the same inline marker as parsing."""
+        raw_payload = {
+            "type": "paragraph",
+            "paragraph": {
+                "color": "yellow_background",
+                "rich_text": [_text_item("Context only")],
+            },
+        }
+
+        self.assertFalse(paragraph_has_cloze_marker(raw_payload, ["yellow"]))
+        raw_payload["paragraph"]["rich_text"] = [
+            _text_item(
+                "Deletion",
+                annotations=_annotations(color="yellow_background"),
+            )
+        ]
+        self.assertTrue(paragraph_has_cloze_marker(raw_payload, ["yellow"]))
 
     def test_advanced_cloze_preserves_colored_block_structures(self) -> None:
         """Block markers replace direct text while keeping each Notion structure visible."""

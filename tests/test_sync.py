@@ -102,9 +102,14 @@ class _FakeDecks:
 class _FakeNote(dict):
     """Small note object supporting field assignment and id tracking."""
 
-    def __init__(self) -> None:
+    def __init__(self, model: dict[str, str]) -> None:
         super().__init__()
         self.id: int | None = None
+        self._model = dict(model)
+
+    def note_type(self) -> dict[str, str]:
+        """Return the Anki-style note type used to create this note."""
+        return self._model
 
 
 class _FakeMedia:
@@ -130,8 +135,7 @@ class _FakeCollection:
         self.removed_card_ids: list[int] = []
 
     def new_note(self, model: dict[str, str]) -> _FakeNote:
-        _ = model
-        return _FakeNote()
+        return _FakeNote(model)
 
     def add_note(self, note: _FakeNote, deck_id: int) -> None:
         _ = deck_id
@@ -1309,6 +1313,32 @@ class SyncTests(unittest.TestCase):
             ["block-1", "block-2"],
         )
 
+    def test_selective_table_color_matching_uses_each_toggle_markdown(self) -> None:
+        """Identical tables in different toggles must retain their local color scope."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        client = _SelectiveMarkdownClient()
+        snapshot = client.get_page_markdown("page-1")
+        expected_sources = _SYNC_MODULE.extract_root_toggle_markdown(snapshot.markdown)
+        self.assertIsNotNone(expected_sources)
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ), patch.object(
+            _SYNC_MODULE,
+            "merge_markdown_table_colors",
+            wraps=_SYNC_MODULE.merge_markdown_table_colors,
+        ) as merge_mock:
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(
+            [call.args[1] for call in merge_mock.call_args_list],
+            list(expected_sources or ()),
+        )
+
     def test_unchanged_markdown_skips_page_parsing_and_logs_reason(self) -> None:
         """A stable page hash must bypass both toggle and paragraph-cloze parsers."""
         collection = _FakeCollection()
@@ -2379,6 +2409,40 @@ class SyncTests(unittest.TestCase):
             "page-1",
         )["block-1"]
         self.assertEqual(int(mapping["anki_note_id"]), existing_note.id)
+
+    def test_sync_does_not_relink_note_from_a_different_model(self) -> None:
+        """Identical fields do not make Basic and Basic+Reversed notes compatible."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        reversed_note = collection.new_note({"name": "Notion (Basic+Reversed)"})
+        reversed_note["Front"] = "<p>reversed front</p>"
+        reversed_note["Back"] = "<p>reversed back</p>"
+        reversed_note["Notion Block ID"] = "block-1"
+        collection.add_note(reversed_note, deck_id=1)
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[self._payload(content_hash="new-hash")],
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_created, 1)
+        self.assertEqual(result.stats.cards_updated, 0)
+        self.assertEqual(len(collection.notes), 2)
+        self.assertEqual(reversed_note["Front"], "<p>reversed front</p>")
+        mapping = _SYNC_MODULE._load_existing_cards_for_page(
+            self._db,
+            "page-1",
+        )["block-1"]
+        new_note = collection.get_note(int(mapping["anki_note_id"]))
+        self.assertIsNotNone(new_note)
+        self.assertEqual(new_note.note_type()["name"], "Notion (Basic)")
 
     def test_sync_relinks_existing_note_when_mapped_note_id_is_stale(self) -> None:
         """A profile restore may invalidate IDs while leaving the Noteck note."""
