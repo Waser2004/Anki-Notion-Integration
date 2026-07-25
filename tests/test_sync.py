@@ -352,10 +352,22 @@ class _FakeNotionClientWithParagraphs(_FakeNotionClient):
 class _SelectiveParagraphClozeClient(_FakeNotionClientWithParagraphs):
     """Expose stable Markdown so unchanged paragraph clozes can skip parsing."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.included_text = "Included"
+
+    def get_page_content(self, page_id: str) -> list[NotionBlock]:
+        """Return mutable paragraph content with stable block identities."""
+        _ = page_id
+        return [
+            self._paragraph_block("cloze-excluded", "Excluded"),
+            self._paragraph_block("cloze-included", self.included_text),
+        ]
+
     def get_page_markdown(self, page_id: str) -> NotionMarkdownSnapshot:
         return NotionMarkdownSnapshot(
             page_id=page_id,
-            markdown="Excluded\n\nIncluded",
+            markdown=f"Excluded\n\n{self.included_text}",
             truncated=False,
             unknown_block_ids=(),
         )
@@ -564,6 +576,7 @@ class _SelectiveAdvancedClozeClient(_FakeNotionClient):
         super().__init__()
         self.recursive_calls = 0
         self.title = "[cloze] Recovery"
+        self.body = "Marked answer"
 
     def get_page_markdown(self, page_id: str) -> NotionMarkdownSnapshot:
         return NotionMarkdownSnapshot(
@@ -571,7 +584,7 @@ class _SelectiveAdvancedClozeClient(_FakeNotionClient):
             markdown=(
                 "<details>\n"
                 f"<summary>{self.title}</summary>\n"
-                "\tMarked answer\n"
+                f"\t{self.body}\n"
                 "</details>"
             ),
             truncated=False,
@@ -596,8 +609,8 @@ class _SelectiveAdvancedClozeClient(_FakeNotionClient):
                         "rich_text": [
                             {
                                 "type": "text",
-                                "plain_text": "Marked answer",
-                                "text": {"content": "Marked answer"},
+                                "plain_text": self.body,
+                                "text": {"content": self.body},
                                 "annotations": {"color": "yellow_background"},
                             }
                         ]
@@ -1287,6 +1300,82 @@ class SyncTests(unittest.TestCase):
         )["advanced-toggle"]
         self.assertEqual(mapping["card_type"], "cloze")
         self.assertIn(int(mapping["anki_note_id"]), collection.notes)
+
+    def test_reenabling_cloze_parsing_retries_changes_made_while_paused(self) -> None:
+        """Paused cloze sources retain their last-synced hashes until Anki is updated."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        client = _SelectiveAdvancedClozeClient()
+        self._db.set_setting("enable_cloze_parsing", "1")
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ):
+            created = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            stored_hash = _SYNC_MODULE._load_toggle_source_hashes(
+                self._db,
+                "page-1",
+            )["advanced-toggle"]
+            self._db.set_setting("enable_cloze_parsing", "0")
+            client.body = "Changed while paused"
+            paused = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            paused_hash = _SYNC_MODULE._load_toggle_source_hashes(
+                self._db,
+                "page-1",
+            )["advanced-toggle"]
+            self._db.set_setting("enable_cloze_parsing", "1")
+            resumed = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(created.ok)
+        self.assertTrue(paused.ok)
+        self.assertTrue(resumed.ok)
+        self.assertEqual(paused_hash, stored_hash)
+        self.assertEqual(client.recursive_calls, 3)
+        self.assertEqual(resumed.stats.cards_updated, 1)
+        resumed_hash = _SYNC_MODULE._load_toggle_source_hashes(
+            self._db,
+            "page-1",
+        )["advanced-toggle"]
+        self.assertNotEqual(resumed_hash, stored_hash)
+        saved_note = next(iter(collection.notes.values()))
+        self.assertIn("Changed while paused", str(saved_note.get("Text", "")))
+
+    def test_reenabling_cloze_parsing_retries_paused_paragraph_changes(self) -> None:
+        """The page hash must not hide paragraph-cloze edits made while disabled."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        client = _SelectiveParagraphClozeClient()
+        self._db.set_setting("enable_cloze_parsing", "1")
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ):
+            created = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            stored_hash = _SYNC_MODULE._load_page_content_hash(self._db, "page-1")
+            self._db.set_setting("enable_cloze_parsing", "0")
+            client.included_text = "Changed while paused"
+            paused = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            paused_hash = _SYNC_MODULE._load_page_content_hash(self._db, "page-1")
+            self._db.set_setting("enable_cloze_parsing", "1")
+            resumed = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(created.ok)
+        self.assertTrue(paused.ok)
+        self.assertTrue(resumed.ok)
+        self.assertEqual(paused_hash, stored_hash)
+        self.assertEqual(resumed.stats.cards_updated, 1)
+        resumed_hash = _SYNC_MODULE._load_page_content_hash(self._db, "page-1")
+        self.assertNotEqual(resumed_hash, stored_hash)
+        mapping = _SYNC_MODULE._load_existing_cards_for_page(
+            self._db,
+            "page-1",
+        )["cloze-included"]
+        saved_note = collection.get_note(int(mapping["anki_note_id"]))
+        self.assertIn("Changed while paused", str(saved_note.get("Text", "")))
 
     def test_markdown_snapshots_fetch_only_new_or_changed_toggles(self) -> None:
         collection = _FakeCollection()

@@ -72,6 +72,26 @@ class CardsStore:
                     (page_id, 1 if excluded else 0, block_id),
                 )
 
+            if not excluded:
+                # Source hashes may have advanced for other cards while this
+                # card was excluded. Invalidate both selective gates so the
+                # newly eligible source is compared with its Anki payload.
+                connection.execute(
+                    """
+                    DELETE FROM notion_toggle_snapshots
+                    WHERE notion_page_id = ? AND notion_block_id = ?
+                    """,
+                    (page_id, block_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE pages
+                    SET content_hash = NULL
+                    WHERE notion_page_id = ?
+                    """,
+                    (page_id,),
+                )
+
             connection.commit()
         except sqlite3.Error:
             connection.rollback()

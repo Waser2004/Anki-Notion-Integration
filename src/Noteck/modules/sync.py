@@ -658,12 +658,11 @@ def _sync_page_content(
         if prefetched_data is not None
         else get_page_markdown(page_id)
     )
-    if not isinstance(snapshot, NotionMarkdownSnapshot) or snapshot.truncated:
+    if not isinstance(snapshot, NotionMarkdownSnapshot):
         _LOG.info(
             "Page being parsed. page_id=%s reason=markdown_snapshot_unavailable "
-            "truncated=%s mode=full_tree",
+            "mode=full_tree",
             page_id,
-            getattr(snapshot, "truncated", None),
         )
         return _sync_page_content_full(
             db                  = db,
@@ -807,9 +806,9 @@ def _sync_page_content_selective(
         mapping              = existing_cards.get(block_id)
         stats                = _replace_stats(stats, cards_seen=stats.cards_seen + 1)
 
-        # Skip toggles that are explicitly excluded, but still record their source hash so we don't repeatedly re-parse them.
+        # Excluded cards did not reach Anki, so retain the source hash from the
+        # last payload that was actually processed.
         if mapping is not None and mapping["excluded"]:
-            _upsert_toggle_source_hash(db, page_id, block_id, source_hash)
             stats = _replace_stats(stats, cards_skipped=stats.cards_skipped + 1)
             continue
 
@@ -903,8 +902,15 @@ def _sync_page_content_selective(
 
         if not parse_result.payloads:
             if not _has_parse_failure(parse_result.warnings):
-                stats = _detach_mapping(db, stats, page_id, block_id)
-                _upsert_toggle_source_hash(db, page_id, block_id, source_hash)
+                if expected_card_type == CLOZE and not enable_cloze:
+                    # A disabled cloze source is paused, not converted or
+                    # removed. Its old hash forces a fresh parse when enabled.
+                    stats = _replace_stats(
+                        stats,
+                        cards_skipped=stats.cards_skipped + 1,
+                    )
+                else:
+                    stats = _detach_mapping(db, stats, page_id, block_id)
             continue
 
         # Sync each payload from the toggle, recording any errors and stopping if cancelled.
@@ -974,7 +980,9 @@ def _sync_page_content_selective(
         )
         errors.extend(local_media_errors)
 
-    if not errors:
+    # The page hash gates top-level paragraph clozes. Do not advance it while
+    # cloze parsing is paused because no changed cloze payload reached Anki.
+    if enable_cloze and not errors:
         _set_page_content_hash(db, page_id, current_page_hash)
     if page_parse_reasons:
         _LOG.info(

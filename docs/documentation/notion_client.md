@@ -86,8 +86,13 @@ The original API payload is always retained as `raw` for future feature growth.
 
 - Calls `GET /pages/{page_id}/markdown`.
 - Uses the shared request limiter and HTTP 429 retry handling.
-- Returns the Markdown body together with `truncated` and
-  `unknown_block_ids` response metadata.
+- When Notion reports `truncated=true`, requests every `unknown_block_id`
+  through the same endpoint and replaces the matching `<unknown>` tag at its
+  original position when the subtree returns non-empty Markdown.
+- Keeps inaccessible or unsupported subtrees as `<unknown>` tags, records their
+  IDs, and returns the attempted snapshot with `truncated=false` so sync can
+  continue without switching to the block-tree fallback solely because of
+  truncation.
 - During advanced-cloze parsing, the Markdown body also recovers table cell,
   row, and column colors that are absent from the block API response.
 

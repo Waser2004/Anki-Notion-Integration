@@ -226,7 +226,6 @@ class CardsPage(QWidget):
             db = Database(self._context.db_path)
             client = NotionClient.from_settings(db, profile_name=self._resolve_profile_name(self._context))
             settings = SettingsStore(db, profile_name=self._resolve_profile_name(self._context))
-            enable_cloze = bool(settings.get_value("enable_cloze_parsing"))
             enable_gray_toggle_cloze = bool(settings.get_value("enable_gray_toggle_cloze_parsing"))
             cloze_marker_colors = list(settings.get_value("cloze_marker_colors"))
             blocks = client.get_page_blocks_shallow(page_id)
@@ -236,8 +235,7 @@ class CardsPage(QWidget):
                 if block.block_type == "toggle":
                     card_kind = (
                         "cloze"
-                        if enable_cloze
-                        and cloze_parser.is_advanced_container(
+                        if cloze_parser.is_advanced_container(
                             block,
                             enable_gray_toggle_cloze=enable_gray_toggle_cloze,
                         )

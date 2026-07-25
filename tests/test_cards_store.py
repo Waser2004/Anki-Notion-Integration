@@ -74,6 +74,22 @@ class CardsStoreTests(unittest.TestCase):
                 """,
                 ("block-1", "page-a", None, "input", "hash", 0),
             )
+            connection.execute(
+                """
+                INSERT INTO notion_toggle_snapshots (
+                    notion_page_id, notion_block_id, source_hash
+                ) VALUES (?, ?, ?)
+                """,
+                ("page-a", "block-1", "source-hash"),
+            )
+            connection.execute(
+                """
+                UPDATE pages
+                SET content_hash = ?
+                WHERE notion_page_id = ?
+                """,
+                ("page-hash", "page-a"),
+            )
             connection.commit()
         finally:
             connection.close()
@@ -83,3 +99,38 @@ class CardsStoreTests(unittest.TestCase):
 
         self._store.set_card_excluded("page-a", "block-1", False)
         self.assertEqual(self._store.get_excluded_block_ids_for_page("page-a"), set())
+
+        connection = self._db.connect()
+        try:
+            card_row = connection.execute(
+                """
+                SELECT content_hash
+                FROM cards
+                WHERE notion_block_id = ?
+                """,
+                ("block-1",),
+            ).fetchone()
+            snapshot_row = connection.execute(
+                """
+                SELECT source_hash
+                FROM notion_toggle_snapshots
+                WHERE notion_page_id = ? AND notion_block_id = ?
+                """,
+                ("page-a", "block-1"),
+            ).fetchone()
+            page_row = connection.execute(
+                """
+                SELECT content_hash
+                FROM pages
+                WHERE notion_page_id = ?
+                """,
+                ("page-a",),
+            ).fetchone()
+        finally:
+            connection.close()
+
+        # The Anki payload hash remains the last written string, while source
+        # gates are cleared so the newly eligible card is reparsed.
+        self.assertEqual(str(card_row["content_hash"]), "hash")
+        self.assertIsNone(snapshot_row)
+        self.assertIsNone(page_row["content_hash"])

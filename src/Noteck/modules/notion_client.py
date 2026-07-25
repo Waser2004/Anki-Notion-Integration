@@ -106,6 +106,10 @@ _MARKDOWN_ATTRIBUTE_RE = re.compile(
     r"([A-Za-z][\w-]*)\s*=\s*([\"'])(.*?)\2", re.DOTALL
 )
 _MARKDOWN_TAG_RE = re.compile(r"<[^>]+>")
+_MARKDOWN_UNKNOWN_RE = re.compile(
+    r"<unknown\b(?P<attrs>[^>]*)/?>",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def merge_markdown_table_colors(
@@ -172,6 +176,40 @@ def _markdown_attributes(raw_attributes: str) -> dict[str, str]:
         name.lower(): value.strip()
         for name, _, value in _MARKDOWN_ATTRIBUTE_RE.findall(raw_attributes)
     }
+
+
+def _notion_id_key(value: Any) -> str:
+    """Normalize dashed and compact Notion IDs for URL-fragment matching."""
+    return str(value or "").strip().lower().replace("-", "")
+
+
+def _replace_unknown_markdown_tags(
+    markdown: str,
+    replacements: Mapping[str, str],
+) -> str:
+    """Replace fetched ``<unknown>`` placeholders at their original positions."""
+    normalized_replacements = {
+        _notion_id_key(block_id): replacement
+        for block_id, replacement in replacements.items()
+        if _notion_id_key(block_id) and replacement
+    }
+
+    def replace(match: re.Match[str]) -> str:
+        """Match an unknown block through the ID in its Notion URL."""
+        attributes = _markdown_attributes(match.group("attrs"))
+        block_url = attributes.get("url", "")
+        parsed_url = parse.urlparse(block_url)
+        candidates = (
+            parsed_url.fragment,
+            parsed_url.path.rstrip("/").rsplit("/", 1)[-1],
+        )
+        for candidate in candidates:
+            replacement = normalized_replacements.get(_notion_id_key(candidate))
+            if replacement is not None:
+                return replacement
+        return match.group(0)
+
+    return _MARKDOWN_UNKNOWN_RE.sub(replace, markdown or "")
 
 
 def _markdown_color(value: Any) -> str | None:
@@ -497,11 +535,9 @@ class NotionClient:
     def get_page_markdown(self, page_id: str) -> NotionMarkdownSnapshot:
         """Return a page's complete enhanced Markdown representation."""
         payload = asyncio.run(
-            self._request_json_with_rate_limit_retry(
-                "GET",
-                f"/pages/{page_id}/markdown",
-                None,
-                limiter=self._tree_rate_limiter,
+            self._fetch_complete_markdown_payload(
+                page_id,
+                visited=frozenset(),
             )
         )
         unknown_block_ids = payload.get("unknown_block_ids")
@@ -792,11 +828,9 @@ class NotionClient:
             None,
             limiter=self._tree_rate_limiter,
         )
-        markdown_payload = await self._request_json_with_rate_limit_retry(
-            "GET",
-            f"/pages/{page_id}/markdown",
-            None,
-            limiter=self._tree_rate_limiter,
+        markdown_payload = await self._fetch_complete_markdown_payload(
+            page_id,
+            visited=frozenset(),
         )
         shallow_blocks = await self._fetch_block_children_async(
             page_id,
@@ -821,6 +855,67 @@ class NotionClient:
             ),
             shallow_blocks    = tuple(shallow_blocks),
         )
+
+    async def _fetch_complete_markdown_payload(
+        self,
+        page_id: str,
+        *,
+        visited: frozenset[str],
+    ) -> dict[str, Any]:
+        """Resolve truncated Markdown subtrees while retaining inaccessible tags."""
+        page_key = _notion_id_key(page_id)
+        payload = await self._request_json_with_rate_limit_retry(
+            "GET",
+            f"/pages/{page_id}/markdown",
+            None,
+            limiter=self._tree_rate_limiter,
+        )
+        if not bool(payload.get("truncated")):
+            return payload
+
+        unknown_block_ids = payload.get("unknown_block_ids")
+        if not isinstance(unknown_block_ids, list):
+            unknown_block_ids = []
+
+        replacements: dict[str, str] = {}
+        unresolved_ids: list[str] = []
+        next_visited = visited | ({page_key} if page_key else set())
+        for raw_block_id in unknown_block_ids:
+            block_id = str(raw_block_id)
+            block_key = _notion_id_key(block_id)
+            if not block_key or block_key in next_visited:
+                unresolved_ids.append(block_id)
+                continue
+            try:
+                subtree = await self._fetch_complete_markdown_payload(
+                    block_id,
+                    visited=next_visited,
+                )
+            except NotionApiError:
+                # Permission-limited unknown blocks return object_not_found and
+                # remain explicit unsupported placeholders in the parent.
+                unresolved_ids.append(block_id)
+                continue
+
+            subtree_markdown = str(subtree.get("markdown") or "")
+            if not subtree_markdown.strip():
+                unresolved_ids.append(block_id)
+                continue
+            replacements[block_id] = subtree_markdown
+            nested_unknown_ids = subtree.get("unknown_block_ids")
+            if isinstance(nested_unknown_ids, list):
+                unresolved_ids.extend(str(value) for value in nested_unknown_ids)
+
+        resolved_payload = dict(payload)
+        resolved_payload["markdown"] = _replace_unknown_markdown_tags(
+            str(payload.get("markdown") or ""),
+            replacements,
+        )
+        # Every advertised unknown block has now been attempted. Remaining tags
+        # represent unsupported or inaccessible content, not a fallback signal.
+        resolved_payload["truncated"] = False
+        resolved_payload["unknown_block_ids"] = unresolved_ids
+        return resolved_payload
 
     def _normalize_icon(self, icon_payload: dict[str, Any] | None) -> dict[str, Any] | None:
         """Return the icon payload if present."""

@@ -25,16 +25,26 @@ data` advances whenever a concurrent page job finishes, followed by `Parsing
 page data` as each prepared page is reconciled sequentially.
 
 1. Expiring signature parameters are removed from media URLs before hashing.
-2. The cleaned full-page hash is stored in `pages.content_hash`.
+2. The cleaned full-page hash is stored in `pages.content_hash` only after
+   enabled top-level cloze parsing completes without errors. While cloze
+   parsing is paused, the last processed hash is retained so re-enabling it
+   reparses changes made during the pause.
 3. Top-level regular-toggle Markdown sources are aligned by order with shallow
    Notion `toggle` blocks, which provide stable block IDs.
-4. Each successfully handled toggle source hash is stored separately.
+4. Each successfully parsed toggle source hash is stored separately. Excluded,
+   disabled-cloze, and otherwise unparsed toggles retain their last processed
+   hash. Unexcluding a card clears its toggle and page-level source gates so a
+   later eligible sync retries it without changing the card's last-written
+   payload hash.
 5. Only new, changed, repair-required, or parser-refresh toggles have their
    descendants fetched recursively.
 
-If the Markdown response is truncated, malformed, or cannot be aligned
-unambiguously with the shallow root toggles, Noteck retrieves the complete block
-tree for that page. This preserves correctness instead of guessing identities.
+When the Markdown response is truncated, Noteck requests each advertised
+`unknown_block_id` through the same Markdown endpoint and replaces its
+`<unknown>` tag in place when usable Markdown is returned. Inaccessible or
+unsupported blocks remain explicit `<unknown>` tags. Malformed Markdown or
+content that still cannot be aligned unambiguously with the shallow root
+toggles uses the complete block-tree path instead of guessing identities.
 
 Top-level cloze paragraphs are already complete in the shallow block response,
 so they do not require descendant retrieval. They are parsed only when the

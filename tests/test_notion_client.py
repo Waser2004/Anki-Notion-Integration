@@ -317,6 +317,86 @@ class NotionClientPageTreeQueueTests(unittest.TestCase):
         self.assertEqual(snapshot.unknown_block_ids, ("unknown-1",))
         self.assertEqual(calls, ["https://api.notion.com/v1/pages/page-1/markdown"])
 
+    def test_get_page_markdown_replaces_truncated_unknown_subtree_in_place(self) -> None:
+        """Recovered table Markdown must retain its original toggle scope and colors."""
+        calls: list[str] = []
+        unknown_id = "11111111-2222-3333-4444-555555555555"
+
+        def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> NotionResponse:
+            _ = (method, headers, body, timeout)
+            calls.append(url)
+            if url.endswith("/pages/page-1/markdown"):
+                return _json_response(
+                    {
+                        "id": "page-1",
+                        "markdown": (
+                            "<details>\n<summary>[cloze] Table</summary>\n"
+                            f'<unknown url="https://www.notion.so/Page#{unknown_id.replace("-", "")}"/>\n'
+                            "</details>"
+                        ),
+                        "truncated": True,
+                        "unknown_block_ids": [unknown_id],
+                    }
+                )
+            if url.endswith(f"/pages/{unknown_id}/markdown"):
+                return _json_response(
+                    {
+                        "id": unknown_id,
+                        "markdown": '<table><tr><td color="yellow_background">Term</td></tr></table>',
+                        "truncated": False,
+                        "unknown_block_ids": [],
+                    }
+                )
+            self.fail(f"Unexpected URL: {url}")
+
+        with patch.object(notion_client_module, "NOTION_REQUESTS_PER_SECOND", 1_000_000.0):
+            snapshot = NotionClient(api_token="token", transport=transport).get_page_markdown("page-1")
+
+        self.assertFalse(snapshot.truncated)
+        self.assertEqual(snapshot.unknown_block_ids, ())
+        self.assertNotIn("<unknown", snapshot.markdown)
+        self.assertIn('<td color="yellow_background">Term</td>', snapshot.markdown)
+        self.assertLess(snapshot.markdown.index("<summary>"), snapshot.markdown.index("<table>"))
+        self.assertLess(snapshot.markdown.index("<table>"), snapshot.markdown.index("</details>"))
+        self.assertEqual(
+            calls,
+            [
+                "https://api.notion.com/v1/pages/page-1/markdown",
+                f"https://api.notion.com/v1/pages/{unknown_id}/markdown",
+            ],
+        )
+
+    def test_get_page_markdown_keeps_unknown_tag_when_subtree_has_no_markdown(self) -> None:
+        """An unreadable or unsupported subtree remains explicit without a fallback."""
+        unknown_id = "unknown-1"
+
+        def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> NotionResponse:
+            _ = (method, headers, body, timeout)
+            if url.endswith("/pages/page-1/markdown"):
+                return _json_response(
+                    {
+                        "id": "page-1",
+                        "markdown": f'<unknown url="https://www.notion.so/Page#{unknown_id}"/>',
+                        "truncated": True,
+                        "unknown_block_ids": [unknown_id],
+                    }
+                )
+            return _json_response(
+                {
+                    "id": unknown_id,
+                    "markdown": "",
+                    "truncated": False,
+                    "unknown_block_ids": [],
+                }
+            )
+
+        with patch.object(notion_client_module, "NOTION_REQUESTS_PER_SECOND", 1_000_000.0):
+            snapshot = NotionClient(api_token="token", transport=transport).get_page_markdown("page-1")
+
+        self.assertFalse(snapshot.truncated)
+        self.assertEqual(snapshot.unknown_block_ids, (unknown_id,))
+        self.assertIn("<unknown", snapshot.markdown)
+
     def test_get_page_content_fetches_paginated_descendants_with_bounded_workers(self) -> None:
         calls: list[str] = []
         active_requests = 0
