@@ -126,10 +126,11 @@ class CardModelTests(unittest.TestCase):
         back = definition.templates[0].back
 
         self.assertIn(
-            '{{#Extra}}<div class="notion-back" style="font-style: italic">'
-            '{{Extra}}</div>{{/Extra}}',
+            '{{#Extra}}<hr id="answer"><div class="notion-back">'
+            "{{Extra}}</div>{{/Extra}}",
             back,
         )
+        self.assertNotIn("font-style: italic", back)
 
     def test_existing_cloze_model_adds_background_field_without_overwriting_templates(self) -> None:
         definition = next(item for item in _MODEL_DEFINITIONS if item.name == MODEL_NAME_CLOZE)

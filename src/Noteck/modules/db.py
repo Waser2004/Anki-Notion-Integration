@@ -74,9 +74,8 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX IF NOT EXISTS idx_card_type_overrides_page ON card_type_overrides(notion_page_id)",
         ),
     ),
-    # Version 4 intentionally supersedes unreleased development schemas 2 and 3.
     Migration(
-        version=4,
+        version=2,
         statements=(
             """
             CREATE TABLE IF NOT EXISTS notion_toggle_snapshots (

@@ -62,7 +62,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             latest_version = connection.execute(
                 "SELECT MAX(version) FROM schema_migrations"
             ).fetchone()[0]
-            self.assertEqual(latest_version, 4)
+            self.assertEqual(latest_version, 2)
         finally:
             connection.close()
 
@@ -76,7 +76,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             versions = connection.execute(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
-            self.assertEqual([int(row[0]) for row in versions], [1, 4])
+            self.assertEqual([int(row[0]) for row in versions], [1, 2])
 
             page_columns = _column_names(connection, "pages")
             self.assertIn("anki_deck_id", page_columns)
@@ -90,42 +90,40 @@ class DatabaseMigrationTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_development_databases_are_upgraded_with_toggle_snapshots(self) -> None:
-        for previous_version in (1, 2, 3):
-            with self.subTest(previous_version=previous_version):
-                db_path = Path(self._temp_dir.name) / f"migration-{previous_version}.db"
-                connection = sqlite3.connect(db_path)
-                try:
-                    connection.executescript(
-                        f"""
-                        CREATE TABLE schema_migrations (
-                            version INTEGER PRIMARY KEY,
-                            applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-                        );
-                        INSERT INTO schema_migrations (version) VALUES ({previous_version});
-                        CREATE TABLE pages (
-                            notion_page_id TEXT PRIMARY KEY,
-                            anki_deck_name TEXT NOT NULL,
-                            sync_enabled INTEGER NOT NULL DEFAULT 1
-                        );
-                        """
-                    )
-                    connection.commit()
-                finally:
-                    connection.close()
+    def test_version_one_database_is_upgraded_with_toggle_snapshots(self) -> None:
+        """The only released predecessor receives the version-two snapshot table."""
+        connection = sqlite3.connect(self._db_path)
+        try:
+            connection.executescript(
+                """
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                INSERT INTO schema_migrations (version) VALUES (1);
+                CREATE TABLE pages (
+                    notion_page_id TEXT PRIMARY KEY,
+                    anki_deck_name TEXT NOT NULL,
+                    sync_enabled INTEGER NOT NULL DEFAULT 1
+                );
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
 
-                Database(db_path).initialize()
+        Database(self._db_path).initialize()
 
-                connection = sqlite3.connect(db_path)
-                try:
-                    latest_version = connection.execute(
-                        "SELECT MAX(version) FROM schema_migrations"
-                    ).fetchone()[0]
-                    snapshot_columns = _column_names(
-                        connection,
-                        "notion_toggle_snapshots",
-                    )
-                finally:
-                    connection.close()
-                self.assertEqual(latest_version, 4)
-                self.assertIn("source_hash", snapshot_columns)
+        connection = sqlite3.connect(self._db_path)
+        try:
+            latest_version = connection.execute(
+                "SELECT MAX(version) FROM schema_migrations"
+            ).fetchone()[0]
+            snapshot_columns = _column_names(
+                connection,
+                "notion_toggle_snapshots",
+            )
+        finally:
+            connection.close()
+        self.assertEqual(latest_version, 2)
+        self.assertIn("source_hash", snapshot_columns)
