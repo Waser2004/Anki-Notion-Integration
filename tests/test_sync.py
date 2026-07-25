@@ -345,6 +345,18 @@ class _FakeNotionClientWithParagraphs(_FakeNotionClient):
         )
 
 
+class _SelectiveParagraphClozeClient(_FakeNotionClientWithParagraphs):
+    """Expose stable Markdown so unchanged paragraph clozes can skip parsing."""
+
+    def get_page_markdown(self, page_id: str) -> NotionMarkdownSnapshot:
+        return NotionMarkdownSnapshot(
+            page_id=page_id,
+            markdown="Excluded\n\nIncluded",
+            truncated=False,
+            unknown_block_ids=(),
+        )
+
+
 class _MutableToggleClient(_FakeNotionClient):
     """Return mutable toggle content while keeping all Notion timestamps fixed."""
 
@@ -547,13 +559,14 @@ class _SelectiveAdvancedClozeClient(_FakeNotionClient):
     def __init__(self) -> None:
         super().__init__()
         self.recursive_calls = 0
+        self.title = "[cloze] Recovery"
 
     def get_page_markdown(self, page_id: str) -> NotionMarkdownSnapshot:
         return NotionMarkdownSnapshot(
             page_id=page_id,
             markdown=(
                 "<details>\n"
-                "<summary>[cloze] Recovery</summary>\n"
+                f"<summary>{self.title}</summary>\n"
                 "\tMarked answer\n"
                 "</details>"
             ),
@@ -593,8 +606,7 @@ class _SelectiveAdvancedClozeClient(_FakeNotionClient):
     def get_page_content(self, page_id: str) -> list[NotionBlock]:
         return [self._toggle(page_id, children=tuple(self.get_block_children_recursive("advanced-toggle")))]
 
-    @staticmethod
-    def _toggle(page_id: str, *, children: tuple[NotionBlock, ...]) -> NotionBlock:
+    def _toggle(self, page_id: str, *, children: tuple[NotionBlock, ...]) -> NotionBlock:
         """Build the stable advanced-cloze root used across all sync runs."""
         return NotionBlock(
             block_id="advanced-toggle",
@@ -608,8 +620,8 @@ class _SelectiveAdvancedClozeClient(_FakeNotionClient):
                     "rich_text": [
                         {
                             "type": "text",
-                            "plain_text": "[cloze] Recovery",
-                            "text": {"content": "[cloze] Recovery"},
+                            "plain_text": self.title,
+                            "text": {"content": self.title},
                         }
                     ]
                 },
@@ -1196,6 +1208,7 @@ class SyncTests(unittest.TestCase):
         ):
             created = sync_notion_to_anki(mw=mw, db_path=self._db_path)
             unchanged = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            recursive_calls_after_unchanged = client.recursive_calls
 
             mapping = _SYNC_MODULE._load_existing_cards_for_page(
                 self._db, "page-1"
@@ -1209,14 +1222,40 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(created.stats.cards_created, 1)
         self.assertTrue(unchanged.ok)
         self.assertEqual(unchanged.stats.cards_unchanged, 1)
+        self.assertEqual(recursive_calls_after_unchanged, 1)
         self.assertTrue(recreated.ok)
         self.assertEqual(recreated.stats.cards_created, 1)
         self.assertEqual(recreated.stats.cards_missing_note, 1)
+        self.assertEqual(client.recursive_calls, 2)
         repaired_mapping = _SYNC_MODULE._load_existing_cards_for_page(
             self._db, "page-1"
         )["advanced-toggle"]
         self.assertNotEqual(int(repaired_mapping["anki_note_id"]), deleted_note_id)
         self.assertIn(int(repaired_mapping["anki_note_id"]), collection.notes)
+
+    def test_removing_cloze_marker_converts_unchanged_mapping_to_page_type(self) -> None:
+        """A shallow title change must still convert a former advanced cloze."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        client = _SelectiveAdvancedClozeClient()
+        self._db.set_setting("enable_cloze_parsing", "1")
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ):
+            created = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            client.title = "Recovery"
+            converted = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(created.ok)
+        self.assertTrue(converted.ok)
+        self.assertEqual(client.recursive_calls, 2)
+        mapping = _SYNC_MODULE._load_existing_cards_for_page(
+            self._db, "page-1"
+        )["advanced-toggle"]
+        self.assertEqual(mapping["card_type"], "basic")
 
     def test_markdown_snapshots_fetch_only_new_or_changed_toggles(self) -> None:
         collection = _FakeCollection()
@@ -1268,6 +1307,42 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(
             [str(row["notion_block_id"]) for row in snapshot_rows],
             ["block-1", "block-2"],
+        )
+
+    def test_unchanged_markdown_skips_page_parsing_and_logs_reason(self) -> None:
+        """A stable page hash must bypass both toggle and paragraph-cloze parsers."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        client = _SelectiveParagraphClozeClient()
+        self._db.set_setting("enable_cloze_parsing", "1")
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            wraps=_SYNC_MODULE.parse_page_to_cards,
+        ) as parse_mock:
+            with self.assertLogs("noteck.sync", level="INFO") as first_captured:
+                first = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            first_parse_count = parse_mock.call_count
+            with self.assertLogs("noteck.sync", level="INFO") as captured:
+                second = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(first.ok)
+        self.assertGreater(first_parse_count, 0)
+        self.assertTrue(second.ok)
+        self.assertEqual(parse_mock.call_count, first_parse_count)
+        self.assertGreater(second.stats.cards_unchanged, 0)
+        self.assertIn(
+            "Page parsed. page_id=page-1 reasons=",
+            "\n".join(first_captured.output),
+        )
+        self.assertIn(
+            "Page parsing skipped. page_id=page-1 reason=markdown_unchanged",
+            "\n".join(captured.output),
         )
 
     def test_ambiguous_markdown_alignment_falls_back_to_full_page_tree(self) -> None:
@@ -1919,6 +1994,144 @@ class SyncTests(unittest.TestCase):
         self.assertIn('class="language-mermaid"', back_html)
         self.assertIn("graph TD", back_html)
         self.assertIn("A --&gt; B", back_html)
+
+    def test_failed_mermaid_retries_locally_without_recursive_refetch(self) -> None:
+        """A retained Mermaid fallback must not refetch unchanged toggle descendants."""
+        collection = _FakeCollection(media_dir=self._media_dir)
+        mw = _FakeMw(collection)
+        client = _SelectiveAdvancedClozeClient()
+        client.title = "Recovery"
+        mermaid_source = "graph TD\nA --> B"
+        encoded_mermaid = base64.urlsafe_b64encode(mermaid_source.encode("utf-8")).decode("ascii")
+        payload = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="advanced-toggle",
+            front_html="<p>front</p>",
+            back_html=(
+                '<figure class="notion-mermaid"><div class="notion-mermaid-source" '
+                f'data-mermaid="{encoded_mermaid}"><pre class="code"><code class="language-mermaid">'
+                "graph TD\nA --&gt; B"
+                "</code></pre></div></figure>"
+            ),
+            content_hash="hash-mermaid-fallback",
+            last_edited_time="2026-02-04T00:00:00.000Z",
+        )
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[payload],
+        ) as parse_mock, patch.object(
+            _SYNC_MODULE,
+            "_render_mermaid_svg",
+            return_value=None,
+        ):
+            first = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            second = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(first.ok)
+        self.assertTrue(second.ok)
+        self.assertEqual(client.recursive_calls, 1)
+        parse_mock.assert_called_once()
+        self.assertEqual(second.stats.cards_unchanged, 1)
+        self.assertEqual(
+            [warning.code for warning in second.warnings],
+            ["mermaid_render_failed"],
+        )
+
+    def test_pending_mermaid_can_recover_locally_without_recursive_refetch(self) -> None:
+        """A later successful media retry should update Anki from its saved Back field."""
+        collection = _FakeCollection(media_dir=self._media_dir)
+        mw = _FakeMw(collection)
+        client = _SelectiveAdvancedClozeClient()
+        client.title = "Recovery"
+        mermaid_source = "graph TD\nA --> B"
+        encoded_mermaid = base64.urlsafe_b64encode(mermaid_source.encode("utf-8")).decode("ascii")
+        payload = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="advanced-toggle",
+            front_html="<p>front</p>",
+            back_html=(
+                '<figure class="notion-mermaid"><div class="notion-mermaid-source" '
+                f'data-mermaid="{encoded_mermaid}"><pre class="code"><code class="language-mermaid">'
+                "graph TD\nA --&gt; B"
+                "</code></pre></div></figure>"
+            ),
+            content_hash="hash-mermaid-retry",
+            last_edited_time="2026-02-04T00:00:00.000Z",
+        )
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[payload],
+        ) as parse_mock:
+            with patch.object(_SYNC_MODULE, "_render_mermaid_svg", return_value=None):
+                first = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            with patch.object(_SYNC_MODULE, "_render_mermaid_svg", return_value=b"<svg></svg>"):
+                second = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(first.ok)
+        self.assertTrue(second.ok)
+        self.assertEqual(client.recursive_calls, 1)
+        parse_mock.assert_called_once()
+        self.assertEqual(second.stats.cards_updated, 1)
+        saved_note = next(iter(collection.notes.values()))
+        self.assertNotIn("data-mermaid=", str(saved_note.get("Back", "")))
+        self.assertIn('class="notion-mermaid-dark"', str(saved_note.get("Back", "")))
+
+    def test_failed_cloze_media_retries_locally_without_reparsing(self) -> None:
+        """Unchanged paragraph clozes should retry remote images from saved note HTML."""
+        collection = _FakeCollection(media_dir=self._media_dir)
+        mw = _FakeMw(collection)
+        client = _SelectiveParagraphClozeClient()
+        self._db.set_setting("enable_cloze_parsing", "1")
+        payload = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="cloze-included",
+            card_type="cloze",
+            model_name="Notion (Cloze)",
+            fields={
+                "Text": "{{c1::Included}}",
+                "Extra": '<img src="https://example.com/unavailable.png" alt="img"/>',
+                "Notion Block ID": "cloze-included",
+            },
+            content_hash="hash-cloze-media-fallback",
+            last_edited_time="2026-02-04T00:00:00.000Z",
+        )
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[payload],
+        ) as parse_mock, patch.object(
+            _SYNC_MODULE,
+            "_download_bytes",
+            return_value=None,
+        ):
+            first = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            second = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(first.ok)
+        self.assertTrue(second.ok)
+        parse_mock.assert_called_once()
+        self.assertEqual(second.stats.cards_unchanged, 1)
+        self.assertEqual(
+            [warning.code for warning in second.warnings],
+            ["media_localization_failed"],
+        )
 
     def test_sync_marks_unchanged_when_hash_matches(self) -> None:
         collection = _FakeCollection()

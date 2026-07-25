@@ -37,8 +37,15 @@ unambiguously with the shallow root toggles, Noteck retrieves the complete block
 tree for that page. This preserves correctness instead of guessing identities.
 
 Top-level cloze paragraphs are already complete in the shallow block response,
-so they do not require descendant retrieval. Parsed payload hashes still decide
-whether an Anki note needs to be created or updated.
+so they do not require descendant retrieval. They are parsed only when the
+full-page Markdown hash changed, a parser/settings refresh is pending, or a
+mapped note needs repair. Parsed payload hashes still decide whether an Anki
+note needs to be created or updated.
+
+The sync log records one page-level parsing outcome. Skipped pages report
+`reason=markdown_unchanged`; parsed pages report the content, refresh, or repair
+reason that required parsing. Full-tree fallbacks report the Markdown snapshot
+or alignment problem that made selective parsing unsafe.
 
 Advanced cloze toggles are reconciled by the root-toggle pass and are excluded
 from stale top-level-paragraph cleanup. If a mapped Anki note is missing, the
@@ -47,8 +54,18 @@ creating a replacement, Noteck searches the managed `Notion Block ID` field and
 relinks the oldest compatible existing note. This protects against duplicates
 when a profile restore or local database reset invalidates only Noteck's numeric
 note mapping. A replacement is created only when no compatible note remains.
+The shallow toggle title and color also identify `[cloze]` and enabled
+gray-background containers before descendant retrieval, so their stored
+`cloze` mapping is not mistaken for a change from the page's selectable default.
 Parser revision refreshes also expand root toggles once so mappings detached by
 an earlier parser or reconciliation bug can be recovered.
+
+Pending images and Mermaid source fallbacks are repaired from the saved Anki
+note HTML. They do not cause unchanged Notion toggle descendants to be fetched
+or parsed again. A successful local retry updates the note and media files; a
+failed retry preserves the usable fallback and reports a warning. Legacy
+single-theme Mermaid notes remain a recursive repair case because their saved
+HTML may not contain the source needed to build the current light/dark pair.
 
 The marker palette from the last successful cloze sync is stored in the internal
 settings row `_internal_cloze_marker_colors`. A changed palette forces cloze

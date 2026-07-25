@@ -660,8 +660,8 @@ def _sync_page_content(
     )
     if not isinstance(snapshot, NotionMarkdownSnapshot) or snapshot.truncated:
         _LOG.info(
-            "Markdown snapshot unavailable for selective sync; using full tree. "
-            "page_id=%s truncated=%s",
+            "Page being parsed. page_id=%s reason=markdown_snapshot_unavailable "
+            "truncated=%s mode=full_tree",
             page_id,
             getattr(snapshot, "truncated", None),
         )
@@ -690,8 +690,8 @@ def _sync_page_content(
     toggle_sources  = extract_root_toggle_markdown(snapshot.markdown)
     if toggle_sources is None or len(toggle_sources) != len(shallow_toggles):
         _LOG.warning(
-            "Markdown/root-toggle alignment was ambiguous; using full tree. "
-            "page_id=%s markdown_toggles=%s notion_toggles=%d",
+            "Page being parsed. page_id=%s reason=markdown_toggle_alignment_ambiguous "
+            "mode=full_tree markdown_toggles=%s notion_toggles=%d",
             page_id,
             None if toggle_sources is None else len(toggle_sources),
             len(shallow_toggles),
@@ -764,7 +764,9 @@ def _sync_page_content_selective(
     stored_page_hash     = _load_page_content_hash(db, page_id)
     current_page_hash    = hash_notion_markdown(snapshot.markdown)
     current_toggle_ids   = {toggle.block_id for toggle in shallow_toggles}
+    cloze_parser         = ClozeCardParser(cloze_marker_colors)
     errors: list[str] = []
+    page_parse_reasons: set[str] = set()
     _LOG.info(
         "Markdown page hash check. page_id=%s changed=%s stored=%s current=%s",
         page_id,
@@ -811,12 +813,24 @@ def _sync_page_content_selective(
             stats = _replace_stats(stats, cards_skipped=stats.cards_skipped + 1)
             continue
 
-        effective_card_type = _effective_card_type_for_block(
-            block_id,
+        expected_card_type = _expected_card_type_for_toggle(
+            toggle,
             default_card_type=default_card_type,
             card_type_overrides=card_type_overrides,
+            enable_cloze=enable_cloze,
+            enable_gray_toggle_cloze=enable_gray_toggle_cloze,
+            cloze_parser=cloze_parser,
         )
-        needs_recursive_fetch = force_toggle_refresh or previous_source_hash != source_hash
+
+        parse_reasons: list[str] = []
+        if force_toggle_refresh:
+            parse_reasons.append("parser_refresh")
+        if previous_source_hash is None:
+            parse_reasons.append("no_stored_toggle_markdown")
+        elif previous_source_hash != source_hash:
+            parse_reasons.append("toggle_markdown_changed")
+        needs_recursive_fetch = bool(parse_reasons)
+        note: Any | None = None
 
         # If the toggle is unchanged and has a valid mapping, we can skip the recursive fetch.
         if mapping is None:
@@ -827,27 +841,43 @@ def _sync_page_content_selective(
         # Check if the existing mapping's card type or Anki note is no longer valid, which would require a recursive fetch.
         else:
             mapped_type = normalize_card_type(mapping["card_type"], default=BASIC)
-            if mapped_type != effective_card_type:
+            if mapped_type != expected_card_type:
+                parse_reasons.append("card_type_changed")
                 needs_recursive_fetch = True
 
             note_id = mapping["anki_note_id"]
             note = _get_note(collection, note_id) if note_id is not None else None
-            if (
-                note_id is None
-                or note is None
-                or _note_back_needs_mermaid_theme_upgrade(note)
-                or _note_back_contains_pending_media(note)
-            ):
+            if note_id is None or note is None:
+                parse_reasons.append("anki_note_missing")
+                needs_recursive_fetch = True
+            elif _note_back_needs_mermaid_theme_upgrade(note):
+                parse_reasons.append("mermaid_theme_upgrade")
                 needs_recursive_fetch = True
 
         if not needs_recursive_fetch and mapping is not None:
             note_id = mapping["anki_note_id"]
+            media_updated = False
+            if note is not None and _note_contains_pending_media(note):
+                stats, media_updated, media_errors = _backfill_pending_note_media(
+                    db=db,
+                    collection=collection,
+                    note=note,
+                    page_id=page_id,
+                    block_id=block_id,
+                    stats=stats,
+                    warnings=warnings,
+                )
+                errors.extend(media_errors)
+                if media_errors:
+                    continue
             if note_id is not None:
                 _ensure_note_cards_in_deck(collection, note_id, deck_id)
-            stats = _replace_stats(stats, cards_unchanged=stats.cards_unchanged + 1)
+            if not media_updated:
+                stats = _replace_stats(stats, cards_unchanged=stats.cards_unchanged + 1)
             continue
 
         # recursively fetch the toggle's children and parse them into card payloads
+        page_parse_reasons.update(parse_reasons)
         children = client.get_block_children_recursive(block_id)
         expanded_toggle = NotionBlock(
             block_id=toggle.block_id,
@@ -899,30 +929,163 @@ def _sync_page_content_selective(
         if not toggle_errors:
             _upsert_toggle_source_hash(db, page_id, block_id, source_hash)
 
-    stats, cloze_errors, cancelled = _sync_shallow_cloze_content(
-        db                  = db,
-        collection          = collection,
-        page_id             = page_id,
-        deck_id             = deck_id,
-        blocks              = shallow_blocks,
-        existing_cards      = existing_cards,
-        stats               = stats,
-        default_card_type   = default_card_type,
-        card_type_overrides = card_type_overrides,
-        enable_cloze        = enable_cloze,
-        enable_gray_toggle_cloze = enable_gray_toggle_cloze,
-        cloze_marker_colors = cloze_marker_colors,
-        force_cloze_refresh = force_cloze_refresh,
-        should_cancel       = should_cancel,
-        warnings            = warnings,
+    cloze_parse_reasons = (
+        _cloze_parse_reasons(
+            collection=collection,
+            blocks=shallow_blocks,
+            existing_cards=existing_cards,
+            current_toggle_ids=current_toggle_ids,
+            markdown_changed=stored_page_hash != current_page_hash,
+            force_cloze_refresh=force_cloze_refresh,
+        )
+        if enable_cloze
+        else set()
     )
-    errors.extend(cloze_errors)
-    if cancelled:
-        return stats, errors, True
+    if cloze_parse_reasons:
+        page_parse_reasons.update(cloze_parse_reasons)
+        stats, cloze_errors, cancelled = _sync_shallow_cloze_content(
+            db                  = db,
+            collection          = collection,
+            page_id             = page_id,
+            deck_id             = deck_id,
+            blocks              = shallow_blocks,
+            existing_cards      = existing_cards,
+            stats               = stats,
+            default_card_type   = default_card_type,
+            card_type_overrides = card_type_overrides,
+            enable_cloze        = enable_cloze,
+            enable_gray_toggle_cloze = enable_gray_toggle_cloze,
+            cloze_marker_colors = cloze_marker_colors,
+            should_cancel       = should_cancel,
+            warnings            = warnings,
+        )
+        errors.extend(cloze_errors)
+        if cancelled:
+            return stats, errors, True
+    else:
+        stats, local_media_errors = _sync_unchanged_cloze_cards_locally(
+            db=db,
+            collection=collection,
+            page_id=page_id,
+            existing_cards=existing_cards,
+            current_toggle_ids=current_toggle_ids,
+            deck_id=deck_id,
+            stats=stats,
+            warnings=warnings,
+        )
+        errors.extend(local_media_errors)
 
     if not errors:
         _set_page_content_hash(db, page_id, current_page_hash)
+    if page_parse_reasons:
+        _LOG.info(
+            "Page parsed. page_id=%s reasons=%s",
+            page_id,
+            ",".join(sorted(page_parse_reasons)),
+        )
+    else:
+        skip_reason = (
+            "markdown_unchanged"
+            if stored_page_hash == current_page_hash
+            else "no_changed_card_sources"
+        )
+        _LOG.info("Page parsing skipped. page_id=%s reason=%s", page_id, skip_reason)
     return stats, errors, False
+
+
+def _cloze_parse_reasons(
+    *,
+    collection: Any,
+    blocks: list[NotionBlock],
+    existing_cards: dict[str, dict[str, Any]],
+    current_toggle_ids: set[str],
+    markdown_changed: bool,
+    force_cloze_refresh: bool,
+) -> set[str]:
+    """Return why shallow paragraph clozes must be parsed on this sync."""
+    has_reconciliation_target = any(
+        block.block_type == "paragraph"
+        and not (
+            existing_cards.get(block.block_id) is not None
+            and existing_cards[block.block_id]["excluded"]
+        )
+        for block in blocks
+    ) or any(
+        not mapping["excluded"]
+        and block_id not in current_toggle_ids
+        and normalize_card_type(mapping["card_type"], default=BASIC) == CLOZE
+        for block_id, mapping in existing_cards.items()
+    )
+    if not has_reconciliation_target:
+        return set()
+
+    reasons: set[str] = set()
+    if markdown_changed:
+        reasons.add("page_markdown_changed")
+    if force_cloze_refresh:
+        reasons.add("cloze_parser_refresh")
+
+    # An unchanged source still needs parsing when its mapped note requires repair.
+    for block_id, mapping in existing_cards.items():
+        if mapping["excluded"] or block_id in current_toggle_ids:
+            continue
+        if normalize_card_type(mapping["card_type"], default=BASIC) != CLOZE:
+            continue
+        note_id = mapping["anki_note_id"]
+        note = _get_note(collection, note_id) if note_id is not None else None
+        if note_id is None or note is None:
+            reasons.add("anki_note_missing")
+        elif _note_back_needs_mermaid_theme_upgrade(note):
+            reasons.add("mermaid_theme_upgrade")
+            
+    return reasons
+
+
+def _sync_unchanged_cloze_cards_locally(
+    *,
+    db: Database,
+    collection: Any,
+    page_id: str,
+    existing_cards: dict[str, dict[str, Any]],
+    current_toggle_ids: set[str],
+    deck_id: int,
+    stats: SyncStats,
+    warnings: list[SyncWarning] | None,
+) -> tuple[SyncStats, list[str]]:
+    """Repair local media and keep skipped paragraph clozes in their deck."""
+    errors: list[str] = []
+    for block_id, mapping in existing_cards.items():
+        if mapping["excluded"] or block_id in current_toggle_ids:
+            continue
+        if normalize_card_type(mapping["card_type"], default=BASIC) != CLOZE:
+            continue
+
+        stats = _replace_stats(stats, cards_seen=stats.cards_seen + 1)
+        note_id = mapping["anki_note_id"]
+        note = _get_note(collection, note_id) if note_id is not None else None
+        if note_id is None or note is None:
+            # Missing cloze notes are normally handled by _cloze_parse_reasons().
+            continue
+
+        media_updated = False
+        if _note_contains_pending_media(note):
+            stats, media_updated, media_errors = _backfill_pending_note_media(
+                db=db,
+                collection=collection,
+                note=note,
+                page_id=page_id,
+                block_id=block_id,
+                stats=stats,
+                warnings=warnings,
+            )
+            errors.extend(media_errors)
+            if media_errors:
+                continue
+
+        _ensure_note_cards_in_deck(collection, note_id, deck_id)
+        if not media_updated:
+            stats = _replace_stats(stats, cards_unchanged=stats.cards_unchanged + 1)
+    return stats, errors
 
 
 def _sync_shallow_cloze_content(
@@ -939,12 +1102,10 @@ def _sync_shallow_cloze_content(
     enable_cloze:        bool,
     enable_gray_toggle_cloze: bool,
     cloze_marker_colors: list[str] | None,
-    force_cloze_refresh: bool,
     should_cancel:       SyncCancelCheck | None,
     warnings:            list[SyncWarning] | None,
 ) -> tuple[SyncStats, list[str], bool]:
     """Parse top-level cloze paragraphs directly from the shallow page result."""
-    _ = force_cloze_refresh
     if not enable_cloze:
         return stats, [], False
 
@@ -1418,6 +1579,29 @@ def _effective_card_type_for_block(
     return normalize_default_selectable_card_type(default_card_type)
 
 
+def _expected_card_type_for_toggle(
+    toggle: NotionBlock,
+    *,
+    default_card_type:        str,
+    card_type_overrides:      dict[str, str],
+    enable_cloze:             bool,
+    enable_gray_toggle_cloze: bool,
+    cloze_parser:             ClozeCardParser,
+) -> str:
+    """Resolve the type a shallow root toggle will produce when parsed."""
+    if enable_cloze and cloze_parser.is_advanced_container(
+        toggle,
+        enable_gray_toggle_cloze=enable_gray_toggle_cloze,
+    ):
+        return CLOZE
+    
+    return _effective_card_type_for_block(
+        toggle.block_id,
+        default_card_type=default_card_type,
+        card_type_overrides=card_type_overrides,
+    )
+
+
 def _sync_one_payload(
     db: Database,
     collection: Any,
@@ -1580,12 +1764,20 @@ def _sync_one_payload(
                 _LOG.info("Card updated. page_id=%s block_id=%s note_id=%s reason=mermaid_theme_upgrade", page_id, payload.notion_block_id, note_id)
                 return _replace_stats(stats, cards_updated=stats.cards_updated + 1), [], False
             # Backfill older notes that still contain sync-time media placeholders.
-            if _note_back_contains_pending_media(note):
-                note["Back"] = _prepare_back_html_media(collection, _safe_note_field(note, "Back"))
-                _update_note(collection, note)
-                _upsert_card_mapping(db, payload, note_id, page_id)
-                _LOG.info("Card updated. page_id=%s block_id=%s note_id=%s reason=pending_media_backfill", page_id, payload.notion_block_id, note_id)
-                return _replace_stats(stats, cards_updated=stats.cards_updated + 1), [], False
+            if _note_contains_pending_media(note):
+                stats, media_updated, media_errors = _backfill_pending_note_media(
+                    db=db,
+                    collection=collection,
+                    note=note,
+                    page_id=page_id,
+                    block_id=payload.notion_block_id,
+                    stats=stats,
+                    warnings=warnings,
+                )
+                if media_errors:
+                    return stats, media_errors, False
+                if media_updated:
+                    return stats, [], False
             _LOG.debug("Card unchanged. page_id=%s block_id=%s note_id=%s card_type=%s", page_id, payload.notion_block_id, note_id, payload.card_type)
             return _replace_stats(stats, cards_unchanged=stats.cards_unchanged + 1), [], False
 
@@ -1823,11 +2015,81 @@ def _apply_payload_to_note(note: Any, payload: ToggleCardPayload) -> None:
             continue
 
 
-def _note_back_contains_pending_media(note: Any) -> bool:
-    """Return whether a note back still contains remote/media placeholders to localize."""
-    back_html = _safe_note_field(note, "Back")
-    lowered = back_html.lower()
+_MEDIA_NOTE_FIELDS = ("Back", "Text", "Extra")
+
+
+def _contains_pending_media_html(value: str) -> bool:
+    """Return whether rendered HTML still contains media requiring localization."""
+    lowered = value.lower()
     return ('data-mermaid="' in lowered) or ("<img" in lowered and 'src="http' in lowered)
+
+
+def _note_contains_pending_media(note: Any) -> bool:
+    """Return whether any rendered note field still contains pending media."""
+    return any(
+        _contains_pending_media_html(_safe_note_field(note, field_name))
+        for field_name in _MEDIA_NOTE_FIELDS
+    )
+
+
+def _backfill_pending_note_media(
+    *,
+    db: Database,
+    collection: Any,
+    note: Any,
+    page_id: str,
+    block_id: str,
+    stats: SyncStats,
+    warnings: list[SyncWarning] | None,
+) -> tuple[SyncStats, bool, list[str]]:
+    """Retry media from saved note HTML without refetching unchanged Notion blocks."""
+    try:
+        prepared_fields: dict[str, str] = {}
+        for field_name in _MEDIA_NOTE_FIELDS:
+            original_html = _safe_note_field(note, field_name)
+            if not _contains_pending_media_html(original_html):
+                continue
+
+            prepared_html = _prepare_back_html_media(collection, original_html)
+            stats = _record_media_fallback_warnings(
+                stats=stats,
+                warnings=warnings,
+                original_back=original_html,
+                prepared_back=prepared_html,
+                page_id=page_id,
+                block_id=block_id,
+            )
+            if prepared_html != original_html:
+                prepared_fields[field_name] = prepared_html
+
+        if not prepared_fields:
+            _LOG.info(
+                "Pending media fallback retained without Notion refetch. "
+                "page_id=%s block_id=%s",
+                page_id,
+                block_id,
+            )
+            return stats, False, []
+
+        for field_name, prepared_html in prepared_fields.items():
+            note[field_name] = prepared_html
+        
+        _update_note(collection, note)
+        _mark_card_synced(db, block_id)
+        _LOG.info(
+            "Pending media backfilled locally. page_id=%s block_id=%s",
+            page_id,
+            block_id,
+        )
+        return _replace_stats(stats, cards_updated=stats.cards_updated + 1), True, []
+    
+    except Exception as exc:
+        _LOG.exception(
+            "Pending media backfill failed. page_id=%s block_id=%s",
+            page_id,
+            block_id,
+        )
+        return stats, False, [f"Block {block_id}: {exc}"]
 
 
 def _note_back_needs_mermaid_theme_upgrade(note: Any) -> bool:
@@ -1850,8 +2112,12 @@ def _prepare_payload_media(collection: Any, payload: ToggleCardPayload) -> Toggl
     """Download external media and rewrite HTML to local collection media filenames."""
     rewritten_back_html = _prepare_back_html_media(collection, payload.back_html)
     rewritten_fields = dict(payload.fields) if payload.fields else {}
-    if "Back" in rewritten_fields:
-        rewritten_fields["Back"] = _prepare_back_html_media(collection, rewritten_fields["Back"])
+    for field_name in _MEDIA_NOTE_FIELDS:
+        if field_name in rewritten_fields:
+            rewritten_fields[field_name] = _prepare_back_html_media(
+                collection,
+                rewritten_fields[field_name],
+            )
 
     return ToggleCardPayload(
         notion_page_id=payload.notion_page_id,
@@ -1874,27 +2140,60 @@ def _prepare_payload_media_with_warnings(
 ) -> tuple[ToggleCardPayload, SyncStats]:
     """Prepare media and report recoverable localization fallbacks."""
     prepared      = _prepare_payload_media(collection, payload)
-    original_back = payload.fields.get("Back", payload.back_html)
-    prepared_back = prepared.fields.get("Back", prepared.back_html)
+    media_field_names = [
+        field_name for field_name in _MEDIA_NOTE_FIELDS
+        if field_name in payload.fields
+    ]
+    if "Back" not in media_field_names:
+        stats = _record_media_fallback_warnings(
+            stats=stats,
+            warnings=warnings,
+            original_back=payload.back_html,
+            prepared_back=prepared.back_html,
+            page_id=payload.notion_page_id,
+            block_id=payload.notion_block_id,
+        )
+    for field_name in media_field_names:
+        stats = _record_media_fallback_warnings(
+            stats=stats,
+            warnings=warnings,
+            original_back=payload.fields[field_name],
+            prepared_back=prepared.fields[field_name],
+            page_id=payload.notion_page_id,
+            block_id=payload.notion_block_id,
+        )
+    return prepared, stats
+
+
+def _record_media_fallback_warnings(
+    *,
+    stats: SyncStats,
+    warnings: list[SyncWarning] | None,
+    original_back: str,
+    prepared_back: str,
+    page_id: str,
+    block_id: str,
+) -> SyncStats:
+    """Record unresolved media while treating the retained HTML as a valid fallback."""
     if _contains_remote_image(original_back) and _contains_remote_image(prepared_back):
         stats = _add_warning(
             stats,
             warnings,
             code     = "media_localization_failed",
             message  = "Remote image could not be localized; its original URL was retained.",
-            page_id  = payload.notion_page_id,
-            block_id = payload.notion_block_id,
+            page_id  = page_id,
+            block_id = block_id,
         )
-    if "data-mermaid=" in original_back and "data-mermaid=" in prepared_back:
+    if "data-mermaid=" in original_back.lower() and "data-mermaid=" in prepared_back.lower():
         stats = _add_warning(
             stats,
             warnings,
             code     = "mermaid_render_failed",
             message  = "Mermaid diagram could not be rendered; its source fallback was retained.",
-            page_id  = payload.notion_page_id,
-            block_id = payload.notion_block_id,
+            page_id  = page_id,
+            block_id = block_id,
         )
-    return prepared, stats
+    return stats
 
 
 def _contains_remote_image(value: str) -> bool:
@@ -2543,6 +2842,26 @@ def _upsert_card_mapping(
                 payload.content_hash,
                 payload.last_edited_time,
             ),
+        )
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def _mark_card_synced(db: Database, block_id: str) -> None:
+    """Record a successful local-only media update for one mapped card."""
+    connection = db.connect()
+    try:
+        connection.execute(
+            """
+            UPDATE cards
+            SET last_synced_at = datetime('now')
+            WHERE notion_block_id = ?
+            """,
+            (block_id,),
         )
         connection.commit()
     except sqlite3.Error:
