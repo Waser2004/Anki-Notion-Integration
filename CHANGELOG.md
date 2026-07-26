@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.4.0 - 2026-07-25
+## 1.4.0 - 2026-07-26
 
 > [!WARNING]
 > **Parser and card template changes**
