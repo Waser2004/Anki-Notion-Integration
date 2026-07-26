@@ -280,7 +280,7 @@ th {
 /* Whole-cell clozes use the cell surface; partial clozes keep inline styling. */
 .notion-card table :is(td, th).notion-whole-cell-cloze .cloze {
 	background: transparent !important;
-	color: inherit;
+	color: var(--hl-yellow);
 	padding: 0;
 }
 
