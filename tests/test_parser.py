@@ -2278,7 +2278,11 @@ class ParserTests(unittest.TestCase):
             "<p>{{c1::Callout toggle child}}</p></details>",
             text,
         )
-        self.assertIn('<table><tbody><tr><td>{{c1::Callout cell}}</td></tr></tbody></table>', text)
+        self.assertIn(
+            '<table><tbody><tr><td class="notion-whole-cell-cloze">'
+            "{{c1::Callout cell}}</td></tr></tbody></table>",
+            text,
+        )
 
     def test_colored_callout_hides_all_textual_descendants_and_keeps_their_structure(self) -> None:
         """A callout marker covers nested code, equations, captions, tables, and child callouts."""
@@ -2388,7 +2392,10 @@ class ParserTests(unittest.TestCase):
             text,
         )
         self.assertIn('<p>{{c2::Inner text}}</p><p>{{c2::Inner child}}</p>', text)
-        self.assertIn('<td>{{c1::Table answer}}</td>', text)
+        self.assertIn(
+            '<td class="notion-whole-cell-cloze">{{c1::Table answer}}</td>',
+            text,
+        )
         self.assertNotIn("{{c4::", text)
         self.assertNotIn("{{c8::", text)
 
@@ -2450,14 +2457,38 @@ class ParserTests(unittest.TestCase):
         text = parse_page_to_cards("page-1", [advanced_toggle], enable_cloze=True)[0].fields["Text"]
 
         self.assertIn("<table><thead>", text)
-        self.assertIn('<th scope="col">{{c1::Header A}}</th>', text)
-        self.assertIn('<th scope="col">{{c2::Header C}}</th>', text)
-        self.assertIn('<th scope="row">{{c3::Row one}}</th>', text)
-        self.assertIn('<td>{{c1::Split cell}}</td>', text)
-        self.assertIn('<td>{{c2::Same column}}</td>', text)
-        self.assertIn('<td>{{c1::Another cell}}</td>', text)
+        self.assertIn(
+            '<th scope="col" class="notion-whole-cell-cloze">'
+            "{{c1::Header A}}</th>",
+            text,
+        )
+        self.assertIn(
+            '<th scope="col" class="notion-whole-cell-cloze">'
+            "{{c2::Header C}}</th>",
+            text,
+        )
+        self.assertIn(
+            '<th scope="row" class="notion-whole-cell-cloze">'
+            "{{c3::Row one}}</th>",
+            text,
+        )
+        self.assertIn(
+            '<td class="notion-whole-cell-cloze">{{c1::Split cell}}</td>',
+            text,
+        )
+        self.assertIn(
+            '<td class="notion-whole-cell-cloze">{{c2::Same column}}</td>',
+            text,
+        )
+        self.assertIn(
+            '<td class="notion-whole-cell-cloze">{{c1::Another cell}}</td>',
+            text,
+        )
         self.assertIn("<td>{{c1::Partial}} visible</td>", text)
-        self.assertNotIn('<td class="cloze">{{c1::Partial', text)
+        self.assertNotIn(
+            '<td class="notion-whole-cell-cloze">{{c1::Partial',
+            text,
+        )
 
     def test_table_only_advanced_cloze_accepts_enhanced_markdown_cell_colors(self) -> None:
         """A table-only card remains discoverable when colors use Notion's short aliases."""
@@ -2487,7 +2518,10 @@ class ParserTests(unittest.TestCase):
 
         payload = parse_page_to_cards("page-1", [advanced_toggle], enable_cloze=True)[0]
 
-        self.assertIn('<td>{{c1::Hidden}}</td>', payload.fields["Text"])
+        self.assertIn(
+            '<td class="notion-whole-cell-cloze">{{c1::Hidden}}</td>',
+            payload.fields["Text"],
+        )
         self.assertIn("<td>Visible</td>", payload.fields["Text"])
         self.assertTrue(ClozeCardParser().validate(payload).is_valid)
 
@@ -2532,12 +2566,30 @@ class ParserTests(unittest.TestCase):
         payload = parse_page_to_cards("page-1", enriched, enable_cloze=True)[0]
         text = payload.fields["Text"]
 
-        self.assertIn('<th scope="col">{{c1::A}}</th>', text)
-        self.assertIn('<th scope="col">{{c2::B}}</th>', text)
-        self.assertIn('<th scope="col">{{c4::C}}</th>', text)
-        self.assertIn('<th scope="row">{{c3::D}}</th>', text)
-        self.assertIn('<td>{{c3::E}}</td>', text)
-        self.assertIn('<td>{{c3::F}}</td>', text)
+        self.assertIn(
+            '<th scope="col" class="notion-whole-cell-cloze">{{c1::A}}</th>',
+            text,
+        )
+        self.assertIn(
+            '<th scope="col" class="notion-whole-cell-cloze">{{c2::B}}</th>',
+            text,
+        )
+        self.assertIn(
+            '<th scope="col" class="notion-whole-cell-cloze">{{c4::C}}</th>',
+            text,
+        )
+        self.assertIn(
+            '<th scope="row" class="notion-whole-cell-cloze">{{c3::D}}</th>',
+            text,
+        )
+        self.assertIn(
+            '<td class="notion-whole-cell-cloze">{{c3::E}}</td>',
+            text,
+        )
+        self.assertIn(
+            '<td class="notion-whole-cell-cloze">{{c3::F}}</td>',
+            text,
+        )
 
     def test_unselected_markdown_table_cell_colors_remain_visible(self) -> None:
         """Whole-cell colors excluded from cloze markers render on td/th elements."""
@@ -2580,7 +2632,11 @@ class ParserTests(unittest.TestCase):
         )[0]
         text = payload.fields["Text"]
 
-        self.assertIn('<th scope="col">{{c1::Selected}}</th>', text)
+        self.assertIn(
+            '<th scope="col" class="notion-whole-cell-cloze">'
+            "{{c1::Selected}}</th>",
+            text,
+        )
         self.assertIn('<th scope="col" class="highlight-red_background">Red context</th>', text)
         self.assertIn('<th scope="col" class="highlight-pink_background">Pink context</th>', text)
         self.assertNotIn("{{c7::", text)
@@ -2620,7 +2676,10 @@ class ParserTests(unittest.TestCase):
             cloze_marker_colors=["yellow"],
         )[0].fields["Text"]
 
-        self.assertIn('<td>{{c1::Answer}}</td>', text)
+        self.assertIn(
+            '<td class="notion-whole-cell-cloze">{{c1::Answer}}</td>',
+            text,
+        )
         self.assertIn('<td class="highlight-red_background"></td>', text)
 
     def test_advanced_cloze_container_without_markers_remains_cloze_payload(self) -> None:

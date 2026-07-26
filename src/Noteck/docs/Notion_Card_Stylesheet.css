@@ -272,14 +272,13 @@ th {
 	color: var(--hl-yellow);
 }
 
-/* Color the currently hidden cloze cells in yellow background */
-.notion-card table :is(td, th):has(.cloze) {
+/* Color only parser-confirmed whole-cell clozes across the complete cell. */
+.notion-card table :is(td, th).notion-whole-cell-cloze:has(.cloze) {
 	background: var(--hl-yellow-bg) !important;
 }
 
-/* The cell supplies the background; do not highlight the hidden text again. */
-td .cloze,
-th .cloze {
+/* Whole-cell clozes use the cell surface; partial clozes keep inline styling. */
+.notion-card table :is(td, th).notion-whole-cell-cloze .cloze {
 	background: transparent !important;
 	color: inherit;
 	padding: 0;

@@ -284,10 +284,15 @@ class CardModelTests(unittest.TestCase):
         css_path = Path(__file__).resolve().parents[1] / "src" / "Noteck" / "docs" / "Notion_Card_Stylesheet.css"
         css = css_path.read_text(encoding="utf-8")
         root_header_rule = '.notion-card[class*="notion-card-background-"] th {'
-        active_cloze_rule = '.notion-card table :is(td, th):has(.cloze) {'
+        active_cloze_rule = (
+            ".notion-card table "
+            ":is(td, th).notion-whole-cell-cloze:has(.cloze) {"
+        )
 
         self.assertIn(active_cloze_rule, css)
         self.assertIn("background: var(--hl-yellow-bg) !important;", css)
+        self.assertNotIn(".notion-card table :is(td, th):has(.cloze) {", css)
+        self.assertNotIn("td .cloze,", css)
         # Keep the active rule after the fallback as an additional safeguard;
         # its table context also gives it strictly greater specificity.
         self.assertLess(css.index(root_header_rule), css.index(active_cloze_rule))

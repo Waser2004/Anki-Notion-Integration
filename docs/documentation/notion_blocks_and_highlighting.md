@@ -108,8 +108,10 @@ The REST shape used by this add-on has no color field for `table` or
 `table_row`. A cell is treated as fully colored only when every non-empty
 rich-text fragment resolves to the same configured background marker. Its
 content becomes one cloze, its `td` or `th` remains in place, and it reuses the
-Anki `.cloze` yellow background. A partially highlighted or mixed-color cell
-continues to use normal inline cloze rendering. A whole-cell Markdown color
+Anki `.cloze` yellow background through the renderer's
+`notion-whole-cell-cloze` class. A partially highlighted or mixed-color cell
+does not receive that class and continues to use normal inline cloze rendering.
+A whole-cell Markdown color
 excluded from marker parsing remains visible on the cell surface. Code,
 equation, image, column,
 and divider blocks cannot currently carry a standalone complete block color.

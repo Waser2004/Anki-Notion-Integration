@@ -850,11 +850,11 @@ def _render_table_row(
             cell_html = rich_text_renderer(cell_rich_text)
         else:
             cell_html = cell_override
-        # Selected whole-cell markers stay class-free because CSS observes
-        # Anki's dynamically rendered `.cloze` child. Unselected Markdown
-        # colors instead remain visible as normal theme-aware cell styling.
+        # Mark only parser-confirmed whole-cell clozes. An inline cloze also
+        # gains Anki's `.cloze` class at review time, so CSS cannot infer the
+        # whole-cell behavior from descendants alone.
         cell_class = (
-            ""
+            ' class="notion-whole-cell-cloze"'
             if cell_override is not None
             else _table_cell_color_class_attribute(cell_rich_text)
         )

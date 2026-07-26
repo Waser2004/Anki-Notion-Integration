@@ -175,12 +175,13 @@ also reads the page's enhanced Markdown representation and overlays its cell,
 row, and column colors onto the matching block-API table rows. Table cells are
 treated as block-level only when every non-empty rich-text fragment uses the
 same effective configured marker. The cell contents become one deletion while
-their `td`/`th` and header semantics remain. CSS highlights only the cell
-containing Anki's dynamically rendered hidden `.cloze` child, and keeps the
-child text itself transparent.
+their `td`/`th` and header semantics remain. The renderer marks only these
+confirmed whole-cell deletions with `notion-whole-cell-cloze`; CSS uses that
+class to highlight the complete cell and keep its hidden child transparent.
 Whole-cell colors excluded from the marker setting remain visible as
 theme-aware background classes on their `td` or `th`, including empty cells.
-Partial or mixed-color cells use the existing inline behavior. Code, equation,
+Partial or mixed-color cells do not receive the whole-cell class and use the
+existing inline behavior. Code, equation,
 image, table/container, column, and divider blocks have no standalone complete
 block-color strategy. If they are descendants of a marked callout, their
 textual content is hidden with the callout's cloze number while their supported
