@@ -810,8 +810,9 @@ blockquote.notion-block-color-background {
 	color: var(--notion-text) !important;
 }
 
-/* Final spacing override so all rendered block objects keep a consistent 1em vertical gap. */
-:where(.notion-front, .notion-back, blockquote, .callout > div, .notion-toggle, li) > :where(
+/* Treat the root foreground wrapper like the card face so its first block does
+   not regain the browser's default top margin. */
+:where(.notion-front, .notion-back, .notion-cloze-root-foreground, blockquote, .callout > div, .notion-toggle, li) > :where(
 	p,
 	blockquote,
 	ul,
@@ -829,7 +830,7 @@ blockquote.notion-block-color-background {
 	margin-bottom: 0 !important;
 }
 
-:where(.notion-front, .notion-back, blockquote, .callout > div, .notion-toggle, li) > :where(
+:where(.notion-front, .notion-back, .notion-cloze-root-foreground, blockquote, .callout > div, .notion-toggle, li) > :where(
 	p,
 	blockquote,
 	ul,

@@ -298,7 +298,7 @@ class CardModelTests(unittest.TestCase):
         self.assertLess(css.index(root_header_rule), css.index(active_cloze_rule))
 
     def test_advanced_cloze_root_foreground_styles_visible_block_text(self) -> None:
-        """Bundled CSS propagates the hidden toggle title color to visible contents."""
+        """Bundled CSS propagates the root color without adding block spacing."""
         css = _load_model_css()
 
         self.assertIn(
@@ -308,6 +308,13 @@ class CardModelTests(unittest.TestCase):
         self.assertIn(
             ".notion-cloze-root-foreground .notion-block-color-background",
             css,
+        )
+        self.assertEqual(
+            css.count(
+                ":where(.notion-front, .notion-back, .notion-cloze-root-foreground, "
+                "blockquote, .callout > div, .notion-toggle, li)"
+            ),
+            2,
         )
 
     def test_advanced_cloze_extra_toggle_color_styles_exported_section(self) -> None:
