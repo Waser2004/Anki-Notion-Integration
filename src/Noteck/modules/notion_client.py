@@ -707,6 +707,8 @@ class NotionClient:
     def build_child_page_order_map(
         self,
         pages_by_id: Mapping[str, NotionPage],
+        *,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> dict[str, tuple[str, ...]]:
         """Return sibling order hints from parent-page block order for known children."""
         children_by_parent: dict[str, list[str]] = {}
@@ -720,6 +722,10 @@ class NotionClient:
 
         ordered_children_by_parent: dict[str, tuple[str, ...]] = {}
         for parent_page_id, current_child_ids in children_by_parent.items():
+            # Ordering is best-effort metadata; stop between parent requests as
+            # soon as the owning refresh asks to cancel.
+            if should_cancel is not None and should_cancel():
+                break
             # Single-child parents do not need an extra API call.
             if len(current_child_ids) <= 1:
                 continue

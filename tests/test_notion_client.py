@@ -14,7 +14,7 @@ from unittest.mock import patch
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from Noteck.modules import notion_client as notion_client_module
-from Noteck.modules.notion_client import NotionApiError, NotionClient, NotionResponse
+from Noteck.modules.notion_client import NotionApiError, NotionClient, NotionPage, NotionResponse
 
 
 class NotionClientPageParentResolutionTests(unittest.TestCase):
@@ -233,6 +233,32 @@ class NotionClientChildPageOrderTests(unittest.TestCase):
         order_map = client.build_child_page_order_map({page.page_id: page for page in pages})
 
         self.assertEqual(order_map.get("parent"), ("child-b", "child-a", "child-c"))
+
+    def test_build_child_page_order_map_stops_between_parents_when_cancelled(self) -> None:
+        requested_parent_ids: list[str] = []
+
+        def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> NotionResponse:
+            _ = (method, headers, body, timeout)
+            parent_id = "parent-a" if "parent-a" in url else "parent-b"
+            requested_parent_ids.append(parent_id)
+            return _json_response({"results": [], "has_more": False})
+
+        pages = [
+            NotionPage("parent-a", "Parent A", None, None, None, {}),
+            NotionPage("child-a1", "A1", None, "parent-a", "page_id", {}),
+            NotionPage("child-a2", "A2", None, "parent-a", "page_id", {}),
+            NotionPage("parent-b", "Parent B", None, None, None, {}),
+            NotionPage("child-b1", "B1", None, "parent-b", "page_id", {}),
+            NotionPage("child-b2", "B2", None, "parent-b", "page_id", {}),
+        ]
+        client = NotionClient(api_token="token", transport=transport)
+
+        client.build_child_page_order_map(
+            {page.page_id: page for page in pages},
+            should_cancel=lambda: bool(requested_parent_ids),
+        )
+
+        self.assertEqual(requested_parent_ids, ["parent-a"])
 
 
 class NotionClientPageTreeQueueTests(unittest.TestCase):

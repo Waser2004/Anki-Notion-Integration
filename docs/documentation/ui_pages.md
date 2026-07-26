@@ -28,7 +28,7 @@ The Pages tab shows the active selection behavior in its status label. The dropd
 
 - `manual` (`Manual`): checkboxes affect only the page clicked. Parent pages and child pages stay independent.
 - `existing_descendants` (`Smart`): default compatibility mode. Selecting a parent with no already selected child pages also selects the child pages currently visible in the Pages tab. New child pages created in Notion later are not selected automatically.
-- `dynamic_descendants` (`Dynamic`): selecting a parent keeps its whole subtree selected. Child pages discovered on later refreshes are selected automatically as long as the parent remains selected.
+- `dynamic_descendants` (`Dynamic`): selecting a parent keeps its whole subtree selected. Child pages discovered on later refreshes are selected automatically and cannot be unselected independently while the parent remains selected.
 
 The row context menu action `Select Page and All Children` remains available for explicit one-time subtree selection regardless of the configured behavior.
 

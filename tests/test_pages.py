@@ -19,9 +19,11 @@ from Noteck.modules.pages import (
     PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS,
     PAGE_SELECTION_BEHAVIOR_EXISTING_DESCENDANTS,
     PAGE_SELECTION_BEHAVIOR_MANUAL,
+    PageRefreshCancelled,
     PagesStore,
     apply_default_card_type_rule,
     apply_selection_rule,
+    begin_startup_page_refresh,
     claim_startup_page_refresh_status,
     build_children_map,
     build_children_map_from_pages,
@@ -145,6 +147,17 @@ class SelectionRuleTests(unittest.TestCase):
             behavior=PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS,
         )
         self.assertEqual(selected, set())
+
+    def test_dynamic_descendant_cannot_be_deselected_while_parent_is_active(self) -> None:
+        selected = apply_selection_rule(
+            "child",
+            checked=False,
+            selected_ids={"parent", "child", "grandchild"},
+            children_map=self._children_map,
+            behavior=PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS,
+            dynamic_parent_ids={"parent"},
+        )
+        self.assertEqual(selected, {"parent", "child", "grandchild"})
 
     def test_unknown_selection_behavior_uses_default(self) -> None:
         self.assertEqual(
@@ -502,6 +515,79 @@ class PageRefreshTests(unittest.TestCase):
         refresh_pages(self._db, client=client)
 
         self.assertEqual(self._store.get_selected_page_ids(), {"parent"})
+
+    def test_refresh_preserves_selection_changed_during_order_lookup(self) -> None:
+        pages = [
+            _page("parent", "Parent"),
+            _page("child", "Child", parent_id="parent"),
+        ]
+
+        class _Client:
+            """Simulate a Pages-tab edit while startup ordering is still running."""
+
+            @staticmethod
+            def iter_pages() -> object:
+                return iter(pages)
+
+            def build_child_page_order_map(
+                self,
+                _pages: object,
+            ) -> dict[str, tuple[str, ...]]:
+                self_store.set_page_sync_enabled("parent", False)
+                return {}
+
+        self_store = self._store
+        SettingsStore(self._db).set_value(
+            "page_selection_behavior",
+            PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS,
+        )
+
+        refresh_pages(
+            self._db,
+            client=_Client(),
+            startup_generation=begin_startup_page_refresh(),
+        )
+
+        self.assertEqual(self._store.get_selected_page_ids(), set())
+
+    def test_startup_order_lookup_honors_cancellation(self) -> None:
+        pages = [
+            _page("parent", "Parent"),
+            _page("child", "Child", parent_id="parent"),
+        ]
+        cancellation_checks = 0
+
+        class _Client:
+            """Request cancellation from inside the sibling-order phase."""
+
+            @staticmethod
+            def iter_pages() -> object:
+                return iter(pages)
+
+            @staticmethod
+            def build_child_page_order_map(
+                _pages: object,
+                *,
+                should_cancel: object,
+            ) -> dict[str, tuple[str, ...]]:
+                if callable(should_cancel):
+                    should_cancel()
+                return {}
+
+        def should_cancel() -> bool:
+            nonlocal cancellation_checks
+            cancellation_checks += 1
+            return cancellation_checks >= 3
+
+        with self.assertRaises(PageRefreshCancelled):
+            refresh_pages(
+                self._db,
+                client=_Client(),
+                should_cancel=should_cancel,
+                startup_generation=begin_startup_page_refresh(),
+            )
+
+        self.assertGreaterEqual(cancellation_checks, 3)
 
     def test_startup_refresh_runs_through_anki_background_task_manager(self) -> None:
         pages = [_page("parent", "Renamed Parent")]
