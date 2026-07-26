@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -13,13 +14,17 @@ from Noteck.modules.db import Database
 from Noteck.modules.notion_client import NotionPage, PageNode
 from Noteck.modules.pages import (
     DEFAULT_PAGE_SELECTION_BEHAVIOR,
+    DYNAMIC_SELECTION_PARENT_IDS_SETTING,
     PAGE_SELECTION_BEHAVIOR_DETAILS,
     PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS,
     PAGE_SELECTION_BEHAVIOR_EXISTING_DESCENDANTS,
     PAGE_SELECTION_BEHAVIOR_MANUAL,
+    PageRefreshCancelled,
     PagesStore,
     apply_default_card_type_rule,
     apply_selection_rule,
+    begin_startup_page_refresh,
+    claim_startup_page_refresh_status,
     build_children_map,
     build_children_map_from_pages,
     build_deck_names,
@@ -27,7 +32,10 @@ from Noteck.modules.pages import (
     normalize_page_selection_behavior,
     page_selection_behavior_description,
     page_selection_behavior_tooltip,
+    refresh_pages,
+    trigger_startup_page_refresh,
 )
+from Noteck.modules.settings import SettingsStore, create_default_settings
 
 
 def _node(page_id: str, title: str, children: tuple[PageNode, ...] = ()) -> PageNode:
@@ -139,6 +147,17 @@ class SelectionRuleTests(unittest.TestCase):
             behavior=PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS,
         )
         self.assertEqual(selected, set())
+
+    def test_dynamic_descendant_cannot_be_deselected_while_parent_is_active(self) -> None:
+        selected = apply_selection_rule(
+            "child",
+            checked=False,
+            selected_ids={"parent", "child", "grandchild"},
+            children_map=self._children_map,
+            behavior=PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS,
+            dynamic_parent_ids={"parent"},
+        )
+        self.assertEqual(selected, {"parent", "child", "grandchild"})
 
     def test_unknown_selection_behavior_uses_default(self) -> None:
         self.assertEqual(
@@ -441,3 +460,182 @@ class PagesStoreTests(unittest.TestCase):
         pages = self._store.get_pages()
         self.assertIsNone(pages["page-a"].default_card_type)
         self.assertIsNone(pages["page-b"].default_card_type)
+
+
+class PageRefreshTests(unittest.TestCase):
+    """Validate background-safe page discovery and dynamic selection updates."""
+
+    def setUp(self) -> None:
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp_dir.cleanup)
+        self._db = Database(Path(self._temp_dir.name) / "refresh.db")
+        self._db.initialize()
+        create_default_settings(self._db)
+        self._store = PagesStore(self._db)
+        self._store.upsert_page_selection({"parent": "Notion::Parent"}, {"parent"})
+        self._db.set_setting(DYNAMIC_SELECTION_PARENT_IDS_SETTING, '["parent"]')
+
+    def test_dynamic_refresh_selects_new_descendants_before_sync(self) -> None:
+        pages = [
+            _page("parent", "Parent"),
+            _page("child", "Child", parent_id="parent"),
+            _page("grandchild", "Grandchild", parent_id="child"),
+        ]
+        client = type("_Client", (), {"iter_pages": lambda _self: iter(pages)})()
+        progress_counts: list[int] = []
+        SettingsStore(self._db).set_value(
+            "page_selection_behavior",
+            PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS,
+        )
+
+        result = refresh_pages(
+            self._db,
+            client=client,
+            progress_callback=progress_counts.append,
+        )
+
+        self.assertEqual(result.loaded_count, 3)
+        self.assertEqual(progress_counts, [0, 1, 2, 3])
+        self.assertEqual(
+            self._store.get_selected_page_ids(),
+            {"parent", "child", "grandchild"},
+        )
+
+    def test_non_dynamic_refresh_preserves_selection_without_selecting_children(self) -> None:
+        pages = [
+            _page("parent", "Parent"),
+            _page("child", "Child", parent_id="parent"),
+        ]
+        client = type("_Client", (), {"iter_pages": lambda _self: iter(pages)})()
+        SettingsStore(self._db).set_value(
+            "page_selection_behavior",
+            PAGE_SELECTION_BEHAVIOR_EXISTING_DESCENDANTS,
+        )
+
+        refresh_pages(self._db, client=client)
+
+        self.assertEqual(self._store.get_selected_page_ids(), {"parent"})
+
+    def test_refresh_preserves_selection_changed_during_order_lookup(self) -> None:
+        pages = [
+            _page("parent", "Parent"),
+            _page("child", "Child", parent_id="parent"),
+        ]
+
+        class _Client:
+            """Simulate a Pages-tab edit while startup ordering is still running."""
+
+            @staticmethod
+            def iter_pages() -> object:
+                return iter(pages)
+
+            def build_child_page_order_map(
+                self,
+                _pages: object,
+            ) -> dict[str, tuple[str, ...]]:
+                self_store.set_page_sync_enabled("parent", False)
+                return {}
+
+        self_store = self._store
+        SettingsStore(self._db).set_value(
+            "page_selection_behavior",
+            PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS,
+        )
+
+        refresh_pages(
+            self._db,
+            client=_Client(),
+            startup_generation=begin_startup_page_refresh(),
+        )
+
+        self.assertEqual(self._store.get_selected_page_ids(), set())
+
+    def test_startup_order_lookup_honors_cancellation(self) -> None:
+        pages = [
+            _page("parent", "Parent"),
+            _page("child", "Child", parent_id="parent"),
+        ]
+        cancellation_checks = 0
+
+        class _Client:
+            """Request cancellation from inside the sibling-order phase."""
+
+            @staticmethod
+            def iter_pages() -> object:
+                return iter(pages)
+
+            @staticmethod
+            def build_child_page_order_map(
+                _pages: object,
+                *,
+                should_cancel: object,
+            ) -> dict[str, tuple[str, ...]]:
+                if callable(should_cancel):
+                    should_cancel()
+                return {}
+
+        def should_cancel() -> bool:
+            nonlocal cancellation_checks
+            cancellation_checks += 1
+            return cancellation_checks >= 3
+
+        with self.assertRaises(PageRefreshCancelled):
+            refresh_pages(
+                self._db,
+                client=_Client(),
+                should_cancel=should_cancel,
+                startup_generation=begin_startup_page_refresh(),
+            )
+
+        self.assertGreaterEqual(cancellation_checks, 3)
+
+    def test_startup_refresh_runs_through_anki_background_task_manager(self) -> None:
+        pages = [_page("parent", "Renamed Parent")]
+        expected_order = {"parent": ("child-b", "child-a")}
+        client = type(
+            "_Client",
+            (),
+            {
+                "iter_pages": lambda _self: iter(pages),
+                "build_child_page_order_map": lambda _self, _pages: expected_order,
+            },
+        )()
+        completed: list[bool] = []
+
+        class _TaskManager:
+            """Execute the submitted startup task immediately for this unit test."""
+
+            @staticmethod
+            def run_in_background(work: object, done: object, uses_collection: bool = True) -> None:
+                self.assertFalse(uses_collection)
+                result = work()
+                future = type("_Future", (), {"result": lambda _self: result})()
+                done(future)
+
+        mw = type("_Mw", (), {"taskman": _TaskManager()})()
+        with patch(
+            "Noteck.modules.pages.NotionClient.from_settings",
+            return_value=client,
+        ):
+            started = trigger_startup_page_refresh(
+                mw,
+                self._db.path,
+                on_done=lambda: completed.append(True),
+            )
+
+        self.assertTrue(started)
+        self.assertEqual(completed, [True])
+        self.assertEqual(
+            self._store.get_pages()["parent"].anki_deck_name,
+            "Notion::Renamed Parent",
+        )
+        startup_status = claim_startup_page_refresh_status()
+        self.assertIsNotNone(startup_status)
+        assert startup_status is not None
+        self.assertFalse(startup_status.running)
+        self.assertEqual(startup_status.loaded_count, 1)
+        self.assertEqual(
+            startup_status.ordered_child_ids_by_parent,
+            expected_order,
+        )
+        self.assertIsNone(claim_startup_page_refresh_status())

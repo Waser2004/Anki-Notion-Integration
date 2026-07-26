@@ -31,8 +31,8 @@ The **Pages** tab provides a hierarchical tree of accessible Notion pages.
 - The behavior is configured in Settings under Sync as **Pages tab selection behavior**.
 - **Manual**: checking a page affects only that page.
 - **Smart**: default compatibility mode; checking a parent with no selected child pages also selects the currently visible child pages.
-- **Dynamic**: checking a parent keeps its subtree selected, including child pages discovered on later refreshes.
-- The context menu action **Select Page and All Children** remains available for explicit one-time subtree selection.
+- **Dynamic**: checking a parent keeps its subtree selected, including child pages discovered on later refreshes; descendants cannot be unselected independently while the parent remains selected.
+- The context menu action **Select Page and All Children** is a one-time selection in Manual and Smart modes. In Dynamic mode, it establishes the same persistent subtree selection as checking the parent.
 
 ---
 

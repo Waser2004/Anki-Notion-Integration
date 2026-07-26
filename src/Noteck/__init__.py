@@ -14,6 +14,7 @@ if _VENDOR_DIR.is_dir():
 
 from .modules.db import Database
 from .modules.sync import trigger_startup_sync, trigger_sync_with_anki_button
+from .modules.pages import trigger_startup_page_refresh
 from .modules.cards import ensure_notion_toggle_model
 from .modules.settings import create_default_settings
 from .modules.notion_client import NotionClient
@@ -81,8 +82,14 @@ def on_profile_did_open() -> None:
                 database_existed=database_existed,
             )
 
+        startup_sync_started = False
+        # run a sync on startup including refreshing pages
         if not skip_startup_sync:
-            trigger_startup_sync(mw=mw, db_path=db_path)
+            startup_sync_started = trigger_startup_sync(mw=mw, db_path=db_path)
+
+        # auto refresh pages on startup if no sync was started
+        if not startup_sync_started:
+            trigger_startup_page_refresh(mw=mw, db_path=db_path)
         
     QTimer.singleShot(0, work)
 

@@ -24,6 +24,14 @@ The Anki progress dialog reports these as two text-only phases. `Fetching page
 data` advances whenever a concurrent page job finishes, followed by `Parsing
 page data` as each prepared page is reconciled sequentially.
 
+When page selection behavior is `dynamic_descendants`, sync first refreshes the
+available Notion pages and reapplies persisted selected-parent subtrees before
+reading the enabled-page list. This phase is reported as `Refreshing pages...
+loaded X`, so newly created descendants are included in the same sync run.
+Startup auto-sync also includes this refresh phase in the visible sync flow for
+all page-selection behaviors, rather than delaying sync behind a separate quiet
+startup refresh.
+
 1. Expiring signature parameters are removed from media URLs before hashing.
 2. The cleaned full-page hash is stored in `pages.content_hash` only after
    enabled top-level cloze parsing completes without errors. While cloze

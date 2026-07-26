@@ -25,6 +25,7 @@ from Noteck.modules.sync import (
     SyncStats,
     run_notion_sync_with_progress,
     sync_notion_to_anki,
+    trigger_startup_sync,
     trigger_sync_with_anki_button,
 )
 
@@ -3274,6 +3275,7 @@ class SyncTests(unittest.TestCase):
                     db_path=self._db_path,
                     on_done=lambda result: captured_result.append(result),
                     parent=object(),
+                    refresh_pages_before_sync=True,
                 )
         finally:
             _SYNC_MODULE.unregister_sync_done_callback(observer)
@@ -3286,6 +3288,100 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(observed_result, captured_result)
         self.assertIn("progress_callback", mock_sync.call_args.kwargs)
         self.assertIn("should_cancel", mock_sync.call_args.kwargs)
+        self.assertTrue(mock_sync.call_args.kwargs["refresh_pages_before_sync"])
+
+    def test_dynamic_sync_refreshes_pages_before_loading_enabled_rows(self) -> None:
+        """New dynamic descendants must be selected before sync takes its work snapshot."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        events: list[str] = []
+        progress_labels: list[str] = []
+        self._db.set_setting("page_selection_behavior", "dynamic_descendants")
+
+        def fake_refresh(*args: object, **kwargs: object) -> object:
+            events.append("refresh")
+            progress_callback = kwargs.get("progress_callback")
+            if callable(progress_callback):
+                progress_callback(2)
+            return SimpleNamespace(loaded_count=2)
+
+        def fake_load_enabled(_db: Database) -> list[object]:
+            events.append("load_enabled")
+            return []
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=Mock(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "refresh_pages",
+            side_effect=fake_refresh,
+        ), patch.object(
+            _SYNC_MODULE,
+            "_load_enabled_pages",
+            side_effect=fake_load_enabled,
+        ):
+            result = sync_notion_to_anki(
+                mw=mw,
+                db_path=self._db_path,
+                progress_callback=progress_labels.append,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(events, ["refresh", "load_enabled"])
+        self.assertIn("Refreshing pages... loaded 2", progress_labels)
+
+    def test_forced_startup_refresh_runs_even_when_selection_is_not_dynamic(self) -> None:
+        """Startup auto-sync must own page refresh in Manual and Smart modes too."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        self._db.set_setting("page_selection_behavior", "manual")
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=Mock(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "refresh_pages",
+        ) as refresh_mock, patch.object(
+            _SYNC_MODULE,
+            "_load_enabled_pages",
+            return_value=[],
+        ):
+            result = sync_notion_to_anki(
+                mw=mw,
+                db_path=self._db_path,
+                refresh_pages_before_sync=True,
+            )
+
+        self.assertTrue(result.ok)
+        refresh_mock.assert_called_once()
+
+    def test_startup_auto_sync_forces_refresh_inside_progress_flow(self) -> None:
+        """The startup trigger must not defer sync until a separate refresh finishes."""
+        collection = _FakeCollection()
+        mw = _FakeMwWithTaskman(collection)
+
+        with patch.object(
+            _SYNC_MODULE.SettingsStore,
+            "get_value",
+            return_value=True,
+        ), patch.object(
+            _SYNC_MODULE,
+            "run_notion_sync_with_progress",
+            return_value=True,
+        ) as runner:
+            started = trigger_startup_sync(mw=mw, db_path=self._db_path)
+
+        trigger_startup_sync.__globals__["_sync_is_running"] = False
+        self.assertTrue(started)
+        self.assertTrue(runner.call_args.kwargs["refresh_pages_before_sync"])
+        self.assertIsInstance(
+            runner.call_args.kwargs["startup_page_refresh_generation"],
+            int,
+        )
 
     def test_run_notion_sync_with_progress_requires_progress_api(self) -> None:
         collection = _FakeCollection()

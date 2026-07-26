@@ -36,15 +36,21 @@ from ..modules.db import Database
 from ..modules.notion_client import NotionApiError, NotionClient, NotionPage, NotionTransportError
 from ..modules.pages import (
     DEFAULT_PAGE_SELECTION_BEHAVIOR,
+    DYNAMIC_SELECTION_PARENT_IDS_SETTING,
     PAGE_SELECTION_BEHAVIOR_DETAILS,
     PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS,
     PagesStore,
+    StartupPageRefreshStatus,
     StoredPage,
     apply_default_card_type_rule,
     apply_selection_rule,
     build_children_map_from_pages,
     build_deck_names_from_pages,
+    claim_startup_page_refresh_status,
+    get_dynamic_locked_descendant_ids,
+    get_startup_page_refresh_status,
     get_descendant_ids,
+    load_dynamic_selection_parent_ids,
     normalize_page_selection_behavior,
     page_selection_behavior_tooltip,
 )
@@ -52,9 +58,6 @@ from ..modules.settings import SettingsError, SettingsStore
 from .ui import navigate_to_page
 from .ui import UiContext
 from .context_menu_schema import ContextMenuEntry, load_context_menu_schema
-
-
-_DYNAMIC_SELECTION_PARENT_IDS_SETTING = "page_selection_dynamic_parent_ids"
 
 
 class PagesPage(QWidget):
@@ -151,6 +154,10 @@ class PagesPage(QWidget):
         self._fetch_timer = QTimer(self)
         self._fetch_timer.setInterval(40)
         self._fetch_timer.timeout.connect(self._drain_fetch_queue)
+        self._startup_refresh_timer = QTimer(self)
+        self._startup_refresh_timer.setInterval(100)
+        self._startup_refresh_timer.timeout.connect(self._poll_startup_refresh)
+        self._startup_refresh_generation: int | None = None
         # Cache action icons and refresh them when palette/theme changes.
         self._image_button_icon = QIcon()
         self._cards_button_icon = QIcon()
@@ -188,6 +195,9 @@ class PagesPage(QWidget):
 
     def reload(self) -> None:
         """Load pages progressively and update the tree while data is being fetched."""
+        self._startup_refresh_timer.stop()
+        self._startup_refresh_generation = None
+        startup_refresh_status = claim_startup_page_refresh_status()
         self._page_selection_behavior = self._load_page_selection_behavior()
         self._refresh_selection_behavior_label()
         self._load_generation += 1
@@ -222,9 +232,22 @@ class PagesPage(QWidget):
 
         cached_count = len(self._pages_by_id)
         if cached_count > 0:
-            self._groupbox.setTitle(f"Refreshing pages...")
+            self._groupbox.setTitle("Refreshing pages...")
         else:
             self._groupbox.setTitle("Loading Notion pages...")
+
+        # The first Pages tab reuses startup discovery instead of issuing the
+        # same Notion page-list request again during this session.
+        if startup_refresh_status is not None:
+            self._startup_refresh_generation = startup_refresh_status.generation
+            if startup_refresh_status.running:
+                self._groupbox.setTitle(
+                    f"Refreshing pages... loaded {startup_refresh_status.loaded_count}"
+                )
+                self._startup_refresh_timer.start()
+            else:
+                self._apply_completed_startup_refresh(startup_refresh_status)
+            return
         
         # Start background fetch.
         self._fetch_timer.start()
@@ -234,6 +257,65 @@ class PagesPage(QWidget):
             daemon=True,
         )
         worker.start()
+
+    def _poll_startup_refresh(self) -> None:
+        """Mirror startup discovery progress without launching another request."""
+        generation = self._startup_refresh_generation
+        if generation is None:
+            self._startup_refresh_timer.stop()
+            return
+
+        status = get_startup_page_refresh_status(generation)
+        if status is None:
+            self._startup_refresh_timer.stop()
+            return
+
+        self._groupbox.setTitle(f"Refreshing pages... loaded {status.loaded_count}")
+        if not status.running:
+            self._apply_completed_startup_refresh(status)
+
+    def _apply_completed_startup_refresh(
+        self,
+        status: StartupPageRefreshStatus,
+    ) -> None:
+        """Render the cache written by startup discovery and finalize its label."""
+        self._startup_refresh_timer.stop()
+        self._startup_refresh_generation = None
+        self._is_loading = False
+        self._page_count = status.loaded_count
+
+        previous_suspend_state = self._suspend_item_events
+        self._suspend_item_events = True
+        try:
+            self._tree.clear()
+            self._items_by_id.clear()
+            self._pages_by_id.clear()
+            self._hovered_page_id = None
+            self._children_map = {}
+            self._deck_names_by_page_id = {}
+            self._page_default_card_types = {}
+            self._ordered_child_ids_by_parent = dict(
+                status.ordered_child_ids_by_parent or {}
+            )
+            self._selected_ids = self._store.get_selected_page_ids()
+            self._cascade_selected_parent_ids = self._load_dynamic_selection_parent_ids()
+            self._preload_cached_pages()
+        finally:
+            self._suspend_item_events = previous_suspend_state
+
+        if status.error_message:
+            self._groupbox.setTitle("Failed to load pages.")
+            self._error_label.setText(status.error_message)
+            self._error_label.show()
+            return
+
+        self._groupbox.setTitle(f"Loaded {status.loaded_count} pages.")
+        self._error_label.clear()
+        self._error_label.hide()
+        if not self._has_expansion_snapshot:
+            self._tree.expandToDepth(0)
+        else:
+            self._apply_expanded_ids()
 
     def _fetch_pages_worker(self, generation: int) -> None:
         """Fetch pages in a worker thread and push events to the UI queue."""
@@ -887,23 +969,7 @@ class PagesPage(QWidget):
 
     def _load_dynamic_selection_parent_ids(self) -> set[str]:
         """Read persisted dynamic-selection roots from the settings table."""
-        raw_value = self._db.get_setting(_DYNAMIC_SELECTION_PARENT_IDS_SETTING)
-        if not raw_value:
-            return set()
-
-        try:
-            payload = json.loads(raw_value)
-        except json.JSONDecodeError:
-            return set()
-
-        if not isinstance(payload, list):
-            return set()
-
-        return {
-            page_id
-            for page_id in payload
-            if isinstance(page_id, str) and page_id.strip()
-        }
+        return load_dynamic_selection_parent_ids(self._db)
 
     def _persist_dynamic_selection_parent_ids(self) -> None:
         """Persist dynamic-selection roots so refreshes include future children."""
@@ -912,7 +978,7 @@ class PagesPage(QWidget):
             for page_id in self._cascade_selected_parent_ids
             if page_id in self._selected_ids
         )
-        self._db.set_setting(_DYNAMIC_SELECTION_PARENT_IDS_SETTING, json.dumps(parent_ids))
+        self._db.set_setting(DYNAMIC_SELECTION_PARENT_IDS_SETTING, json.dumps(parent_ids))
 
     def _position_selection_behavior_label(self) -> None:
         """Place the page-sync status in the group box's top-right title area."""
@@ -1067,7 +1133,11 @@ class PagesPage(QWidget):
         checked = item.checkState(0) == self._check_state_checked()
         page_id = str(page_id)
         selected_ids = self._collect_selected_ids()
-        ancestor_ids = self._get_ancestor_ids(page_id)
+        if not checked and self._is_dynamic_descendant_locked(page_id):
+            # Dynamic descendants inherit their selected state from an active
+            # parent and cannot be unchecked independently.
+            self._apply_selected_ids(self._selected_ids)
+            return
 
         # Manage cascade-selected parents.
         if (
@@ -1077,8 +1147,6 @@ class PagesPage(QWidget):
             self._cascade_selected_parent_ids.add(page_id)
         elif not checked:
             self._cascade_selected_parent_ids.discard(page_id)
-            # Manual deselection inside a subtree should stop parent auto-cascade.
-            self._cascade_selected_parent_ids.difference_update(ancestor_ids)
         
         updated_selected_ids = apply_selection_rule(
             page_id,
@@ -1086,8 +1154,16 @@ class PagesPage(QWidget):
             selected_ids = selected_ids,
             children_map = self._children_map,
             behavior     = self._page_selection_behavior,
+            dynamic_parent_ids=self._cascade_selected_parent_ids,
         )
         updated_selected_ids = self._apply_cascade_selection(updated_selected_ids)
+        if (
+            not checked
+            and self._page_selection_behavior == PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS
+        ):
+            self._cascade_selected_parent_ids.difference_update(
+                {page_id, *get_descendant_ids(page_id, self._children_map)}
+            )
         self._selected_ids = set(updated_selected_ids)
 
         if updated_selected_ids != selected_ids:
@@ -1096,25 +1172,6 @@ class PagesPage(QWidget):
 
         self._persist_selection_state()
 
-    def _get_ancestor_ids(self, page_id: str) -> set[str]:
-        """Return ancestor page ids for one page, guarding against cycles."""
-        ancestors: set[str] = set()
-        current_id = page_id
-
-        while True:
-            page = self._pages_by_id.get(current_id)
-            if page is None or page.parent_type != "page_id" or not page.parent_id:
-                break
-
-            parent_id = page.parent_id
-            if parent_id in ancestors:
-                break
-
-            ancestors.add(parent_id)
-            current_id = parent_id
-
-        return ancestors
-
     def _collect_selected_ids(self) -> set[str]:
         """Collect currently checked pages from the tree widget."""
         return {
@@ -1122,6 +1179,20 @@ class PagesPage(QWidget):
             for page_id, item in self._items_by_id.items()
             if item.checkState(0) == self._check_state_checked()
         }
+
+    def _dynamic_locked_page_ids(self) -> set[str]:
+        """Return pages whose selection is inherited from a Dynamic-mode root."""
+        if self._page_selection_behavior != PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS:
+            return set()
+        return get_dynamic_locked_descendant_ids(
+            self._selected_ids,
+            self._cascade_selected_parent_ids,
+            self._children_map,
+        )
+
+    def _is_dynamic_descendant_locked(self, page_id: str) -> bool:
+        """Return whether an active Dynamic-mode ancestor forces this page selected."""
+        return page_id in self._dynamic_locked_page_ids()
 
     def _apply_selected_ids(self, selected_ids: set[str]) -> None:
         """Apply a selected-id set to all tree items without recursive signal loops."""
@@ -1150,6 +1221,13 @@ class PagesPage(QWidget):
             return False
         if self._tree.columnAt(click_pos.x()) != 0:
             return False
+        page_id = self._item_page_id(item)
+        if (
+            page_id is not None
+            and item.checkState(0) == self._check_state_checked()
+            and self._is_dynamic_descendant_locked(page_id)
+        ):
+            return True
 
         item.setCheckState(
             0,
@@ -1185,6 +1263,7 @@ class PagesPage(QWidget):
         for entry in self._context_menu_schema.on_item:
             if entry.type == "action":
                 action = menu.addAction(self._page_action_label(entry, page_id))
+                action.setEnabled(self._page_action_is_enabled(entry, page_id))
                 action.triggered.connect(
                     lambda _checked=False, e=entry, pid=page_id: self._run_page_action_entry(e, pid)
                 )
@@ -1233,6 +1312,14 @@ class PagesPage(QWidget):
 
         return entry.label
 
+    def _page_action_is_enabled(self, entry: ContextMenuEntry, page_id: str) -> bool:
+        """Disable context actions that would unselect a locked descendant."""
+        if entry.key not in {"toggle_page", "toggle_page_and_children"}:
+            return True
+        if page_id not in self._selected_ids:
+            return True
+        return not self._is_dynamic_descendant_locked(page_id)
+
     def _run_page_action_entry(self, entry: ContextMenuEntry, page_id: str | None) -> None:
         """Dispatch one schema action entry to the matching page-state operation."""
         if entry.key == "toggle_page":
@@ -1272,12 +1359,37 @@ class PagesPage(QWidget):
         """Toggle one page selection without affecting descendants."""
         updated_selected_ids = set(self._selected_ids)
         if page_id in updated_selected_ids:
-            updated_selected_ids.discard(page_id)
+            if self._is_dynamic_descendant_locked(page_id):
+                return
             self._cascade_selected_parent_ids.discard(page_id)
-            self._cascade_selected_parent_ids.difference_update(self._get_ancestor_ids(page_id))
+            if self._page_selection_behavior == PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS:
+                updated_selected_ids = apply_selection_rule(
+                    page_id,
+                    checked=False,
+                    selected_ids=updated_selected_ids,
+                    children_map=self._children_map,
+                    behavior=self._page_selection_behavior,
+                    dynamic_parent_ids=self._cascade_selected_parent_ids,
+                )
+                self._cascade_selected_parent_ids.difference_update(
+                    {page_id, *get_descendant_ids(page_id, self._children_map)}
+                )
+            else:
+                updated_selected_ids.discard(page_id)
         else:
-            updated_selected_ids.add(page_id)
-            self._cascade_selected_parent_ids.discard(page_id)
+            if self._page_selection_behavior == PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS:
+                self._cascade_selected_parent_ids.add(page_id)
+                updated_selected_ids = apply_selection_rule(
+                    page_id,
+                    checked=True,
+                    selected_ids=updated_selected_ids,
+                    children_map=self._children_map,
+                    behavior=self._page_selection_behavior,
+                    dynamic_parent_ids=self._cascade_selected_parent_ids,
+                )
+            else:
+                updated_selected_ids.add(page_id)
+                self._cascade_selected_parent_ids.discard(page_id)
         self._set_selected_ids_and_persist(updated_selected_ids)
 
     def _toggle_page_and_children(self, page_id: str) -> None:
@@ -1286,10 +1398,16 @@ class PagesPage(QWidget):
         updated_selected_ids = set(self._selected_ids)
         is_subtree_fully_selected = all(child_page_id in updated_selected_ids for child_page_id in subtree_page_ids)
         if is_subtree_fully_selected:
+            if self._is_dynamic_descendant_locked(page_id):
+                return
             updated_selected_ids.difference_update(subtree_page_ids)
+            self._cascade_selected_parent_ids.difference_update(subtree_page_ids)
         else:
             updated_selected_ids.update(subtree_page_ids)
-        self._cascade_selected_parent_ids.difference_update(subtree_page_ids)
+            if self._page_selection_behavior == PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS:
+                self._cascade_selected_parent_ids.add(page_id)
+            else:
+                self._cascade_selected_parent_ids.difference_update(subtree_page_ids)
         self._set_selected_ids_and_persist(updated_selected_ids)
 
     def _set_selected_ids_and_persist(self, selected_ids: set[str]) -> None:

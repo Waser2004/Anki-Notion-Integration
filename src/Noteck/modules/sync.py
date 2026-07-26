@@ -31,6 +31,15 @@ from .notion_client import (
     merge_markdown_table_colors,
 )
 from .parser import CardParseResult, CardParseWarning, ToggleCardPayload, parse_page_to_cards
+from .pages import (
+    PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS,
+    PageRefreshCancelled,
+    begin_startup_page_refresh,
+    finish_startup_page_refresh,
+    get_startup_page_refresh_status,
+    normalize_page_selection_behavior,
+    refresh_pages,
+)
 from .settings import SettingsStore, create_default_settings
 
 
@@ -114,6 +123,8 @@ def sync_notion_to_anki(
     db_path: str | Path,
     progress_callback: SyncProgressCallback | None = None,
     should_cancel: SyncCancelCheck | None = None,
+    refresh_pages_before_sync: bool = False,
+    startup_page_refresh_generation: int | None = None,
 ) -> SyncResult:
     """Run a blocking Notion → Anki sync."""
     global _LOG
@@ -128,17 +139,53 @@ def sync_notion_to_anki(
         db = Database(db_path)
         _ensure_db_ready(db)
         ensure_notion_toggle_model(mw)
-        enabled_pages = _load_enabled_pages(db)
     except Exception as exc:
         _LOG.exception("Sync aborted during local initialization.")
+        return SyncResult(ok=False, message=f"Sync failed: {exc}", errors=(str(exc),))
+
+    profile_name = _resolve_profile_name(mw)
+    client: NotionClient | None = None
+    try:
+        selection_behavior = normalize_page_selection_behavior(
+            SettingsStore(db, profile_name=profile_name).get_value("page_selection_behavior")
+        )
+        if (
+            refresh_pages_before_sync
+            or selection_behavior == PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS
+        ):
+            client = NotionClient.from_settings(db, profile_name=profile_name)
+
+            def publish_page_refresh_progress(loaded_count: int) -> None:
+                """Expose page discovery in the same wording used by the Pages tab."""
+                _publish_progress(
+                    callback = progress_callback,
+                    label    = f"Refreshing pages... loaded {loaded_count}",
+                )
+
+            # refresg pages and report progress to the sync progress callback
+            refresh_pages(
+                db,
+                profile_name       = profile_name,
+                progress_callback  = publish_page_refresh_progress,
+                should_cancel      = should_cancel,
+                client             = client,
+                startup_generation = startup_page_refresh_generation,
+            )
+
+        enabled_pages = _load_enabled_pages(db)
+    except PageRefreshCancelled:
+        _LOG.warning("Sync cancelled while refreshing dynamic page selection.")
+        return _build_cancelled_result(SyncStats())
+    except Exception as exc:
+        _LOG.exception("Sync aborted while refreshing dynamic page selection.")
         return SyncResult(ok=False, message=f"Sync failed: {exc}", errors=(str(exc),))
     if not enabled_pages:
         _LOG.info("Sync finished without work: no enabled pages.")
         return SyncResult(ok=True, message="No enabled pages to sync.", stats=SyncStats())
 
-    profile_name = _resolve_profile_name(mw)
     try:
-        client = NotionClient.from_settings(db, profile_name=profile_name)
+        if client is None:
+            client = NotionClient.from_settings(db, profile_name=profile_name)
     except Exception as exc:
         _LOG.exception("Sync aborted while creating the Notion client.")
         return SyncResult(ok=False, message=f"Sync failed: {exc}", errors=(str(exc),))
@@ -415,6 +462,8 @@ def run_notion_sync_with_progress(
     db_path: str | Path,
     on_done: SyncDoneCallback | None = None,
     parent: Any | None = None,
+    refresh_pages_before_sync: bool = False,
+    startup_page_refresh_generation: int | None = None,
 ) -> bool:
     """Run Notion sync with Anki's native progress dialog and cancel support."""
     taskman = getattr(mw, "taskman", None)
@@ -462,6 +511,8 @@ def run_notion_sync_with_progress(
             db_path=db_path,
             progress_callback=emit_progress,
             should_cancel=should_cancel,
+            refresh_pages_before_sync=refresh_pages_before_sync,
+            startup_page_refresh_generation=startup_page_refresh_generation,
         )
 
     def done(future: Any) -> None:
@@ -503,29 +554,53 @@ def _notify_sync_done(result: SyncResult) -> None:
 def trigger_startup_sync(
     mw: Any,
     db_path: str | Path,
-) -> None:
+) -> bool:
     """Start sync on profile open when enabled in settings."""
     global _sync_is_running
     if _sync_is_running:
-        return
+        return False
 
     db = Database(db_path)
     _ensure_db_ready(db)
     store = SettingsStore(db, profile_name=_resolve_profile_name(mw))
     if not bool(store.get_value("notion_to_anki_auto_sync")):
-        return
+        return False
 
-    def on_done(_result: SyncResult) -> None:
+    startup_page_refresh_generation = begin_startup_page_refresh()
+
+    def on_done(result: SyncResult) -> None:
         global _sync_is_running
         _sync_is_running = False
+        status = get_startup_page_refresh_status(startup_page_refresh_generation)
+        if status is not None and status.running:
+            finish_startup_page_refresh(
+                startup_page_refresh_generation,
+                loaded_count=status.loaded_count,
+                error_message=(
+                    result.message
+                    if not result.ok
+                    else "Startup page refresh did not complete."
+                ),
+            )
 
     # Reuse the native progress flow at startup so users can see and cancel sync.
-    _sync_is_running = run_notion_sync_with_progress(
+    _sync_is_running = True
+    started = run_notion_sync_with_progress(
         mw=mw,
         db_path=db_path,
         on_done=on_done,
         parent=mw,
+        refresh_pages_before_sync=True,
+        startup_page_refresh_generation=startup_page_refresh_generation,
     )
+    if not started:
+        _sync_is_running = False
+        finish_startup_page_refresh(
+            startup_page_refresh_generation,
+            loaded_count=0,
+            error_message="Startup sync could not be started.",
+        )
+    return started
 
 
 def trigger_sync_with_anki_button(

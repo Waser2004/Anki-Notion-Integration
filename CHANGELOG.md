@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.4.0 - 2026-07-25
+## 1.4.0 - 2026-07-26
 
 > [!WARNING]
 > **Parser and card template changes**
@@ -13,6 +13,7 @@
 - Cloze-delete an entire paragraph, heading, list item, quote, callout, or toggle by applying one of your selected cloze colors to the whole block.
 - Learn more about cloze parsing in sections 7 and 8 of the [Noteck documentation](https://noteck.notion.site/Documentation-30524ef63480806ea3fdf015a0fd7963?source=copy_link).
 - After upgrading, open **Settings** → **Cards** and select **Update card templates** to install the new bundled cloze templates.
+- Improved the dynamic page-selection workflow.
 
 ## 1.3.0 - 2026-07-14
 
