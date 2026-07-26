@@ -105,6 +105,26 @@ _MARKDOWN_CELL_RE = re.compile(
 _MARKDOWN_ATTRIBUTE_RE = re.compile(
     r"([A-Za-z][\w-]*)\s*=\s*([\"'])(.*?)\2", re.DOTALL
 )
+_MARKDOWN_LINK_START_RE = re.compile(
+    r"(?<!!)\[(?P<label>(?:\\.|[^\]])*)\]\("
+)
+_MARKDOWN_CODE_RE = re.compile(
+    r"(?P<fence>`+)(?P<body>.*?)(?P=fence)", re.DOTALL
+)
+_MARKDOWN_MATH_RE = re.compile(
+    r"(?<!\\)\$(?P<body>.*?)(?<!\\)\$", re.DOTALL
+)
+_MARKDOWN_BOLD_RE = re.compile(r"\*\*(?P<body>.+?)\*\*", re.DOTALL)
+_MARKDOWN_ITALIC_RE = re.compile(
+    r"(?<!\*)\*(?!\*)(?P<body>.+?)(?<!\*)\*(?!\*)", re.DOTALL
+)
+_MARKDOWN_STRIKETHROUGH_RE = re.compile(r"~~(?P<body>.+?)~~", re.DOTALL)
+_MARKDOWN_ESCAPE_RE = re.compile(r"\\([\\*~`$\[\]<>^|{}])")
+_MARKDOWN_BREAK_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+_MARKDOWN_DATE_MENTION_RE = re.compile(
+    r"<mention-date\b(?P<attrs>[^>]*)/?>",
+    re.IGNORECASE,
+)
 _MARKDOWN_TAG_RE = re.compile(r"<[^>]+>")
 _MARKDOWN_UNKNOWN_RE = re.compile(
     r"<unknown\b(?P<attrs>[^>]*)/?>",
@@ -158,7 +178,10 @@ def _extract_markdown_table_colors(markdown: str) -> list[dict[str, Any]]:
             )
             cells = [
                 {
-                    "text": _normalize_table_text(cell_match.group("body")),
+                    "text": _normalize_table_text(
+                        cell_match.group("body"),
+                        enhanced_markdown=True,
+                    ),
                     "color": _markdown_color(
                         _markdown_attributes(cell_match.group("attrs")).get("color")
                     ),
@@ -218,10 +241,102 @@ def _markdown_color(value: Any) -> str | None:
     return color or None
 
 
-def _normalize_table_text(value: str) -> str:
+def _normalize_table_text(value: str, *, enhanced_markdown: bool = False) -> str:
     """Normalize table cell text for matching the two API representations."""
-    plain = html.unescape(_MARKDOWN_TAG_RE.sub("", value or ""))
+    prepared = value or ""
+    protected: list[str] = []
+
+    if enhanced_markdown:
+        # Inline code and equations are literal content. Protect them before removing Markdown delimiters or XML-like formatting tags.
+        def protect_value(literal: str) -> str:
+            token = f"\ue000{len(protected)}\ue001"
+            protected.append(literal)
+            return token
+
+        def protect_literal(match: re.Match[str]) -> str:
+            return protect_value(match.group("body"))
+
+        # Protect literal content before removing Markdown formatting or HTML-like tags.
+        prepared = _MARKDOWN_CODE_RE.sub(protect_literal, prepared)
+        prepared = _MARKDOWN_MATH_RE.sub(protect_literal, prepared)
+        prepared = _MARKDOWN_ESCAPE_RE.sub(
+            lambda match: protect_value(match.group(1)),
+            prepared,
+        )
+        prepared = _strip_markdown_link_destinations(prepared)
+        for formatting_pattern in (
+            _MARKDOWN_BOLD_RE,
+            _MARKDOWN_STRIKETHROUGH_RE,
+            _MARKDOWN_ITALIC_RE,
+        ):
+            # Repeating handles nested combinations such as bold italic text.
+            while True:
+                normalized = formatting_pattern.sub(
+                    lambda match: match.group("body"),
+                    prepared,
+                )
+                if normalized == prepared:
+                    break
+                prepared = normalized
+        prepared = _MARKDOWN_BREAK_RE.sub(" ", prepared)
+        prepared = _MARKDOWN_DATE_MENTION_RE.sub(
+            lambda match: _markdown_date_mention_text(match.group("attrs")),
+            prepared,
+        )
+
+    plain = html.unescape(_MARKDOWN_TAG_RE.sub("", prepared))
+    for index, literal in enumerate(protected):
+        plain = plain.replace(f"\ue000{index}\ue001", literal)
     return " ".join(plain.split()).strip()
+
+
+def _strip_markdown_link_destinations(value: str) -> str:
+    """Keep link labels while consuming balanced Markdown destinations."""
+    parts: list[str] = []
+    cursor = 0
+    while True:
+        match = _MARKDOWN_LINK_START_RE.search(value, cursor)
+        if match is None:
+            parts.append(value[cursor:])
+            break
+
+        depth = 1
+        destination_index = match.end()
+        while destination_index < len(value) and depth:
+            character = value[destination_index]
+            if character == "\\" and destination_index + 1 < len(value):
+                destination_index += 2
+                continue
+
+            # Consume balanced parentheses in the Markdown link destination.
+            if character == "(":
+                depth += 1
+            elif character == ")":
+                depth -= 1
+                
+            destination_index += 1
+
+        # link never closed, preserve the rest of the string as-is
+        if depth:
+            # Preserve malformed or incomplete input rather than dropping text.
+            parts.append(value[cursor:])
+            break
+
+        parts.append(value[cursor:match.start()])
+        parts.append(match.group("label"))
+        cursor = destination_index
+
+    return "".join(parts)
+
+
+def _markdown_date_mention_text(raw_attributes: str) -> str:
+    """Return the block-API-style visible text for one Markdown date mention."""
+    attributes = _markdown_attributes(raw_attributes)
+    start = attributes.get("start", "")
+    end = attributes.get("end", "")
+    if start and end:
+        return f"{start} → {end}"
+    return start
 
 
 def _table_text_matrix(block: NotionBlock) -> list[list[str]]:

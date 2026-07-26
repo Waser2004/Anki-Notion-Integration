@@ -745,6 +745,16 @@ class SyncTests(unittest.TestCase):
             _SYNC_MODULE.cloze_marker_colors_need_sync(reopened_db, ["yellow"])
         )
 
+    def test_empty_cloze_marker_selection_does_not_remain_pending(self) -> None:
+        """A successful sync with no marker colors must clear the settings warning."""
+        _SYNC_MODULE._set_cloze_marker_colors(self._db, [])
+
+        reopened_db = Database(self._db_path)
+        self.assertFalse(
+            _SYNC_MODULE.cloze_marker_colors_need_sync(reopened_db, [])
+        )
+        self.assertEqual(_SYNC_MODULE._load_cloze_marker_colors(reopened_db), [])
+
     def test_sync_removes_only_obsolete_cards_from_updated_cloze_note(self) -> None:
         """Removed cloze ordinals must not leave empty cards or affect other notes."""
         collection = _FakeCollection()

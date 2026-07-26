@@ -1551,7 +1551,11 @@ def _load_cloze_marker_colors(db: Database) -> list[str] | None:
     """Return the marker-color selection used by the last successful sync."""
     raw_value = db.get_setting(_CLOZE_MARKER_COLORS_SETTING_KEY)
     # Existing installations predate this snapshot and treated every color as enabled.
-    return raw_value.split(",") if raw_value is not None else list(CLOZE_MARKER_COLORS)
+    if raw_value is None:
+        return list(CLOZE_MARKER_COLORS)
+    # An empty string is the durable representation of an intentionally empty
+    # selection; splitting it would incorrectly create a single empty option.
+    return raw_value.split(",") if raw_value else []
 
 
 def cloze_marker_colors_need_sync(db: Database, colors: list[str]) -> bool:

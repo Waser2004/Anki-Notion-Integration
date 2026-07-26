@@ -2642,6 +2642,75 @@ class ParserTests(unittest.TestCase):
         self.assertNotIn("{{c7::", text)
         self.assertNotIn("{{c5::", text)
 
+    def test_markdown_table_colors_match_formatted_cell_text(self) -> None:
+        """Markdown formatting must not prevent matching block-API table text."""
+        table = _block(
+            "table-formatted-colors",
+            "table",
+            {"table_width": 5, "has_column_header": False, "has_row_header": False},
+            children=(
+                _block(
+                    "table-formatted-row",
+                    "table_row",
+                    {
+                        "cells": [
+                            [_text_item("Bold link")],
+                            [_text_item("x * y")],
+                            [_text_item("x * y")],
+                            [_text_item("*literal*")],
+                            [_text_item("Line one Line two")],
+                        ]
+                    },
+                ),
+            ),
+        )
+        markdown = (
+            "<table>\n"
+            "<tr>"
+            '<td color="yellow_bg">***Bold*** '
+            '[~~link~~](https://example.test/a_(nested_(value)))</td>'
+            '<td color="green_bg">`x * y`</td>'
+            '<td color="blue_bg">$x * y$</td>'
+            '<td color="purple_bg">\\*literal\\*</td>'
+            '<td color="pink_bg"><span underline="true">Line one</span><br>Line two</td>'
+            "</tr>\n"
+            "</table>"
+        )
+
+        enriched = merge_markdown_table_colors([table], markdown)
+
+        self.assertEqual(
+            enriched[0].children[0].raw["table_row"].get("_noteck_cell_colors"),
+            ["yellow_bg", "green_bg", "blue_bg", "purple_bg", "pink_bg"],
+        )
+
+    def test_markdown_table_colors_match_date_mentions(self) -> None:
+        """Self-closing Markdown date mentions must match block-API plain text."""
+        table = _block(
+            "table-date-mention",
+            "table",
+            {"table_width": 1, "has_column_header": False, "has_row_header": False},
+            children=(
+                _block(
+                    "table-date-mention-row",
+                    "table_row",
+                    {"cells": [[_text_item("2026-07-26")]]},
+                ),
+            ),
+        )
+        markdown = (
+            "<table><tr>"
+            '<td color="yellow_bg"><mention-date start="2026-07-26"/></td>'
+            "</tr></table>"
+        )
+
+        enriched = merge_markdown_table_colors([table], markdown)
+
+        self.assertEqual(
+            enriched[0].children[0].raw["table_row"].get("_noteck_cell_colors"),
+            ["yellow_bg"],
+        )
+
     def test_unselected_markdown_color_renders_on_empty_table_cell(self) -> None:
         """Color metadata survives even when the block API cell has no rich text."""
         table = _block(
