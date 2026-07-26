@@ -63,7 +63,7 @@ class SettingsSchema:
         return tuple(self._settings_by_key.values())
 
 
-_SUPPORTED_TYPES = {"text", "checkbox", "boolean", "dropdown", "button"}
+_SUPPORTED_TYPES = {"text", "checkbox", "boolean", "dropdown", "multiselect", "button"}
 # Module files live in Noteck/modules while shared resources stay in Noteck/docs.
 _DEFAULT_SETTINGS_PATH = Path(__file__).resolve().parents[1] / "docs" / "settings.json"
 _DEFAULT_SERVICE_NAME = "Noteck"
@@ -127,7 +127,7 @@ def _parse_setting_definition(payload: Mapping[str, Any]) -> SettingDefinition:
         raise SettingsError("Each setting requires key, type, and name.")
     if setting_type not in _SUPPORTED_TYPES:
         raise SettingsError(f"Unsupported setting type: {setting_type}")
-    if setting_type == "dropdown":
+    if setting_type in {"dropdown", "multiselect"}:
         if not isinstance(options, Sequence) or not options:
             raise SettingsError(f"Dropdown setting {key} requires options.")
         options_tuple = tuple(str(option) for option in options)
@@ -167,6 +167,14 @@ def _coerce_value(setting: SettingDefinition, raw_value: str) -> Any:
         if setting.options and raw_value in setting.options:
             return raw_value
         return setting.default
+    if setting.type == "multiselect":
+        try:
+            values = json.loads(raw_value)
+        except (TypeError, json.JSONDecodeError):
+            return setting.default
+        if not isinstance(values, list) or any(value not in (setting.options or ()) for value in values):
+            return setting.default
+        return values
     return raw_value
 
 
@@ -183,6 +191,15 @@ def _serialize_value(setting: SettingDefinition, value: Any) -> str:
             raise SettingsError(
                 f"Invalid option for {setting.key}: {value}. Expected one of {setting.options}."
             )
+    if setting.type == "multiselect":
+        if not isinstance(value, (list, tuple, set)):
+            raise SettingsError(f"Invalid selection for {setting.key}: expected a list of options.")
+        invalid = [option for option in value if option not in (setting.options or ())]
+        if invalid:
+            raise SettingsError(f"Invalid options for {setting.key}: {invalid}.")
+        # Preserve schema order for deterministic storage and change detection.
+        selected = [option for option in (setting.options or ()) if option in value]
+        return json.dumps(selected, separators=(",", ":"))
     return "" if value is None else str(value)
 
 

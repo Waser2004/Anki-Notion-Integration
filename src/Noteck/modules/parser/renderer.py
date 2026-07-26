@@ -1,25 +1,19 @@
-"""Parse Notion block trees into deterministic card payloads."""
+"""Render Notion block trees and rich text into deterministic HTML.
+
+This module owns all Notion-to-HTML rendering decisions so card parsers can focus
+on selecting and assembling card payloads.
+"""
 
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass, field
-import hashlib
 import html
 import math
 import re
-from typing import Any, Collection, Iterable, Mapping
+from typing import Any, Callable, Iterable
 from urllib.parse import urlsplit
 
-from .card_types import BASIC, BASIC_REVERSED, CLOZE, INPUT, normalize_default_selectable_card_type
-from .cards import (
-    MODEL_NAME_BASIC,
-    MODEL_NAME_BASIC_REVERSED,
-    MODEL_NAME_CLOZE,
-    MODEL_NAME_INPUT,
-    NOTION_CARD_BACKGROUND_FIELD,
-)
-from .notion_client import NotionBlock
+from ..notion_client import NotionBlock
 
 _SAFE_COLOR_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz_")
 _SAFE_LANG_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-")
@@ -28,10 +22,7 @@ _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _NUMBER_RE = re.compile(r"(?:0[xX][0-9A-Fa-f]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)")
 _OPERATOR_CHARS = frozenset("+-*/%=!<>|&^~?:")
 _PUNCTUATION_CHARS = frozenset("()[]{}.,;")
-_CLOZE_EXTRA_PREFIX_RE = re.compile(r"^\s*extra\s*:\s*", re.IGNORECASE)
 _MEANINGFUL_NON_TEXT_HTML_RE = re.compile(r"<img\b", re.IGNORECASE)
-
-# Notion exposes the same fixed palette for every color-capable block type.
 _NOTION_BLOCK_FOREGROUND_COLORS = frozenset(
     {"gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red"}
 )
@@ -41,7 +32,6 @@ _NOTION_BLOCK_BACKGROUND_COLORS = frozenset(
 _NOTION_BLOCK_COLORS = frozenset(
     {"default", *_NOTION_BLOCK_FOREGROUND_COLORS, *_NOTION_BLOCK_BACKGROUND_COLORS}
 )
-
 # Canonical language labels and aliases for common Notion code-block values.
 _LANGUAGE_ALIASES = {
     "py": "python",
@@ -209,51 +199,14 @@ _LANGUAGE_TYPES: dict[str, frozenset[str]] = {
     "css": frozenset({"px", "em", "rem", "vh", "vw"}),
 }
 
-
-@dataclass(frozen=True)
-class ToggleCardPayload:
-    """Represents one parsed Notion card payload."""
-
-    notion_page_id: str
-    notion_block_id: str
-    front_html: str = ""
-    back_html: str = ""
-    card_type: str = BASIC
-    model_name: str = MODEL_NAME_BASIC
-    fields: dict[str, str] = field(default_factory=dict)
-    content_hash: str = ""
-    last_edited_time: str | None = None
-
-
-@dataclass(frozen=True)
-class CardParseWarning:
-    """Describe one Notion block that could not produce a usable card."""
-    code: str
-    message: str
-    notion_block_id: str
-
-
-@dataclass(frozen=True)
-class CardParseResult:
-    """Return parsed payloads and recoverable block diagnostics together."""
-    payloads: tuple[ToggleCardPayload, ...]
-    warnings: tuple[CardParseWarning, ...]
-
-
-@dataclass(frozen=True)
-class ImageOcclusionCandidate:
-    """Represents one image candidate for Image Occlusion workflow."""
-
-    notion_block_id: str
-    image_url: str
-    caption_html: str
-    caption_plain: str
-
-
-def extract_root_toggle_blocks(blocks: Iterable[NotionBlock]) -> list[NotionBlock]:
-    """Return only top-level toggle blocks."""
-    return [block for block in blocks if block.block_type == "toggle"]
-
+RichTextRenderer = Callable[[Iterable[dict[str, Any]]], str]
+# Advanced cloze rendering can replace a whole colorable block's direct text
+# while the shared renderer continues to own that block's surrounding HTML.
+BlockTextOverride = Callable[[NotionBlock], str | None]
+# Table cells may replace a uniformly colored cell with one cloze marker. The
+# stylesheet determines the active cell background after Anki renders clozes.
+TableCellOverride = Callable[[list[dict[str, Any]]], str | None]
+TABLE_CELL_CLOZE_COLOR_KEY = "_noteck_table_cell_cloze_color"
 
 def render_rich_text(rich_text: Iterable[dict[str, Any]]) -> str:
     """Render Notion rich text items into sanitized HTML."""
@@ -263,8 +216,20 @@ def render_rich_text(rich_text: Iterable[dict[str, Any]]) -> str:
     return "".join(parts)
 
 
+
 def render_blocks(blocks: Iterable[NotionBlock]) -> str:
     """Render blocks to deterministic HTML while coalescing list sequences."""
+    return render_blocks_with_renderer(blocks, rich_text_renderer=render_rich_text)
+
+
+def render_blocks_with_renderer(
+    blocks: Iterable[NotionBlock],
+    *,
+    rich_text_renderer: RichTextRenderer,
+    block_text_override: BlockTextOverride | None = None,
+    table_cell_override: TableCellOverride | None = None,
+) -> str:
+    """Render blocks with optional cloze-aware direct-text and cell overrides."""
     ordered_blocks = list(blocks)
     html_chunks: list[str] = []
     index = 0
@@ -273,160 +238,139 @@ def render_blocks(blocks: Iterable[NotionBlock]) -> str:
         block = ordered_blocks[index]
         if block.block_type in {"bulleted_list_item", "numbered_list_item"}:
             tag_name = "ul" if block.block_type == "bulleted_list_item" else "ol"
-            list_html, index = _render_list_sequence(ordered_blocks, index, block.block_type, tag_name)
+            list_html, index = _render_list_sequence(
+                ordered_blocks,
+                index,
+                block.block_type,
+                tag_name,
+                rich_text_renderer=rich_text_renderer,
+                block_text_override=block_text_override,
+                table_cell_override=table_cell_override,
+            )
             html_chunks.append(list_html)
             continue
 
-        html_chunks.append(_render_block(block))
+        html_chunks.append(
+            _render_block(
+                block,
+                rich_text_renderer=rich_text_renderer,
+                block_text_override=block_text_override,
+                table_cell_override=table_cell_override,
+            )
+        )
         index += 1
 
     return "".join(chunk for chunk in html_chunks if chunk)
 
 
-def parse_page_to_cards(
-    page_id: str,
-    blocks: Iterable[NotionBlock],
+
+def _render_block(
+    block: NotionBlock,
     *,
-    default_card_type:   str                      = BASIC,
-    card_type_overrides: Mapping[str, str] | None = None,
-    enable_cloze:        bool                     = False,
-    include_block_ids:   Collection[str] | None   = None,
-    warnings:            list[CardParseWarning]   = [],
-) -> list[ToggleCardPayload]:
-    """Parse page blocks into typed card payloads."""
-    resolved_default_card_type = normalize_default_selectable_card_type(default_card_type)
-    normalized_include_block_ids = {str(block_id) for block_id in include_block_ids} if include_block_ids else None
-    top_level_blocks = list(blocks)
-    payloads: list[ToggleCardPayload] = []
-    for block in extract_root_toggle_blocks(top_level_blocks):
-        # Skip excluded/non-target blocks before rendering payload fields.
-        if normalized_include_block_ids is not None and block.block_id not in normalized_include_block_ids:
-            continue
-        
-        # apply card specific card type override.
-        normalized_overrides: dict[str, str] = {}
-        if card_type_overrides:
-            normalized_overrides = {
-                str(block_id): normalize_default_selectable_card_type(card_type)
-                for block_id, card_type in card_type_overrides.items()
-            }
-        resolved_card_type = normalized_overrides.get(block.block_id, resolved_default_card_type)
-
-        try:
-            # Render each card independently so malformed content does not stop the page.
-            front_html = _render_toggle_front(block)
-            back_html = render_blocks(block.children)
-        except Exception as exc:
-            warnings.append(
-                CardParseWarning(
-                    code="card_parse_failed",
-                    message=f"Toggle could not be rendered: {exc}",
-                    notion_block_id=block.block_id,
-                )
-            )
-            continue
-
-        if not _rich_text_to_plain(_block_rich_text(block)).strip():
-            warnings.append(
-                CardParseWarning(
-                    code="empty_toggle_title",
-                    message="Toggle has no usable title and was skipped.",
-                    notion_block_id=block.block_id,
-                )
-            )
-            continue
-        if not _has_usable_card_content(back_html):
-            warnings.append(
-                CardParseWarning(
-                    code="empty_toggle_content",
-                    message="Toggle has no usable card contents and was skipped.",
-                    notion_block_id=block.block_id,
-                )
-            )
-            continue
-
-        # create card fields and content hash for change detection
-        fields = _build_toggle_fields(
-            block_id=block.block_id,
-            front_html=front_html,
-            back_html=back_html,
-            back_blocks=block.children,
-            card_type=resolved_card_type,
-            card_background=_block_background_color(block),
-        )
-        model_name = _model_name_for_card_type(resolved_card_type)
-        content_hash = _compute_payload_content_hash(
-            page_id=page_id,
-            block_id=block.block_id,
-            card_type=resolved_card_type,
-            model_name=model_name,
-            fields=fields,
-        )
-
-        # add card to output list
-        payloads.append(
-            ToggleCardPayload(
-                notion_page_id=page_id,
-                notion_block_id=block.block_id,
-                front_html=front_html,
-                back_html=back_html,
-                card_type=resolved_card_type,
-                model_name=model_name,
-                fields=fields,
-                content_hash=content_hash,
-                last_edited_time=_as_optional_string(block.raw.get("last_edited_time")),
-            )
-        )
-
-    # parse cloze
-    if enable_cloze:
-        payloads.extend(
-            _parse_top_level_cloze_paragraphs(
-                page_id,
-                top_level_blocks,
-                include_block_ids=normalized_include_block_ids,
-                warnings=warnings,
-            )
-        )
-
-    return payloads
-
-
-def _render_block(block: NotionBlock) -> str:
+    rich_text_renderer: RichTextRenderer,
+    block_text_override: BlockTextOverride | None,
+    table_cell_override: TableCellOverride | None,
+) -> str:
     """Render a single block, including required children recursion."""
     block_type = block.block_type
     if block_type == "heading_1":
-        return _render_heading(block, level=1)
+        return _render_heading(
+            block,
+            level=1,
+            rich_text_renderer=rich_text_renderer,
+            block_text_override=block_text_override,
+            table_cell_override=table_cell_override,
+        )
     if block_type == "heading_2":
-        return _render_heading(block, level=2)
+        return _render_heading(
+            block,
+            level=2,
+            rich_text_renderer=rich_text_renderer,
+            block_text_override=block_text_override,
+            table_cell_override=table_cell_override,
+        )
     if block_type == "heading_3":
-        return _render_heading(block, level=3)
+        return _render_heading(
+            block,
+            level=3,
+            rich_text_renderer=rich_text_renderer,
+            block_text_override=block_text_override,
+            table_cell_override=table_cell_override,
+        )
     if block_type == "column_list":
-        return _render_column_list(block)
+        return _render_column_list(
+            block,
+            rich_text_renderer=rich_text_renderer,
+            block_text_override=block_text_override,
+            table_cell_override=table_cell_override,
+        )
     if block_type == "column":
-        return _render_column(block)
+        return _render_column(
+            block,
+            rich_text_renderer=rich_text_renderer,
+            block_text_override=block_text_override,
+            table_cell_override=table_cell_override,
+        )
     if block_type == "paragraph":
-        return _render_paragraph(block)
+        return _render_paragraph(
+            block,
+            rich_text_renderer=rich_text_renderer,
+            block_text_override=block_text_override,
+            table_cell_override=table_cell_override,
+        )
     if block_type == "table":
-        return _render_table(block)
+        return _render_table(
+            block,
+            rich_text_renderer=rich_text_renderer,
+            table_cell_override=table_cell_override,
+        )
     if block_type == "quote":
-        return _render_quote(block)
+        return _render_quote(
+            block,
+            rich_text_renderer=rich_text_renderer,
+            block_text_override=block_text_override,
+            table_cell_override=table_cell_override,
+        )
     if block_type == "callout":
-        return _render_callout(block)
+        return _render_callout(
+            block,
+            rich_text_renderer=rich_text_renderer,
+            block_text_override=block_text_override,
+            table_cell_override=table_cell_override,
+        )
     if block_type == "image":
-        return _render_image(block)
+        return _render_image(
+            block,
+            rich_text_renderer=rich_text_renderer,
+            block_text_override=block_text_override,
+        )
     if block_type == "code":
-        return _render_code_block(block)
+        return _render_code_block(
+            block,
+            rich_text_renderer=rich_text_renderer,
+            block_text_override=block_text_override,
+        )
     if block_type == "equation":
-        return _render_block_equation(block)
+        return _render_block_equation(block, block_text_override=block_text_override)
     if block_type == "toggle":
-        return _render_toggle_inline(block)
+        return _render_toggle_inline(
+            block,
+            rich_text_renderer=rich_text_renderer,
+            block_text_override=block_text_override,
+            table_cell_override=table_cell_override,
+        )
     if block_type == "divider":
         return "<hr/>"
     return ""
 
 
-def _render_column_list(block: NotionBlock) -> str:
+def _render_column_list(
+    block: NotionBlock,
+    *,
+    rich_text_renderer: RichTextRenderer,
+    block_text_override: BlockTextOverride | None,
+    table_cell_override: TableCellOverride | None,
+) -> str:
     """Render a Notion multi-column container with width ratios."""
     column_blocks = [child for child in block.children if child.block_type == "column"]
     if not column_blocks:
@@ -435,20 +379,50 @@ def _render_column_list(block: NotionBlock) -> str:
     # Resolve ratios once so rendering is deterministic for any column count.
     width_ratios = _resolve_column_width_ratios(column_blocks)
     rendered_columns = [
-        _render_column_with_width(column_block, width_ratio=width_ratio)
+        _render_column_with_width(
+            column_block,
+            width_ratio=width_ratio,
+            rich_text_renderer=rich_text_renderer,
+            block_text_override=block_text_override,
+            table_cell_override=table_cell_override,
+        )
         for column_block, width_ratio in zip(column_blocks, width_ratios)
     ]
     return f'<div class="notion-columns">{"".join(rendered_columns)}</div>'
 
 
-def _render_column(block: NotionBlock) -> str:
+def _render_column(
+    block: NotionBlock,
+    *,
+    rich_text_renderer: RichTextRenderer,
+    block_text_override: BlockTextOverride | None,
+    table_cell_override: TableCellOverride | None,
+) -> str:
     """Render a standalone column block when encountered directly."""
-    return _render_column_with_width(block, width_ratio=None)
+    return _render_column_with_width(
+        block,
+        width_ratio=None,
+        rich_text_renderer=rich_text_renderer,
+        block_text_override=block_text_override,
+        table_cell_override=table_cell_override,
+    )
 
 
-def _render_column_with_width(block: NotionBlock, *, width_ratio: float | None) -> str:
+def _render_column_with_width(
+    block: NotionBlock,
+    *,
+    width_ratio: float | None,
+    rich_text_renderer: RichTextRenderer,
+    block_text_override: BlockTextOverride | None,
+    table_cell_override: TableCellOverride | None,
+) -> str:
     """Render one column block and optionally apply an explicit width ratio."""
-    children_html = render_blocks(block.children)
+    children_html = render_blocks_with_renderer(
+        block.children,
+        rich_text_renderer=rich_text_renderer,
+        block_text_override=block_text_override,
+        table_cell_override=table_cell_override,
+    )
     if width_ratio is None:
         return f'<div class="notion-column">{children_html}</div>'
 
@@ -458,46 +432,140 @@ def _render_column_with_width(block: NotionBlock, *, width_ratio: float | None) 
     return f'<div class="notion-column"{ratio_attr}{style_attr}>{children_html}</div>'
 
 
-def _render_paragraph(block: NotionBlock) -> str:
+def _render_block_text(
+    block: NotionBlock,
+    *,
+    rich_text_renderer: RichTextRenderer,
+    block_text_override: BlockTextOverride | None,
+) -> str:
+    """Render direct rich text, allowing advanced cloze callers to replace it."""
+    rendered, _ = _render_block_text_with_status(
+        block,
+        rich_text_renderer=rich_text_renderer,
+        block_text_override=block_text_override,
+    )
+    return rendered
+
+
+def _render_block_text_with_status(
+    block: NotionBlock,
+    *,
+    rich_text_renderer: RichTextRenderer,
+    block_text_override: BlockTextOverride | None,
+) -> tuple[str, bool]:
+    """Render direct rich text and report whether a cloze override supplied it."""
+    if block_text_override is not None:
+        overridden_text = block_text_override(block)
+        if overridden_text is not None:
+            return overridden_text, True
+    return rich_text_renderer(_block_rich_text(block)), False
+
+
+def _render_paragraph(
+    block: NotionBlock,
+    *,
+    rich_text_renderer: RichTextRenderer,
+    block_text_override: BlockTextOverride | None,
+    table_cell_override: TableCellOverride | None,
+) -> str:
     """Render a paragraph block and any nested children."""
-    text_html = render_rich_text(_block_rich_text(block))
-    class_attr = _block_color_class_attribute(block)
+    text_html, text_was_overridden = _render_block_text_with_status(
+        block,
+        rich_text_renderer=rich_text_renderer,
+        block_text_override=block_text_override,
+    )
+    class_attr = "" if text_was_overridden else _block_color_class_attribute(block)
     body = f"<p{class_attr}>{text_html}</p>"
-    children_html = render_blocks(block.children)
+    children_html = render_blocks_with_renderer(
+        block.children,
+        rich_text_renderer=rich_text_renderer,
+        block_text_override=block_text_override,
+        table_cell_override=table_cell_override,
+    )
     return body + children_html
 
 
-def _render_heading(block: NotionBlock, *, level: int) -> str:
+def _render_heading(
+    block: NotionBlock,
+    *,
+    level: int,
+    rich_text_renderer: RichTextRenderer,
+    block_text_override: BlockTextOverride | None,
+    table_cell_override: TableCellOverride | None,
+) -> str:
     """Render a heading block (levels 1-3) and any nested children."""
-    text_html = render_rich_text(_block_rich_text(block))
-    class_attr = _block_color_class_attribute(block)
+    text_html, text_was_overridden = _render_block_text_with_status(
+        block,
+        rich_text_renderer=rich_text_renderer,
+        block_text_override=block_text_override,
+    )
+    class_attr = "" if text_was_overridden else _block_color_class_attribute(block)
     body = f"<h{level}{class_attr}>{text_html}</h{level}>"
-    children_html = render_blocks(block.children)
+    children_html = render_blocks_with_renderer(
+        block.children,
+        rich_text_renderer=rich_text_renderer,
+        block_text_override=block_text_override,
+        table_cell_override=table_cell_override,
+    )
     return body + children_html
 
 
-def _render_quote(block: NotionBlock) -> str:
+def _render_quote(
+    block: NotionBlock,
+    *,
+    rich_text_renderer: RichTextRenderer,
+    block_text_override: BlockTextOverride | None,
+    table_cell_override: TableCellOverride | None,
+) -> str:
     """Render a quote block."""
-    text_html = render_rich_text(_block_rich_text(block))
+    text_html, text_was_overridden = _render_block_text_with_status(
+        block,
+        rich_text_renderer=rich_text_renderer,
+        block_text_override=block_text_override,
+    )
     body = f"<p>{text_html}</p>" if text_html else ""
-    children_html = render_blocks(block.children)
-    class_attr = _block_color_class_attribute(block)
+    children_html = render_blocks_with_renderer(
+        block.children,
+        rich_text_renderer=rich_text_renderer,
+        block_text_override=block_text_override,
+        table_cell_override=table_cell_override,
+    )
+    class_attr = "" if text_was_overridden else _block_color_class_attribute(block)
     return f"<blockquote{class_attr}>{body}{children_html}</blockquote>"
 
 
-def _render_callout(block: NotionBlock) -> str:
+def _render_callout(
+    block: NotionBlock,
+    *,
+    rich_text_renderer: RichTextRenderer,
+    block_text_override: BlockTextOverride | None,
+    table_cell_override: TableCellOverride | None,
+) -> str:
     """Render a callout block with optional leading icon."""
     payload = _block_payload(block)
     icon_html = _render_callout_icon(payload.get("icon"))
-    text_html = render_rich_text(_block_rich_text(block))
+    text_html, text_was_overridden = _render_block_text_with_status(
+        block,
+        rich_text_renderer=rich_text_renderer,
+        block_text_override=block_text_override,
+    )
     body = f"<p>{text_html}</p>" if text_html else ""
-    children_html = render_blocks(block.children)
-    class_attr = _block_color_class_attribute(block, base_class="callout")
+    children_html = render_blocks_with_renderer(
+        block.children,
+        rich_text_renderer=rich_text_renderer,
+        block_text_override=block_text_override,
+        table_cell_override=table_cell_override,
+    )
+    class_attr = (
+        ' class="callout"'
+        if text_was_overridden
+        else _block_color_class_attribute(block, base_class="callout")
+    )
     return f'<div{class_attr}>{icon_html}<div>{body}{children_html}</div></div>'
 
 
 def _render_callout_icon(icon_payload: Any) -> str:
-    """Render a callout emoji icon when available."""
+    """Render a callout emoji, uploaded, or external icon when available."""
     if not isinstance(icon_payload, dict):
         return ""
 
@@ -506,34 +574,83 @@ def _render_callout_icon(icon_payload: Any) -> str:
         if isinstance(emoji, str) and emoji:
             return f'<p class="notion-callout-icon">{html.escape(emoji)}</p>'
 
+    icon_type = icon_payload.get("type")
+    if icon_type in {"external", "file"}:
+        source = icon_payload.get(icon_type)
+        url = _sanitize_media_href(source.get("url")) if isinstance(source, dict) else ""
+        if url:
+            return (
+                '<img class="notion-callout-icon notion-callout-icon-image" '
+                f'src="{html.escape(url, quote=True)}" alt="" loading="lazy"/>'
+            )
+
     return ""
 
 
-def _render_toggle_inline(block: NotionBlock) -> str:
+def _render_toggle_inline(
+    block: NotionBlock,
+    *,
+    rich_text_renderer: RichTextRenderer,
+    block_text_override: BlockTextOverride | None,
+    table_cell_override: TableCellOverride | None,
+) -> str:
     """Render a nested toggle for inline display in parent cards."""
-    title_html = render_rich_text(_block_rich_text(block))
-    children_html = render_blocks(block.children)
-    class_attr = _block_color_class_attribute(block, base_class="notion-toggle")
+    title_html, text_was_overridden = _render_block_text_with_status(
+        block,
+        rich_text_renderer=rich_text_renderer,
+        block_text_override=block_text_override,
+    )
+    children_html = render_blocks_with_renderer(
+        block.children,
+        rich_text_renderer=rich_text_renderer,
+        block_text_override=block_text_override,
+        table_cell_override=table_cell_override,
+    )
+    class_attr = (
+        ' class="notion-toggle"'
+        if text_was_overridden
+        else _block_color_class_attribute(block, base_class="notion-toggle")
+    )
     return f'<details{class_attr}><summary>{title_html}</summary>{children_html}</details>'
 
 
-def _render_code_block(block: NotionBlock) -> str:
+def _render_code_block(
+    block: NotionBlock,
+    *,
+    rich_text_renderer: RichTextRenderer,
+    block_text_override: BlockTextOverride | None,
+) -> str:
     """Render a code block with lightweight syntax-highlight spans when possible."""
     payload = _block_payload(block)
+    language = _sanitize_language(payload.get("language"))
+    class_attr = f' class="language-{language}"' if language else ""
+
+    # A colored parent callout supplies a full-text marker through the shared
+    # override while retaining the recognizable code-block container.
+    overridden_text = block_text_override(block) if block_text_override is not None else None
+    if overridden_text is not None:
+        return f'<pre class="code"><code{class_attr}>{overridden_text}</code></pre>'
+
     code_rich_text = payload.get("rich_text") if isinstance(payload.get("rich_text"), list) else []
     code_text = _rich_text_to_plain(code_rich_text)
-    language = _sanitize_language(payload.get("language"))
     if language == "mermaid":
-        return _render_mermaid_code_block(code_text, payload)
+        return _render_mermaid_code_block(code_text, payload, rich_text_renderer=rich_text_renderer)
 
     canonical_language = _canonicalize_language(language)
-    class_attr = f' class="language-{language}"' if language else ""
     code_html = _render_highlighted_code(code_text, canonical_language)
     return f'<pre class="code"><code{class_attr}>{code_html}</code></pre>'
 
 
-def _render_block_equation(block: NotionBlock) -> str:
+def _render_block_equation(
+    block: NotionBlock,
+    *,
+    block_text_override: BlockTextOverride | None,
+) -> str:
     """Render a display equation using MathJax delimiters."""
+    overridden_text = block_text_override(block) if block_text_override is not None else None
+    if overridden_text is not None:
+        return f'<div class="notion-block-equation">{overridden_text}</div>'
+
     payload = _block_payload(block)
     expression = _normalize_equation_expression(payload.get("expression"))
     return f'<div class="notion-block-equation">\\[{html.escape(expression)}\\]</div>'
@@ -544,6 +661,10 @@ def _render_list_sequence(
     start_index: int,
     block_type: str,
     list_tag: str,
+    *,
+    rich_text_renderer: RichTextRenderer,
+    block_text_override: BlockTextOverride | None,
+    table_cell_override: TableCellOverride | None,
 ) -> tuple[str, int]:
     """Render consecutive list item blocks as one list."""
     index = start_index
@@ -551,16 +672,30 @@ def _render_list_sequence(
 
     while index < len(blocks) and blocks[index].block_type == block_type:
         block = blocks[index]
-        text_html = render_rich_text(_block_rich_text(block))
-        children_html = render_blocks(block.children)
-        class_attr = _block_color_class_attribute(block)
+        text_html, text_was_overridden = _render_block_text_with_status(
+            block,
+            rich_text_renderer=rich_text_renderer,
+            block_text_override=block_text_override,
+        )
+        children_html = render_blocks_with_renderer(
+            block.children,
+            rich_text_renderer=rich_text_renderer,
+            block_text_override=block_text_override,
+            table_cell_override=table_cell_override,
+        )
+        class_attr = "" if text_was_overridden else _block_color_class_attribute(block)
         items.append(f"<li{class_attr}>{text_html}{children_html}</li>")
         index += 1
 
     return f"<{list_tag}>{''.join(items)}</{list_tag}>", index
 
 
-def _render_table(block: NotionBlock) -> str:
+def _render_table(
+    block: NotionBlock,
+    *,
+    rich_text_renderer: RichTextRenderer,
+    table_cell_override: TableCellOverride | None,
+) -> str:
     """Render a Notion table block and its row children."""
     payload = _block_payload(block)
     has_column_header = bool(payload.get("has_column_header"))
@@ -574,7 +709,15 @@ def _render_table(block: NotionBlock) -> str:
 
     # process header row if present
     if has_column_header:
-        header_html = f"<thead>{_render_table_row(rows[0], row_index=0, has_column_header=True, has_row_header=False)}</thead>"
+        header_row_html = _render_table_row(
+            rows[0],
+            row_index=0,
+            has_column_header=True,
+            has_row_header=False,
+            rich_text_renderer=rich_text_renderer,
+            table_cell_override=table_cell_override,
+        )
+        header_html = f"<thead>{header_row_html}</thead>"
         body_rows = rows[1:]
     else:
         header_html = ""
@@ -586,6 +729,8 @@ def _render_table(block: NotionBlock) -> str:
             row_index=index + (1 if has_column_header else 0),
             has_column_header=has_column_header,
             has_row_header=has_row_header,
+            rich_text_renderer=rich_text_renderer,
+            table_cell_override=table_cell_override,
         )
         for index, row_cells in enumerate(body_rows)
     )
@@ -654,9 +799,29 @@ def _table_row_cells(row_block: NotionBlock, table_width: int | None) -> list[li
         return []
 
     cells: list[list[dict[str, Any]]] = []
-    for raw_cell in raw_cells:
+    cell_colors = row_payload.get("_noteck_cell_colors")
+    for cell_index, raw_cell in enumerate(raw_cells):
         if isinstance(raw_cell, list):
-            cells.append([item for item in raw_cell if isinstance(item, dict)])
+            cell_items = [item for item in raw_cell if isinstance(item, dict)]
+            color = cell_colors[cell_index] if isinstance(cell_colors, list) and cell_index < len(cell_colors) else None
+            if color:
+                cell_items = [
+                    dict(
+                        item,
+                        **{TABLE_CELL_CLOZE_COLOR_KEY: color},
+                    )
+                    for item in cell_items
+                ]
+                if not cell_items:
+                    cell_items.append(
+                        {
+                            "type": "text",
+                            "text": {"content": ""},
+                            "plain_text": "",
+                            TABLE_CELL_CLOZE_COLOR_KEY: color,
+                        }
+                    )
+            cells.append(cell_items)
         else:
             cells.append([])
 
@@ -674,28 +839,72 @@ def _render_table_row(
     row_index: int,
     has_column_header: bool,
     has_row_header: bool,
+    rich_text_renderer: RichTextRenderer,
+    table_cell_override: TableCellOverride | None,
 ) -> str:
     """Render one HTML table row honoring Notion header metadata."""
     parts: list[str] = []
     for column_index, cell_rich_text in enumerate(row_cells):
-        cell_html = render_rich_text(cell_rich_text)
+        cell_override = table_cell_override(cell_rich_text) if table_cell_override is not None else None
+        if cell_override is None:
+            cell_html = rich_text_renderer(cell_rich_text)
+        else:
+            cell_html = cell_override
+        # Mark only parser-confirmed whole-cell clozes. An inline cloze also
+        # gains Anki's `.cloze` class at review time, so CSS cannot infer the
+        # whole-cell behavior from descendants alone.
+        cell_class = (
+            ' class="notion-whole-cell-cloze"'
+            if cell_override is not None
+            else _table_cell_color_class_attribute(cell_rich_text)
+        )
         if has_column_header and row_index == 0:
-            parts.append(f'<th scope="col">{cell_html}</th>')
+            parts.append(f'<th scope="col"{cell_class}>{cell_html}</th>')
             continue
         if has_row_header and column_index == 0:
-            parts.append(f'<th scope="row">{cell_html}</th>')
+            parts.append(f'<th scope="row"{cell_class}>{cell_html}</th>')
             continue
-        parts.append(f"<td>{cell_html}</td>")
+        parts.append(f"<td{cell_class}>{cell_html}</td>")
     return f"<tr>{''.join(parts)}</tr>"
 
 
-def _render_image(block: NotionBlock) -> str:
+def _table_cell_color_class_attribute(cell_rich_text: Iterable[dict[str, Any]]) -> str:
+    """Return a safe visual background class for one Markdown-colored cell."""
+    colors = {
+        color
+        for item in cell_rich_text
+        if (color := _normalize_table_cell_background(item.get(TABLE_CELL_CLOZE_COLOR_KEY)))
+    }
+    if len(colors) != 1:
+        return ""
+    return f' class="highlight-{next(iter(colors))}"'
+
+
+def _normalize_table_cell_background(value: Any) -> str:
+    """Normalize enhanced-Markdown cell colors to a supported CSS background."""
+    color = str(value or "").strip().lower()
+    if color.endswith("_bg"):
+        color = f"{color.removesuffix('_bg')}_background"
+    elif color in _NOTION_BLOCK_FOREGROUND_COLORS:
+        # Table color metadata represents a cell surface, not text foreground.
+        color = f"{color}_background"
+    return color if color in _NOTION_BLOCK_BACKGROUND_COLORS else ""
+
+
+def _render_image(
+    block: NotionBlock,
+    *,
+    rich_text_renderer: RichTextRenderer,
+    block_text_override: BlockTextOverride | None,
+) -> str:
     """Render a Notion image block as a figure with optional caption."""
     payload = _block_payload(block)
     image_url = _extract_image_url(payload)
     caption_items = _extract_caption_items(payload.get("caption"))
-    caption_html = render_rich_text(caption_items)
-    caption_plain = _rich_text_to_plain(caption_items)
+    overridden_caption = block_text_override(block) if block_text_override is not None else None
+    caption_html = overridden_caption if overridden_caption is not None else rich_text_renderer(caption_items)
+    # Do not leave a hidden callout caption exposed through the image alt text.
+    caption_plain = "" if overridden_caption is not None else _rich_text_to_plain(caption_items)
     caption_tag = f"<figcaption>{caption_html}</figcaption>" if caption_html else ""
 
     if not image_url:
@@ -728,11 +937,16 @@ def _extract_caption_items(value: Any) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)]
 
 
-def _render_mermaid_code_block(code_text: str, payload: dict[str, Any]) -> str:
+def _render_mermaid_code_block(
+    code_text: str,
+    payload: dict[str, Any],
+    *,
+    rich_text_renderer: RichTextRenderer,
+) -> str:
     """Render Mermaid code as a sync-time SVG placeholder with source fallback."""
     encoded_source = base64.urlsafe_b64encode(code_text.encode("utf-8")).decode("ascii")
     code_html = html.escape(code_text)
-    caption_html = render_rich_text(_extract_caption_items(payload.get("caption")))
+    caption_html = rich_text_renderer(_extract_caption_items(payload.get("caption")))
     caption_tag = f"<figcaption>{caption_html}</figcaption>" if caption_html else ""
     return (
         '<figure class="notion-mermaid">'
@@ -804,15 +1018,6 @@ def _block_payload(block: NotionBlock) -> dict[str, Any]:
     return {}
 
 
-def _block_rich_text(block: NotionBlock) -> list[dict[str, Any]]:
-    """Return block rich_text list or an empty list."""
-    payload = _block_payload(block)
-    rich_text = payload.get("rich_text")
-    if isinstance(rich_text, list):
-        return [item for item in rich_text if isinstance(item, dict)]
-    return []
-
-
 def _block_color(block: NotionBlock) -> str:
     """Return one documented Notion block color or the default value."""
     color = _block_payload(block).get("color")
@@ -848,366 +1053,25 @@ def _block_color_class_attribute(block: NotionBlock, *, base_class: str = "") ->
     return f' class="{" ".join(classes)}"'
 
 
-def _render_toggle_front(block: NotionBlock) -> str:
-    """Render a toggle title via `render_blocks` for consistent front/back parsing."""
-    front_block = NotionBlock(
-        block_id=block.block_id,
-        block_type="paragraph",
-        has_children=False,
-        parent_id=block.parent_id,
-        parent_type=block.parent_type,
-        raw={
-            "id": block.block_id,
-            "type": "paragraph",
-            # Root backgrounds belong to the card surface; only foreground colors style its title.
-            "paragraph": {
-                "rich_text": _block_rich_text(block),
-                "color": _block_foreground_color(block),
-            },
-        },
-        children=(),
-    )
-    return render_blocks([front_block])
-
-
-def _build_toggle_fields(
-    *,
-    block_id: str,
-    front_html: str,
-    back_html: str,
-    back_blocks: Iterable[NotionBlock],
-    card_type: str,
-    card_background: str,
-) -> dict[str, str]:
-    """Build model fields for one parsed toggle block."""
-    if card_type == INPUT:
-        return {
-            "Front": front_html,
-            "Back": back_html,
-            "Expected Answer": _raw_text_from_blocks(back_blocks),
-            "Notion Block ID": block_id,
-            NOTION_CARD_BACKGROUND_FIELD: card_background,
-        }
-    return {
-        "Front": front_html,
-        "Back": back_html,
-        "Notion Block ID": block_id,
-        NOTION_CARD_BACKGROUND_FIELD: card_background,
-    }
-
-
-def _model_name_for_card_type(card_type: str) -> str:
-    """Return model name for one canonical card type."""
-    if card_type == BASIC_REVERSED:
-        return MODEL_NAME_BASIC_REVERSED
-    if card_type == INPUT:
-        return MODEL_NAME_INPUT
-    if card_type == CLOZE:
-        return MODEL_NAME_CLOZE
-    return MODEL_NAME_BASIC
-
-
-def _parse_top_level_cloze_paragraphs(
-    page_id: str,
-    blocks: list[NotionBlock],
-    *,
-    include_block_ids: set[str] | None        = None,
-    warnings:          list[CardParseWarning] = [],
-) -> list[ToggleCardPayload]:
-    """Parse top-level paragraphs containing cloze markers into cloze payloads."""
-    payloads: list[ToggleCardPayload] = []
-    consumed_indices: set[int] = set()
-
-    for index, block in enumerate(blocks):
-        if index in consumed_indices:
-            continue
-        if block.block_type != "paragraph":
-            continue
-        if include_block_ids is not None and block.block_id not in include_block_ids:
-            continue
-        try:
-            rich_text = _block_rich_text(block)
-            if not _paragraph_has_cloze_marker(rich_text):
-                continue
-
-            cloze_text = _rich_text_to_cloze_text(rich_text)
-            if not cloze_text.strip():
-                warnings.append(
-                    CardParseWarning(
-                        code="empty_cloze_content",
-                        message="Cloze paragraph produced no usable card text and was skipped.",
-                        notion_block_id=block.block_id,
-                    )
-                )
-                continue
-
-            extra_html = ""
-            next_index = index + 1
-            if next_index < len(blocks):
-                next_block = blocks[next_index]
-                # Keep cloze-extra deterministic: consume exactly one adjacent `Extra:` paragraph.
-                if _is_cloze_extra_paragraph(next_block):
-                    extra_html = _render_extra_paragraph_without_prefix(next_block)
-                    consumed_indices.add(next_index)
-            model_name = _model_name_for_card_type(CLOZE)
-            fields = {
-                "Text": cloze_text,
-                "Extra": extra_html,
-                "Notion Block ID": block.block_id,
-            }
-            payloads.append(
-                ToggleCardPayload(
-                    notion_page_id=page_id,
-                    notion_block_id=block.block_id,
-                    card_type=CLOZE,
-                    model_name=model_name,
-                    fields=fields,
-                    content_hash=_compute_payload_content_hash(
-                        page_id=page_id,
-                        block_id=block.block_id,
-                        card_type=CLOZE,
-                        model_name=model_name,
-                        fields=fields,
-                    ),
-                    last_edited_time=_as_optional_string(block.raw.get("last_edited_time")),
-                )
-            )
-        except Exception as exc:
-            warnings.append(
-                CardParseWarning(
-                    code="card_parse_failed",
-                    message=f"Cloze paragraph could not be rendered: {exc}",
-                    notion_block_id=block.block_id,
-                )
-            )
-    return payloads
-
 def _has_usable_card_content(rendered_html: str) -> bool:
-    """Return whether rendered toggle contents are not empty."""
+    """Return whether rendered toggle contents contain text or an image."""
     if not rendered_html:
         return False
 
     plain_text = re.sub(r"<[^>]+>", "", rendered_html)
     if html.unescape(plain_text).replace("\u00a0", " ").strip():
         return True
-
-    # Images are the only supported renderer output that can be meaningful
-    # without contributing text. Structural markup such as <p></p> is empty.
     return _MEANINGFUL_NON_TEXT_HTML_RE.search(rendered_html) is not None
 
 
-def _is_cloze_extra_paragraph(block: NotionBlock) -> bool:
-    """Return whether a paragraph starts with the cloze-extra `Extra:` prefix."""
-    if block.block_type != "paragraph":
-        return False
-    plain_text = _rich_text_to_plain(_block_rich_text(block))
-    return _CLOZE_EXTRA_PREFIX_RE.search(plain_text) is not None
+def _block_rich_text(block: NotionBlock) -> list[dict[str, Any]]:
+    """Return block rich_text list or an empty list."""
+    payload = _block_payload(block)
+    rich_text = payload.get("rich_text")
+    if isinstance(rich_text, list):
+        return [item for item in rich_text if isinstance(item, dict)]
+    return []
 
-
-def _render_extra_paragraph_without_prefix(block: NotionBlock) -> str:
-    """Render one extra paragraph as HTML after stripping a leading `Extra:` prefix."""
-    rich_text = _block_rich_text(block)
-    stripped_rich_text = _strip_extra_prefix_from_rich_text(rich_text)
-    return render_rich_text(stripped_rich_text)
-
-
-def _strip_extra_prefix_from_rich_text(rich_text: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Clone rich text and strip the `Extra:` prefix from the first content segment."""
-    stripped_items: list[dict[str, Any]] = []
-    stripped_prefix = False
-
-    for item in rich_text:
-        item_copy = dict(item)
-        if not stripped_prefix and item_copy.get("type") == "equation":
-            equation_payload = item_copy.get("equation")
-            if isinstance(equation_payload, dict):
-                expression = equation_payload.get("expression")
-                if isinstance(expression, str):
-                    stripped_expression = _CLOZE_EXTRA_PREFIX_RE.sub("", expression, count=1)
-                    if stripped_expression != expression:
-                        equation_copy = dict(equation_payload)
-                        equation_copy["expression"] = stripped_expression
-                        item_copy["equation"] = equation_copy
-                        stripped_prefix = True
-        if not stripped_prefix:
-            text_payload = item_copy.get("text")
-            if isinstance(text_payload, dict):
-                content = text_payload.get("content")
-                if isinstance(content, str):
-                    stripped_content = _CLOZE_EXTRA_PREFIX_RE.sub("", content, count=1)
-                    if stripped_content != content:
-                        text_copy = dict(text_payload)
-                        text_copy["content"] = stripped_content
-                        item_copy["text"] = text_copy
-                        plain_text = item_copy.get("plain_text")
-                        if isinstance(plain_text, str):
-                            item_copy["plain_text"] = _CLOZE_EXTRA_PREFIX_RE.sub(
-                                "",
-                                plain_text,
-                                count=1,
-                            )
-                        stripped_prefix = True
-        stripped_items.append(item_copy)
-
-    return stripped_items
-
-
-def _paragraph_has_cloze_marker(rich_text: Iterable[dict[str, Any]]) -> bool:
-    """Return whether rich text includes a cloze marker annotation."""
-    for item in rich_text:
-        if _is_cloze_marker_item(item):
-            return True
-    return False
-
-
-def _rich_text_to_cloze_text(rich_text: Iterable[dict[str, Any]]) -> str:
-    """Build Anki cloze text from Notion rich text using yellow markers."""
-    parts: list[str] = []
-    run_parts: list[str] = []
-    run_is_marker: bool | None = None
-
-    def flush_run() -> None:
-        """Append one accumulated rich-text run to the final cloze output."""
-        nonlocal run_is_marker
-        if not run_parts:
-            return
-
-        rendered_run = "".join(run_parts)
-        parts.append(f"{{{{c1::{rendered_run}}}}}" if run_is_marker else rendered_run)
-        run_parts.clear()
-        run_is_marker = None
-
-    for item in rich_text:
-        if not isinstance(item, dict):
-            continue
-        rendered_fragment = _render_cloze_rich_text_fragment(item)
-        if not rendered_fragment:
-            continue
-        is_marker = _is_cloze_marker_item(item)
-
-        # Merge adjacent highlighted items so one visual phrase becomes one cloze.
-        if run_is_marker is not None and is_marker != run_is_marker:
-            flush_run()
-
-        if run_is_marker is None:
-            run_is_marker = is_marker
-        run_parts.append(rendered_fragment)
-
-    flush_run()
-    return "".join(parts)
-
-
-def _is_cloze_marker_item(item: Any) -> bool:
-    """Return whether one rich-text item is marked for cloze conversion."""
-    if not isinstance(item, dict):
-        return False
-
-    annotations = item.get("annotations")
-    if not isinstance(annotations, dict):
-        return False
-
-    color = str(annotations.get("color") or "").strip().lower()
-    background_color = str(annotations.get("background_color") or "").strip().lower()
-    return color == "yellow_background" or background_color == "yellow"
-
-
-def _render_cloze_rich_text_fragment(item: dict[str, Any]) -> str:
-    """Render one rich-text item for the cloze field without broader text styling."""
-    if item.get("type") == "equation":
-        equation = item.get("equation")
-        if not isinstance(equation, dict):
-            return ""
-
-        expression = _normalize_equation_expression(equation.get("expression"))
-        if not expression:
-            return ""
-        return f'\\({html.escape(expression)}\\)'
-
-    raw_text = _extract_text_content(item)
-    if not raw_text:
-        return ""
-    return html.escape(raw_text)
-
-
-def normalize_typed_answer(value: str) -> str:
-    """Normalize a text/HTML answer for stable typed-answer matching."""
-    without_tags = re.sub(r"<[^>]+>", " ", value or "")
-    decoded = html.unescape(without_tags).lower()
-    stripped_punct = re.sub(r"[\W_]+", " ", decoded)
-    return " ".join(stripped_punct.split())
-
-
-def _raw_text_from_blocks(blocks: Iterable[NotionBlock]) -> str:
-    """Extract deterministic raw text from blocks while preserving equation syntax."""
-    parts: list[str] = []
-    for block in blocks:
-        own_text = _raw_text_from_single_block(block)
-        if own_text:
-            parts.append(own_text)
-        if block.children:
-            child_text = _raw_text_from_blocks(block.children)
-            if child_text:
-                parts.append(child_text)
-    return "\n".join(parts)
-
-
-def _raw_text_from_single_block(block: NotionBlock) -> str:
-    """Extract the plain-text content directly represented by one block."""
-    if block.block_type == "equation":
-        payload = _block_payload(block)
-        expression = payload.get("expression")
-        if isinstance(expression, str):
-            return expression
-        return ""
-
-    if block.block_type == "table_row":
-        payload = _block_payload(block)
-        cells = payload.get("cells")
-        if not isinstance(cells, list):
-            return ""
-        cell_parts: list[str] = []
-        for cell in cells:
-            if not isinstance(cell, list):
-                continue
-            rich_text_items = [item for item in cell if isinstance(item, dict)]
-            plain = _rich_text_to_plain(rich_text_items)
-            if plain:
-                cell_parts.append(plain)
-        return " | ".join(cell_parts)
-
-    if block.block_type == "image":
-        payload = _block_payload(block)
-        caption_items = _extract_caption_items(payload.get("caption"))
-        return _rich_text_to_plain(caption_items)
-
-    return _rich_text_to_plain(_block_rich_text(block))
-
-
-def collect_image_occlusion_candidates(blocks: Iterable[NotionBlock]) -> list[ImageOcclusionCandidate]:
-    """Collect image blocks outside of toggle trees for image occlusion."""
-    candidates: list[ImageOcclusionCandidate] = []
-
-    def walk(items: Iterable[NotionBlock], *, inside_toggle: bool) -> None:
-        for block in items:
-            next_inside_toggle = inside_toggle or block.block_type == "toggle"
-            if block.block_type == "image" and not next_inside_toggle:
-                payload = _block_payload(block)
-                image_url = _extract_image_url(payload)
-                if image_url:
-                    caption_items = _extract_caption_items(payload.get("caption"))
-                    candidates.append(
-                        ImageOcclusionCandidate(
-                            notion_block_id=block.block_id,
-                            image_url=image_url,
-                            caption_html=render_rich_text(caption_items),
-                            caption_plain=_rich_text_to_plain(caption_items),
-                        )
-                    )
-            if block.children:
-                walk(block.children, inside_toggle=next_inside_toggle)
-
-    walk(list(blocks), inside_toggle=False)
-    return candidates
 
 
 def _rich_text_to_plain(rich_text: Iterable[dict[str, Any]]) -> str:
@@ -1457,54 +1321,3 @@ def _normalize_equation_expression(value: Any) -> str:
         return ""
 
     return value.replace("\r\n", "\n").replace("\r", "\n").replace("\u00a0", " ")
-
-
-def _as_optional_string(value: Any) -> str | None:
-    """Normalize optional values to strings or None."""
-    if value is None:
-        return None
-    text = str(value)
-    return text if text else None
-
-
-def _compute_content_hash(
-    page_id: str,
-    block_id: str,
-    front_html: str,
-    back_html: str,
-) -> str:
-    """Compute a deterministic content hash for sync comparisons."""
-    return _compute_payload_content_hash(
-        page_id=page_id,
-        block_id=block_id,
-        card_type=BASIC,
-        model_name=MODEL_NAME_BASIC,
-        fields={
-            "Front": front_html,
-            "Back": back_html,
-            "Notion Block ID": block_id,
-        },
-    )
-
-
-def _compute_payload_content_hash(
-    *,
-    page_id: str,
-    block_id: str,
-    card_type: str,
-    model_name: str,
-    fields: dict[str, str],
-) -> str:
-    """Compute a deterministic content hash for any typed payload."""
-    ordered_fields = "\n".join(
-        f"{key}={fields[key]}"
-        for key in sorted(fields)
-    )
-    payload = (
-        f"{page_id}\n"
-        f"{block_id}\n"
-        f"{card_type}\n"
-        f"{model_name}\n"
-        f"{ordered_fields}"
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()

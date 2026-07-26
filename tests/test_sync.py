@@ -6,6 +6,7 @@ import base64
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -101,9 +102,14 @@ class _FakeDecks:
 class _FakeNote(dict):
     """Small note object supporting field assignment and id tracking."""
 
-    def __init__(self) -> None:
+    def __init__(self, model: dict[str, str]) -> None:
         super().__init__()
         self.id: int | None = None
+        self._model = dict(model)
+
+    def note_type(self) -> dict[str, str]:
+        """Return the Anki-style note type used to create this note."""
+        return self._model
 
 
 class _FakeMedia:
@@ -125,10 +131,11 @@ class _FakeCollection:
         self._next_note_id = 1000
         self.notes: dict[int, _FakeNote] = {}
         self.media = _FakeMedia(media_dir) if media_dir is not None else None
+        self.empty_cards_report = SimpleNamespace(notes=[])
+        self.removed_card_ids: list[int] = []
 
     def new_note(self, model: dict[str, str]) -> _FakeNote:
-        _ = model
-        return _FakeNote()
+        return _FakeNote(model)
 
     def add_note(self, note: _FakeNote, deck_id: int) -> None:
         _ = deck_id
@@ -139,10 +146,30 @@ class _FakeCollection:
     def get_note(self, note_id: int) -> _FakeNote | None:
         return self.notes.get(note_id)
 
+    def find_notes(self, query: str) -> list[int]:
+        """Support exact Noteck block-id field searches used for mapping repair."""
+        prefix = '"Notion Block ID:'
+        if not query.startswith(prefix) or not query.endswith('"'):
+            return []
+        block_id = query[len(prefix):-1].replace('\\"', '"').replace("\\\\", "\\")
+        return [
+            note_id
+            for note_id, note in self.notes.items()
+            if note.get("Notion Block ID") == block_id
+        ]
+
     def update_note(self, note: _FakeNote) -> None:
         if note.id is None:
             raise RuntimeError("note id missing")
         self.notes[note.id] = note
+
+    def get_empty_cards(self) -> SimpleNamespace:
+        """Return Anki-like empty-card report data for cleanup tests."""
+        return self.empty_cards_report
+
+    def remove_cards_and_orphaned_notes(self, card_ids: list[int]) -> None:
+        """Record card IDs removed by cloze reconciliation."""
+        self.removed_card_ids.extend(card_ids)
 
 
 class _FakeMw:
@@ -319,6 +346,30 @@ class _FakeNotionClientWithParagraphs(_FakeNotionClient):
             parent_type="page_id",
             raw=raw,
             children=(),
+        )
+
+
+class _SelectiveParagraphClozeClient(_FakeNotionClientWithParagraphs):
+    """Expose stable Markdown so unchanged paragraph clozes can skip parsing."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.included_text = "Included"
+
+    def get_page_content(self, page_id: str) -> list[NotionBlock]:
+        """Return mutable paragraph content with stable block identities."""
+        _ = page_id
+        return [
+            self._paragraph_block("cloze-excluded", "Excluded"),
+            self._paragraph_block("cloze-included", self.included_text),
+        ]
+
+    def get_page_markdown(self, page_id: str) -> NotionMarkdownSnapshot:
+        return NotionMarkdownSnapshot(
+            page_id=page_id,
+            markdown=f"Excluded\n\n{self.included_text}",
+            truncated=False,
+            unknown_block_ids=(),
         )
 
 
@@ -518,6 +569,84 @@ class _SelectiveMarkdownClient(_FakeNotionClient):
         )
 
 
+class _SelectiveAdvancedClozeClient(_FakeNotionClient):
+    """Expose one unchanged advanced cloze toggle through selective sync."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.recursive_calls = 0
+        self.title = "[cloze] Recovery"
+        self.body = "Marked answer"
+
+    def get_page_markdown(self, page_id: str) -> NotionMarkdownSnapshot:
+        return NotionMarkdownSnapshot(
+            page_id=page_id,
+            markdown=(
+                "<details>\n"
+                f"<summary>{self.title}</summary>\n"
+                f"\t{self.body}\n"
+                "</details>"
+            ),
+            truncated=False,
+            unknown_block_ids=(),
+        )
+
+    def get_page_blocks_shallow(self, page_id: str) -> list[NotionBlock]:
+        return [self._toggle(page_id, children=())]
+
+    def get_block_children_recursive(self, block_id: str) -> list[NotionBlock]:
+        self.recursive_calls += 1
+        return [
+            NotionBlock(
+                block_id=f"{block_id}-body",
+                block_type="paragraph",
+                has_children=False,
+                parent_id=block_id,
+                parent_type="block_id",
+                raw={
+                    "type": "paragraph",
+                    "paragraph": {
+                        "rich_text": [
+                            {
+                                "type": "text",
+                                "plain_text": self.body,
+                                "text": {"content": self.body},
+                                "annotations": {"color": "yellow_background"},
+                            }
+                        ]
+                    },
+                },
+                children=(),
+            )
+        ]
+
+    def get_page_content(self, page_id: str) -> list[NotionBlock]:
+        return [self._toggle(page_id, children=tuple(self.get_block_children_recursive("advanced-toggle")))]
+
+    def _toggle(self, page_id: str, *, children: tuple[NotionBlock, ...]) -> NotionBlock:
+        """Build the stable advanced-cloze root used across all sync runs."""
+        return NotionBlock(
+            block_id="advanced-toggle",
+            block_type="toggle",
+            has_children=True,
+            parent_id=page_id,
+            parent_type="page_id",
+            raw={
+                "type": "toggle",
+                "toggle": {
+                    "rich_text": [
+                        {
+                            "type": "text",
+                            "plain_text": self.title,
+                            "text": {"content": self.title},
+                        }
+                    ]
+                },
+            },
+            children=children,
+        )
+
+
 class _QueuedPageClient(_FakeNotionClient):
     """Return page inputs in one batch and reject sequential source retrieval."""
 
@@ -602,6 +731,87 @@ class SyncTests(unittest.TestCase):
             last_edited_time="2026-02-04T00:00:00.000Z",
         )
 
+    def test_cloze_marker_sync_status_survives_database_reopen(self) -> None:
+        """The settings warning must compare against durable last-sync state."""
+        _SYNC_MODULE._set_cloze_marker_colors(self._db, ["yellow", "green"])
+
+        reopened_db = Database(self._db_path)
+        self.assertFalse(
+            _SYNC_MODULE.cloze_marker_colors_need_sync(
+                reopened_db, ["yellow", "green"]
+            )
+        )
+        self.assertTrue(
+            _SYNC_MODULE.cloze_marker_colors_need_sync(reopened_db, ["yellow"])
+        )
+
+    def test_empty_cloze_marker_selection_does_not_remain_pending(self) -> None:
+        """A successful sync with no marker colors must clear the settings warning."""
+        _SYNC_MODULE._set_cloze_marker_colors(self._db, [])
+
+        reopened_db = Database(self._db_path)
+        self.assertFalse(
+            _SYNC_MODULE.cloze_marker_colors_need_sync(reopened_db, [])
+        )
+        self.assertEqual(_SYNC_MODULE._load_cloze_marker_colors(reopened_db), [])
+
+    def test_sync_removes_only_obsolete_cards_from_updated_cloze_note(self) -> None:
+        """Removed cloze ordinals must not leave empty cards or affect other notes."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        existing_note = collection.new_note({"name": "Notion (Cloze)"})
+        collection.add_note(existing_note, deck_id=1)
+        collection.empty_cards_report = SimpleNamespace(
+            notes=[
+                SimpleNamespace(note_id=existing_note.id, card_ids=[101, 102]),
+                SimpleNamespace(note_id=9999, card_ids=[201]),
+            ]
+        )
+
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                INSERT INTO cards (
+                    notion_block_id, notion_page_id, anki_note_id, card_type, content_hash
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("block-1", "page-1", existing_note.id, "cloze", "old-hash"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        cloze_payload = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="block-1",
+            card_type="cloze",
+            model_name="Notion (Cloze)",
+            fields={
+                "Text": "{{c1::Current deletion}}",
+                "Extra": "",
+                "Notion Block ID": "block-1",
+                "Notion Card Background": "",
+            },
+            content_hash="new-hash",
+        )
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[cloze_payload],
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_updated, 1)
+        self.assertEqual(collection.removed_card_ids, [101, 102])
+
     def test_sync_creates_note_and_mapping(self) -> None:
         collection = _FakeCollection()
         mw = _FakeMw(collection)
@@ -631,6 +841,44 @@ class SyncTests(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(str(row["notion_block_id"]), "block-1")
         self.assertGreater(int(row["anki_note_id"]), 0)
+
+    def test_sync_warns_for_markerless_cloze_without_creating_an_anki_note(self) -> None:
+        """Invalid cloze content is a card-local warning and must not reach Anki."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        invalid_cloze = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="markerless-cloze",
+            card_type="cloze",
+            model_name="Notion (Cloze)",
+            fields={
+                "Text": "<p>Plain text without a cloze deletion</p>",
+                "Extra": "",
+                "Notion Block ID": "markerless-cloze",
+            },
+            content_hash="markerless-cloze",
+        )
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[invalid_cloze],
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.errors, ())
+        self.assertEqual(collection.notes, {})
+        self.assertEqual(result.stats.cards_warned, 1)
+        self.assertEqual(result.stats.cards_skipped, 1)
+        self.assertEqual([warning.code for warning in result.warnings], ["invalid_cloze_card"])
+        self.assertEqual(result.warnings[0].page_id, "page-1")
+        self.assertEqual(result.warnings[0].block_id, "markerless-cloze")
+        self.assertIn("at least one deletion", result.warnings[0].message)
 
     def test_sync_reset_failure_returns_structured_warning(self) -> None:
         collection = _FakeCollection()
@@ -900,6 +1148,245 @@ class SyncTests(unittest.TestCase):
             _SYNC_MODULE._TOGGLE_REFRESH_REVISION,
         )
 
+    def test_paragraph_cloze_cleanup_preserves_advanced_toggle_mapping(self) -> None:
+        """Paragraph reconciliation must not detach advanced-toggle cloze cards."""
+        collection = _FakeCollection()
+        advanced_note = collection.new_note({"name": "Notion (Cloze)"})
+        stale_paragraph_note = collection.new_note({"name": "Notion (Cloze)"})
+        collection.add_note(advanced_note, deck_id=1)
+        collection.add_note(stale_paragraph_note, deck_id=1)
+
+        connection = self._db.connect()
+        try:
+            connection.executemany(
+                """
+                INSERT INTO cards (
+                    notion_block_id, notion_page_id, anki_note_id, card_type, content_hash
+                )
+                VALUES (?, 'page-1', ?, 'cloze', ?)
+                """,
+                (
+                    ("advanced-toggle", advanced_note.id, "advanced-hash"),
+                    ("removed-paragraph", stale_paragraph_note.id, "paragraph-hash"),
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        existing_cards = _SYNC_MODULE._load_existing_cards_for_page(self._db, "page-1")
+        warnings = []
+        stats = _SYNC_MODULE._detach_stale_paragraph_cloze_mappings(
+            db=self._db,
+            stats=SyncStats(),
+            warnings=warnings,
+            page_id="page-1",
+            existing_cards=existing_cards,
+            current_cloze_ids=set(),
+            root_toggle_ids={"advanced-toggle"},
+        )
+
+        remaining_cards = _SYNC_MODULE._load_existing_cards_for_page(self._db, "page-1")
+        self.assertIn("advanced-toggle", remaining_cards)
+        self.assertNotIn("removed-paragraph", remaining_cards)
+        self.assertEqual(stats.cards_detached, 1)
+        self.assertEqual([warning.block_id for warning in warnings], ["removed-paragraph"])
+        # Detachment removes only Noteck metadata; both Anki notes remain intact.
+        self.assertIn(advanced_note.id, collection.notes)
+        self.assertIn(stale_paragraph_note.id, collection.notes)
+
+    def test_cloze_revision_refreshes_root_toggles_to_repair_detached_mappings(self) -> None:
+        """A cloze parser revision must bypass unchanged root-toggle snapshots once."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        self._db.set_setting("enable_cloze_parsing", "1")
+        self._db.set_setting(_SYNC_MODULE._CLOZE_REFRESH_REVISION_SETTING_KEY, "legacy")
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "_sync_page_content",
+            return_value=(SyncStats(), [], False),
+        ) as sync_page_mock:
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertTrue(sync_page_mock.call_args.kwargs["force_toggle_refresh"])
+        self.assertTrue(sync_page_mock.call_args.kwargs["force_cloze_refresh"])
+        self.assertEqual(
+            self._db.get_setting(_SYNC_MODULE._CLOZE_REFRESH_REVISION_SETTING_KEY),
+            _SYNC_MODULE._CLOZE_REFRESH_REVISION,
+        )
+
+    def test_deleted_deck_recreates_unchanged_advanced_cloze_card(self) -> None:
+        """Advanced cloze mappings survive reconciliation and repair a missing note."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        client = _SelectiveAdvancedClozeClient()
+        self._db.set_setting("enable_cloze_parsing", "1")
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ):
+            created = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            unchanged = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            recursive_calls_after_unchanged = client.recursive_calls
+
+            mapping = _SYNC_MODULE._load_existing_cards_for_page(
+                self._db, "page-1"
+            )["advanced-toggle"]
+            deleted_note_id = int(mapping["anki_note_id"])
+            del collection.notes[deleted_note_id]
+
+            recreated = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(created.ok)
+        self.assertEqual(created.stats.cards_created, 1)
+        self.assertTrue(unchanged.ok)
+        self.assertEqual(unchanged.stats.cards_unchanged, 1)
+        self.assertEqual(recursive_calls_after_unchanged, 1)
+        self.assertTrue(recreated.ok)
+        self.assertEqual(recreated.stats.cards_created, 1)
+        self.assertEqual(recreated.stats.cards_missing_note, 1)
+        self.assertEqual(client.recursive_calls, 2)
+        repaired_mapping = _SYNC_MODULE._load_existing_cards_for_page(
+            self._db, "page-1"
+        )["advanced-toggle"]
+        self.assertNotEqual(int(repaired_mapping["anki_note_id"]), deleted_note_id)
+        self.assertIn(int(repaired_mapping["anki_note_id"]), collection.notes)
+
+    def test_removing_cloze_marker_converts_unchanged_mapping_to_page_type(self) -> None:
+        """A shallow title change must still convert a former advanced cloze."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        client = _SelectiveAdvancedClozeClient()
+        self._db.set_setting("enable_cloze_parsing", "1")
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ):
+            created = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            client.title = "Recovery"
+            converted = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(created.ok)
+        self.assertTrue(converted.ok)
+        self.assertEqual(client.recursive_calls, 2)
+        mapping = _SYNC_MODULE._load_existing_cards_for_page(
+            self._db, "page-1"
+        )["advanced-toggle"]
+        self.assertEqual(mapping["card_type"], "basic")
+
+    def test_disabling_cloze_parsing_preserves_advanced_toggle_mapping(self) -> None:
+        """A recognized cloze toggle stays a cloze source while parsing is paused."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        client = _SelectiveAdvancedClozeClient()
+        self._db.set_setting("enable_cloze_parsing", "1")
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ):
+            created = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            self._db.set_setting("enable_cloze_parsing", "0")
+            paused = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(created.ok)
+        self.assertTrue(paused.ok)
+        self.assertEqual(paused.stats.cards_unchanged, 1)
+        self.assertEqual(client.recursive_calls, 1)
+        mapping = _SYNC_MODULE._load_existing_cards_for_page(
+            self._db,
+            "page-1",
+        )["advanced-toggle"]
+        self.assertEqual(mapping["card_type"], "cloze")
+        self.assertIn(int(mapping["anki_note_id"]), collection.notes)
+
+    def test_reenabling_cloze_parsing_retries_changes_made_while_paused(self) -> None:
+        """Paused cloze sources retain their last-synced hashes until Anki is updated."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        client = _SelectiveAdvancedClozeClient()
+        self._db.set_setting("enable_cloze_parsing", "1")
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ):
+            created = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            stored_hash = _SYNC_MODULE._load_toggle_source_hashes(
+                self._db,
+                "page-1",
+            )["advanced-toggle"]
+            self._db.set_setting("enable_cloze_parsing", "0")
+            client.body = "Changed while paused"
+            paused = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            paused_hash = _SYNC_MODULE._load_toggle_source_hashes(
+                self._db,
+                "page-1",
+            )["advanced-toggle"]
+            self._db.set_setting("enable_cloze_parsing", "1")
+            resumed = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(created.ok)
+        self.assertTrue(paused.ok)
+        self.assertTrue(resumed.ok)
+        self.assertEqual(paused_hash, stored_hash)
+        self.assertEqual(client.recursive_calls, 3)
+        self.assertEqual(resumed.stats.cards_updated, 1)
+        resumed_hash = _SYNC_MODULE._load_toggle_source_hashes(
+            self._db,
+            "page-1",
+        )["advanced-toggle"]
+        self.assertNotEqual(resumed_hash, stored_hash)
+        saved_note = next(iter(collection.notes.values()))
+        self.assertIn("Changed while paused", str(saved_note.get("Text", "")))
+
+    def test_reenabling_cloze_parsing_retries_paused_paragraph_changes(self) -> None:
+        """The page hash must not hide paragraph-cloze edits made while disabled."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        client = _SelectiveParagraphClozeClient()
+        self._db.set_setting("enable_cloze_parsing", "1")
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ):
+            created = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            stored_hash = _SYNC_MODULE._load_page_content_hash(self._db, "page-1")
+            self._db.set_setting("enable_cloze_parsing", "0")
+            client.included_text = "Changed while paused"
+            paused = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            paused_hash = _SYNC_MODULE._load_page_content_hash(self._db, "page-1")
+            self._db.set_setting("enable_cloze_parsing", "1")
+            resumed = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(created.ok)
+        self.assertTrue(paused.ok)
+        self.assertTrue(resumed.ok)
+        self.assertEqual(paused_hash, stored_hash)
+        self.assertEqual(resumed.stats.cards_updated, 1)
+        resumed_hash = _SYNC_MODULE._load_page_content_hash(self._db, "page-1")
+        self.assertNotEqual(resumed_hash, stored_hash)
+        mapping = _SYNC_MODULE._load_existing_cards_for_page(
+            self._db,
+            "page-1",
+        )["cloze-included"]
+        saved_note = collection.get_note(int(mapping["anki_note_id"]))
+        self.assertIn("Changed while paused", str(saved_note.get("Text", "")))
+
     def test_markdown_snapshots_fetch_only_new_or_changed_toggles(self) -> None:
         collection = _FakeCollection()
         mw = _FakeMw(collection)
@@ -950,6 +1437,68 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(
             [str(row["notion_block_id"]) for row in snapshot_rows],
             ["block-1", "block-2"],
+        )
+
+    def test_selective_table_color_matching_uses_each_toggle_markdown(self) -> None:
+        """Identical tables in different toggles must retain their local color scope."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        client = _SelectiveMarkdownClient()
+        snapshot = client.get_page_markdown("page-1")
+        expected_sources = _SYNC_MODULE.extract_root_toggle_markdown(snapshot.markdown)
+        self.assertIsNotNone(expected_sources)
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ), patch.object(
+            _SYNC_MODULE,
+            "merge_markdown_table_colors",
+            wraps=_SYNC_MODULE.merge_markdown_table_colors,
+        ) as merge_mock:
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(
+            [call.args[1] for call in merge_mock.call_args_list],
+            list(expected_sources or ()),
+        )
+
+    def test_unchanged_markdown_skips_page_parsing_and_logs_reason(self) -> None:
+        """A stable page hash must bypass both toggle and paragraph-cloze parsers."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        client = _SelectiveParagraphClozeClient()
+        self._db.set_setting("enable_cloze_parsing", "1")
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            wraps=_SYNC_MODULE.parse_page_to_cards,
+        ) as parse_mock:
+            with self.assertLogs("noteck.sync", level="INFO") as first_captured:
+                first = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            first_parse_count = parse_mock.call_count
+            with self.assertLogs("noteck.sync", level="INFO") as captured:
+                second = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(first.ok)
+        self.assertGreater(first_parse_count, 0)
+        self.assertTrue(second.ok)
+        self.assertEqual(parse_mock.call_count, first_parse_count)
+        self.assertGreater(second.stats.cards_unchanged, 0)
+        self.assertIn(
+            "Page parsed. page_id=page-1 reasons=",
+            "\n".join(first_captured.output),
+        )
+        self.assertIn(
+            "Page parsing skipped. page_id=page-1 reason=markdown_unchanged",
+            "\n".join(captured.output),
         )
 
     def test_ambiguous_markdown_alignment_falls_back_to_full_page_tree(self) -> None:
@@ -1602,6 +2151,144 @@ class SyncTests(unittest.TestCase):
         self.assertIn("graph TD", back_html)
         self.assertIn("A --&gt; B", back_html)
 
+    def test_failed_mermaid_retries_locally_without_recursive_refetch(self) -> None:
+        """A retained Mermaid fallback must not refetch unchanged toggle descendants."""
+        collection = _FakeCollection(media_dir=self._media_dir)
+        mw = _FakeMw(collection)
+        client = _SelectiveAdvancedClozeClient()
+        client.title = "Recovery"
+        mermaid_source = "graph TD\nA --> B"
+        encoded_mermaid = base64.urlsafe_b64encode(mermaid_source.encode("utf-8")).decode("ascii")
+        payload = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="advanced-toggle",
+            front_html="<p>front</p>",
+            back_html=(
+                '<figure class="notion-mermaid"><div class="notion-mermaid-source" '
+                f'data-mermaid="{encoded_mermaid}"><pre class="code"><code class="language-mermaid">'
+                "graph TD\nA --&gt; B"
+                "</code></pre></div></figure>"
+            ),
+            content_hash="hash-mermaid-fallback",
+            last_edited_time="2026-02-04T00:00:00.000Z",
+        )
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[payload],
+        ) as parse_mock, patch.object(
+            _SYNC_MODULE,
+            "_render_mermaid_svg",
+            return_value=None,
+        ):
+            first = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            second = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(first.ok)
+        self.assertTrue(second.ok)
+        self.assertEqual(client.recursive_calls, 1)
+        parse_mock.assert_called_once()
+        self.assertEqual(second.stats.cards_unchanged, 1)
+        self.assertEqual(
+            [warning.code for warning in second.warnings],
+            ["mermaid_render_failed"],
+        )
+
+    def test_pending_mermaid_can_recover_locally_without_recursive_refetch(self) -> None:
+        """A later successful media retry should update Anki from its saved Back field."""
+        collection = _FakeCollection(media_dir=self._media_dir)
+        mw = _FakeMw(collection)
+        client = _SelectiveAdvancedClozeClient()
+        client.title = "Recovery"
+        mermaid_source = "graph TD\nA --> B"
+        encoded_mermaid = base64.urlsafe_b64encode(mermaid_source.encode("utf-8")).decode("ascii")
+        payload = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="advanced-toggle",
+            front_html="<p>front</p>",
+            back_html=(
+                '<figure class="notion-mermaid"><div class="notion-mermaid-source" '
+                f'data-mermaid="{encoded_mermaid}"><pre class="code"><code class="language-mermaid">'
+                "graph TD\nA --&gt; B"
+                "</code></pre></div></figure>"
+            ),
+            content_hash="hash-mermaid-retry",
+            last_edited_time="2026-02-04T00:00:00.000Z",
+        )
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[payload],
+        ) as parse_mock:
+            with patch.object(_SYNC_MODULE, "_render_mermaid_svg", return_value=None):
+                first = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            with patch.object(_SYNC_MODULE, "_render_mermaid_svg", return_value=b"<svg></svg>"):
+                second = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(first.ok)
+        self.assertTrue(second.ok)
+        self.assertEqual(client.recursive_calls, 1)
+        parse_mock.assert_called_once()
+        self.assertEqual(second.stats.cards_updated, 1)
+        saved_note = next(iter(collection.notes.values()))
+        self.assertNotIn("data-mermaid=", str(saved_note.get("Back", "")))
+        self.assertIn('class="notion-mermaid-dark"', str(saved_note.get("Back", "")))
+
+    def test_failed_cloze_media_retries_locally_without_reparsing(self) -> None:
+        """Unchanged paragraph clozes should retry remote images from saved note HTML."""
+        collection = _FakeCollection(media_dir=self._media_dir)
+        mw = _FakeMw(collection)
+        client = _SelectiveParagraphClozeClient()
+        self._db.set_setting("enable_cloze_parsing", "1")
+        payload = ToggleCardPayload(
+            notion_page_id="page-1",
+            notion_block_id="cloze-included",
+            card_type="cloze",
+            model_name="Notion (Cloze)",
+            fields={
+                "Text": "{{c1::Included}}",
+                "Extra": '<img src="https://example.com/unavailable.png" alt="img"/>',
+                "Notion Block ID": "cloze-included",
+            },
+            content_hash="hash-cloze-media-fallback",
+            last_edited_time="2026-02-04T00:00:00.000Z",
+        )
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=client,
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[payload],
+        ) as parse_mock, patch.object(
+            _SYNC_MODULE,
+            "_download_bytes",
+            return_value=None,
+        ):
+            first = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+            second = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(first.ok)
+        self.assertTrue(second.ok)
+        parse_mock.assert_called_once()
+        self.assertEqual(second.stats.cards_unchanged, 1)
+        self.assertEqual(
+            [warning.code for warning in second.warnings],
+            ["media_localization_failed"],
+        )
+
     def test_sync_marks_unchanged_when_hash_matches(self) -> None:
         collection = _FakeCollection()
         mw = _FakeMw(collection)
@@ -1812,6 +2499,123 @@ class SyncTests(unittest.TestCase):
             connection.close()
         self.assertIsNotNone(row)
         self.assertNotEqual(int(row["anki_note_id"]), 123456)
+
+    def test_sync_relinks_existing_note_when_mapping_is_missing(self) -> None:
+        """A lost local mapping must not duplicate a note with the same block id."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        existing_note = collection.new_note({"name": "Notion (Basic)"})
+        existing_note["Front"] = "<p>old front</p>"
+        existing_note["Back"] = "<p>old back</p>"
+        existing_note["Notion Block ID"] = "block-1"
+        collection.add_note(existing_note, deck_id=1)
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[self._payload(content_hash="new-hash")],
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_created, 0)
+        self.assertEqual(result.stats.cards_updated, 1)
+        self.assertEqual(len(collection.notes), 1)
+        self.assertEqual(existing_note["Front"], "<p>front</p>")
+        self.assertEqual(
+            [warning.code for warning in result.warnings],
+            ["existing_anki_note_relinked"],
+        )
+        mapping = _SYNC_MODULE._load_existing_cards_for_page(
+            self._db,
+            "page-1",
+        )["block-1"]
+        self.assertEqual(int(mapping["anki_note_id"]), existing_note.id)
+
+    def test_sync_does_not_relink_note_from_a_different_model(self) -> None:
+        """Identical fields do not make Basic and Basic+Reversed notes compatible."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        reversed_note = collection.new_note({"name": "Notion (Basic+Reversed)"})
+        reversed_note["Front"] = "<p>reversed front</p>"
+        reversed_note["Back"] = "<p>reversed back</p>"
+        reversed_note["Notion Block ID"] = "block-1"
+        collection.add_note(reversed_note, deck_id=1)
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[self._payload(content_hash="new-hash")],
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_created, 1)
+        self.assertEqual(result.stats.cards_updated, 0)
+        self.assertEqual(len(collection.notes), 2)
+        self.assertEqual(reversed_note["Front"], "<p>reversed front</p>")
+        mapping = _SYNC_MODULE._load_existing_cards_for_page(
+            self._db,
+            "page-1",
+        )["block-1"]
+        new_note = collection.get_note(int(mapping["anki_note_id"]))
+        self.assertIsNotNone(new_note)
+        self.assertEqual(new_note.note_type()["name"], "Notion (Basic)")
+
+    def test_sync_relinks_existing_note_when_mapped_note_id_is_stale(self) -> None:
+        """A profile restore may invalidate IDs while leaving the Noteck note."""
+        collection = _FakeCollection()
+        mw = _FakeMw(collection)
+        restored_note = collection.new_note({"name": "Notion (Basic)"})
+        restored_note["Front"] = "<p>restored front</p>"
+        restored_note["Back"] = "<p>restored back</p>"
+        restored_note["Notion Block ID"] = "block-1"
+        collection.add_note(restored_note, deck_id=1)
+
+        connection = self._db.connect()
+        try:
+            connection.execute(
+                """
+                INSERT INTO cards (
+                    notion_block_id, notion_page_id, anki_note_id, card_type, content_hash
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("block-1", "page-1", 123456, "basic", "old-hash"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with patch.object(_SYNC_MODULE, "ensure_notion_toggle_model"), patch.object(
+            _SYNC_MODULE.NotionClient,
+            "from_settings",
+            return_value=_FakeNotionClient(),
+        ), patch.object(
+            _SYNC_MODULE,
+            "parse_page_to_cards",
+            return_value=[self._payload(content_hash="new-hash")],
+        ):
+            result = sync_notion_to_anki(mw=mw, db_path=self._db_path)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stats.cards_missing_note, 1)
+        self.assertEqual(result.stats.cards_created, 0)
+        self.assertEqual(result.stats.cards_updated, 1)
+        self.assertEqual(len(collection.notes), 1)
+        mapping = _SYNC_MODULE._load_existing_cards_for_page(
+            self._db,
+            "page-1",
+        )["block-1"]
+        self.assertEqual(int(mapping["anki_note_id"]), restored_note.id)
 
     def test_sync_preserves_cloze_mapping_when_cloze_parsing_is_disabled(self) -> None:
         collection = _FakeCollection()
@@ -2258,6 +3062,7 @@ class SyncTests(unittest.TestCase):
                 "Text": "{{c1::Included}}",
                 "Extra": "",
                 "Notion Block ID": "cloze-included",
+                "Notion Card Background": "brown_background",
             },
             content_hash="hash-updated",
             last_edited_time="2026-02-04T00:00:00.000Z",
@@ -2277,6 +3082,7 @@ class SyncTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertEqual(result.stats.cards_updated, 1)
+        self.assertEqual(existing_note["Notion Card Background"], "brown_background")
         parse_mock.assert_called_once()
         include_block_ids = parse_mock.call_args.kwargs.get("include_block_ids")
         self.assertEqual(set(include_block_ids), {"cloze-included", "cloze-excluded"})
@@ -2456,21 +3262,28 @@ class SyncTests(unittest.TestCase):
         collection = _FakeCollection()
         mw = _FakeMwWithTaskman(collection)
         captured_result: list[SyncResult] = []
+        observed_result: list[SyncResult] = []
+        observer = observed_result.append
         mock_sync = Mock(return_value=SyncResult(ok=True, message="done", stats=SyncStats()))
 
-        with patch.object(_SYNC_MODULE, "sync_notion_to_anki", mock_sync):
-            started = run_notion_sync_with_progress(
-                mw=mw,
-                db_path=self._db_path,
-                on_done=lambda result: captured_result.append(result),
-                parent=object(),
-            )
+        _SYNC_MODULE.register_sync_done_callback(observer)
+        try:
+            with patch.object(_SYNC_MODULE, "sync_notion_to_anki", mock_sync):
+                started = run_notion_sync_with_progress(
+                    mw=mw,
+                    db_path=self._db_path,
+                    on_done=lambda result: captured_result.append(result),
+                    parent=object(),
+                )
+        finally:
+            _SYNC_MODULE.unregister_sync_done_callback(observer)
 
         self.assertTrue(started)
         self.assertEqual(len(mw.progress.start_calls), 1)
         self.assertEqual(mw.progress.finish_calls, 1)
         self.assertEqual(len(captured_result), 1)
         self.assertEqual(captured_result[0].message, "done")
+        self.assertEqual(observed_result, captured_result)
         self.assertIn("progress_callback", mock_sync.call_args.kwargs)
         self.assertIn("should_cancel", mock_sync.call_args.kwargs)
 

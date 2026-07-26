@@ -38,11 +38,12 @@ The **Pages** tab provides a hierarchical tree of accessible Notion pages.
 
 ### Cards
 
-The **Cards** tab provides page-scoped toggle card controls.
+The **Cards** tab provides page-scoped controls for toggle-derived and paragraph-cloze cards.
 
-- Shows toggle-derived cards for the selected page.
-- Allows per-toggle exclusion from sync.
-- Supports resetting toggle card-type overrides back to default behavior.
+- Shows top-level toggles and marked top-level paragraphs for the selected page.
+- Identifies `[cloze]` and enabled gray-background toggles as cloze cards.
+- Allows individual cards to be excluded from sync.
+- Supports resetting card-type overrides for selectable toggle cards back to default behavior; cloze cards do not use these overrides.
 
 ---
 
@@ -61,7 +62,7 @@ The **Image Occlusion** tab lists image candidates from the currently selected s
 The **Settings** tab is schema-driven and includes:
 
 - Notion authentication settings
-- Cards settings (`default_card_type`, cloze parsing toggle, image occlusion parsing toggle)
+- Cards settings (`default_card_type`, cloze parsing toggles, image occlusion parsing toggle)
 - Sync settings (startup/manual hooks)
 
 ### Release notes

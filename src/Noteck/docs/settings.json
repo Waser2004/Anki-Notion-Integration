@@ -38,9 +38,26 @@
           "key": "enable_cloze_parsing",
           "type": "checkbox",
           "name": "Enable cloze parsing",
-          "description": "Convert top-level paragraphs with yellow highlight markers to cloze cards.",
-          "tooltip": "Turn yellow-highlighted top-level paragraphs into cloze cards.",
+          "description": "Convert marked top-level paragraphs and cloze toggles to numbered cloze cards.",
+          "tooltip": "Enable paragraph and toggle cloze card parsing.",
           "default": true
+        },
+        {
+          "key": "enable_gray_toggle_cloze_parsing",
+          "type": "checkbox",
+          "name": "Convert gray toggles to cloze cards",
+          "description": "Treat top-level gray toggles as cloze cards when cloze parsing is enabled.",
+          "tooltip": "Turn gray top-level toggles into advanced cloze cards.",
+          "default": true
+        },
+        {
+          "key": "cloze_marker_colors",
+          "type": "multiselect",
+          "name": "Cloze marker colors",
+          "description": "Choose which Notion background colors create cloze deletions. Unselected colors remain visual formatting.",
+          "tooltip": "Select the background colors that should be converted into cloze deletions.",
+          "default": ["yellow"],
+          "options": ["yellow", "green", "blue", "purple", "pink", "orange", "red", "brown"]
         },
         {
           "key": "enable_image_occlusion_parsing",

@@ -19,12 +19,16 @@ from aqt.qt import (
     QFormLayout,
     QFrame,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QStandardItem,
+    QStandardItemModel,
     QTimer,
+    Qt,
     QVBoxLayout,
     QWidget,
 )
@@ -51,7 +55,13 @@ from ..modules.settings import (
     SettingsStore,
     load_settings_schema,
 )
-from ..modules.sync import run_notion_sync_with_progress, sync_notion_to_anki
+from ..modules.sync import (
+    cloze_marker_colors_need_sync,
+    register_sync_done_callback,
+    run_notion_sync_with_progress,
+    sync_notion_to_anki,
+    unregister_sync_done_callback,
+)
 from .ui import UiContext
 
 
@@ -63,6 +73,94 @@ class _WidgetBinding:
     widget: QWidget
 
 
+class _MultiSelectDropdown(QComboBox):
+    """Native combo box whose popup contains independently checkable options."""
+
+    def __init__(self, options: tuple[str, ...], parent: QWidget) -> None:
+        super().__init__(parent)
+        self._options = options
+        self._callbacks: list[Any] = []
+        self._keep_popup_open = False
+        model = QStandardItemModel(self)
+        self.setModel(model)
+        for option in options:
+            item = QStandardItem(option.title())
+            item.setData(option, Qt.ItemDataRole.UserRole)
+            item.setCheckable(True)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            model.appendRow(item)
+
+        self.view().pressed.connect(self._toggle_index)
+        # Reset the combo's transient current item after Qt processes a popup click.
+        self.activated.connect(lambda _index: QTimer.singleShot(0, self._refresh_text))
+        self._refresh_text()
+
+    def _toggle_index(self, index: Any) -> None:
+        """Toggle one popup row and keep the popup open for further choices."""
+        item = self.model().itemFromIndex(index)
+        if item is None:
+            return
+        checked = item.checkState() == Qt.CheckState.Checked
+        item.setCheckState(Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked)
+        self._keep_popup_open = True
+        self._refresh_text()
+        for callback in self._callbacks:
+            callback()
+
+    def hidePopup(self) -> None:
+        """Do not close the popup immediately after toggling an option."""
+        if self._keep_popup_open:
+            self._keep_popup_open = False
+            return
+        super().hidePopup()
+
+    def showPopup(self) -> None:
+        """Keep the popup at least as wide as the native combo box."""
+        longest_label = max(
+            (self.fontMetrics().horizontalAdvance(option.title()) for option in self._options),
+            default=0,
+        )
+        self.view().setMinimumWidth(max(self.width(), longest_label + 58))
+        super().showPopup()
+
+    def selected_values(self) -> list[str]:
+        """Return checked values in schema order."""
+        model = self.model()
+        return [
+            str(model.item(row).data(Qt.ItemDataRole.UserRole))
+            for row in range(model.rowCount())
+            if model.item(row).checkState() == Qt.CheckState.Checked
+        ]
+
+    def set_selected_values(self, values: Any) -> None:
+        """Apply a stored selection without depending on menu display labels."""
+        selected = {str(value) for value in values} if isinstance(values, (list, tuple, set)) else set()
+        model = self.model()
+        for row in range(model.rowCount()):
+            item = model.item(row)
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if str(item.data(Qt.ItemDataRole.UserRole)) in selected
+                else Qt.CheckState.Unchecked
+            )
+        self._refresh_text()
+
+    def connect_changed(self, callback: Any) -> None:
+        """Invoke callback after any option is toggled."""
+        self._callbacks.append(callback)
+
+    def _refresh_text(self, _checked: bool = False) -> None:
+        selected = self.selected_values()
+        if not selected:
+            text = "No colors selected"
+        elif len(selected) == len(self._options):
+            text = "All colors"
+        else:
+            text = ", ".join(value.title() for value in selected)
+        self.setPlaceholderText(text)
+        self.setCurrentIndex(-1)
+
+
 class SettingsPage(QWidget):
     """Settings tab widget driven by the JSON settings schema."""
 
@@ -72,15 +170,24 @@ class SettingsPage(QWidget):
         self._schema: SettingsSchema = load_settings_schema()
 
         # The DB is initialized on profile open; keep this lightweight and just bind to it.
-        db = Database(context.db_path)
+        self._db = Database(context.db_path)
 
         # Use the active Anki profile name (if available) to namespace keyring secrets.
         profile_name = self._resolve_profile_name(context)
-        self._store = SettingsStore(db, profile_name=profile_name, schema=self._schema)
+        self._store = SettingsStore(self._db, profile_name=profile_name, schema=self._schema)
 
         self._bindings: dict[str, _WidgetBinding] = {}
         self._description_labels: dict[str, QLabel] = {}
+        self._cloze_marker_sync_warning_callout: QWidget | None = None
         self._is_loading = False
+
+        # Keep a stable bound-method reference so it can be unregistered when
+        # Qt destroys this lazily loaded Settings page.
+        self._sync_done_callback = self._on_notion_sync_done
+        register_sync_done_callback(self._sync_done_callback)
+        self.destroyed.connect(
+            lambda _object=None: unregister_sync_done_callback(self._sync_done_callback)
+        )
 
         # build the UI
         root_layout = QVBoxLayout(self)
@@ -131,6 +238,12 @@ class SettingsPage(QWidget):
                         description_label.setStyleSheet("font-style: italic;")
                         self._description_labels[setting.key] = description_label
                         form_layout.addRow(description_label)
+                    # add a warning callout for cloze marker colors that need a Notion sync
+                    elif setting.key == "cloze_marker_colors":
+                        warning_callout = self._build_cloze_marker_sync_warning(group)
+                        warning_callout.setVisible(False)
+                        self._cloze_marker_sync_warning_callout = warning_callout
+                        form_layout.addRow(warning_callout)
 
                 self._wire_autosave(setting.key, input_widget)
 
@@ -159,6 +272,40 @@ class SettingsPage(QWidget):
         layout.addLayout(form)
 
         return group, form
+
+    def _build_cloze_marker_sync_warning(self, parent: QWidget) -> QWidget:
+        """Build a Notion-style yellow warning callout with icon and message."""
+        dark_theme = self.palette().window().color().lightness() < 128
+        background = "#494327" if dark_theme else "#fbf3db"
+        foreground = "#f5f5f5" if dark_theme else "#2f2f2f"
+
+        callout = QWidget(parent)
+        callout.setStyleSheet(
+            f"background-color: {background}; color: {foreground}; border-radius: 5px;"
+        )
+        layout = QHBoxLayout(callout)
+        layout.setContentsMargins(12, 9, 12, 9)
+        layout.setSpacing(10)
+
+        icon = QLabel("⚠️", callout)
+        icon.setStyleSheet("background: transparent; font-size: 18px;")
+        alignment_flag = getattr(Qt, "AlignmentFlag", None)
+        align_top = (
+            alignment_flag.AlignTop
+            if alignment_flag is not None
+            else getattr(Qt, "AlignTop")
+        )
+        icon.setAlignment(align_top)
+        layout.addWidget(icon, 0)
+
+        message = QLabel(
+            "Marker-color changes apply to existing cards only after syncing Notion again.",
+            callout,
+        )
+        message.setWordWrap(True)
+        message.setStyleSheet(f"background: transparent; color: {foreground};")
+        layout.addWidget(message, 1)
+        return callout
 
     def _build_setting_widget(self, setting: SettingDefinition) -> QWidget:
         """Return an input widget for a setting definition."""
@@ -195,6 +342,11 @@ class SettingsPage(QWidget):
 
             return widget
 
+        if setting.type == "multiselect":
+            widget = _MultiSelectDropdown(setting.options or (), self)
+            widget.setToolTip(self._setting_tooltip(setting))
+            return widget
+
         if setting.type == "text":
             widget = QLineEdit(self)
             widget.setToolTip(self._setting_tooltip(setting))
@@ -226,6 +378,8 @@ class SettingsPage(QWidget):
         """Connect widget change signals to auto-save the updated value."""
         if isinstance(widget, QCheckBox):
             widget.stateChanged.connect(lambda _state, k=key: self._autosave_setting(k))
+        elif isinstance(widget, _MultiSelectDropdown):
+            widget.connect_changed(lambda k=key: self._autosave_setting(k))
         elif isinstance(widget, QComboBox):
             widget.currentIndexChanged.connect(lambda _index, k=key: self._on_dropdown_changed(k))
         elif isinstance(widget, QLineEdit):
@@ -254,6 +408,8 @@ class SettingsPage(QWidget):
 
                 if isinstance(widget, QCheckBox):
                     widget.setChecked(bool(value))
+                elif isinstance(widget, _MultiSelectDropdown):
+                    widget.set_selected_values(value)
                 elif isinstance(widget, QComboBox):
                     # If the stored value is invalid/missing, fall back to the default option.
                     text = str(value) if value is not None else str(setting.default or "")
@@ -270,6 +426,7 @@ class SettingsPage(QWidget):
                     widget.setText("" if value is None else str(value))
         finally:
             self._is_loading = False
+        self._refresh_cloze_marker_sync_warning()
         self._refresh_card_template_action()
 
     def _on_dropdown_changed(self, key: str) -> None:
@@ -304,6 +461,8 @@ class SettingsPage(QWidget):
         widget = binding.widget
         if isinstance(widget, QCheckBox):
             new_value: Any = bool(widget.isChecked())
+        elif isinstance(widget, _MultiSelectDropdown):
+            new_value = widget.selected_values()
         elif isinstance(widget, QComboBox):
             selected_data = widget.currentData()
             new_value = selected_data if selected_data is not None else widget.currentText()
@@ -317,6 +476,24 @@ class SettingsPage(QWidget):
             self._store.set_value(key, new_value)
         except SettingsError as exc:
             self._show_error(f"Failed to save setting '{key}'.\n\n{exc}")
+            return
+
+        if key == "cloze_marker_colors":
+            self._refresh_cloze_marker_sync_warning()
+
+    def _refresh_cloze_marker_sync_warning(self) -> None:
+        """Show whether marker-color changes still need a successful Notion sync."""
+        callout = self._cloze_marker_sync_warning_callout
+        binding = self._bindings.get("cloze_marker_colors")
+        if callout is None or binding is None or not isinstance(binding.widget, _MultiSelectDropdown):
+            return
+        callout.setVisible(
+            cloze_marker_colors_need_sync(self._db, binding.widget.selected_values())
+        )
+
+    def _on_notion_sync_done(self, _result: Any) -> None:
+        """Refresh the callout after startup, Anki-button, or manual Notion sync."""
+        self._refresh_cloze_marker_sync_warning()
 
     def _trigger_action(self, key: str) -> None:
         """Execute non-persistent action settings that are rendered as buttons."""
@@ -426,6 +603,7 @@ class SettingsPage(QWidget):
             # Always restore button state, regardless of success/failure/cancel.
             button.setEnabled(True)
             button.setText(original_text)
+            self._refresh_cloze_marker_sync_warning()
             _ = result
 
         started = run_notion_sync_with_progress(

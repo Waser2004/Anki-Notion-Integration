@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.4.0 - 2026-07-25
+
+> [!WARNING]
+> **Parser and card template changes**
+>
+> This update expands cloze parsing and includes updated bundled card templates. On existing installations, Noteck skips the automatic startup sync once after upgrading to this version. Run a manual sync when convenient; it may take longer because cloze paragraphs and root toggles need to be reparsed. Normal automatic startup syncing resumes the next time Anki starts.
+
+- Added advanced cloze parsing with multiple deletions: highlight text with different background colors in Notion, and each color becomes a separate cloze deletion. You can choose the recognized colors in **Settings** (by default only yellow is selected).
+- Create a cloze card from a toggle by starting its title with `[cloze]` or `Cloze:`. Noteck uses the content inside the toggle for the card and ignores the toggle title.
+- Add rich back-side details by nesting toggles titled `[extra]` or `Extra:` inside a cloze toggle. Their contents appear in the card's Extra section without becoming cloze deletions.
+- Cloze-delete an entire paragraph, heading, list item, quote, callout, or toggle by applying one of your selected cloze colors to the whole block.
+- Learn more about cloze parsing in sections 7 and 8 of the [Noteck documentation](https://noteck.notion.site/Documentation-30524ef63480806ea3fdf015a0fd7963?source=copy_link).
+- After upgrading, open **Settings** → **Cards** and select **Update card templates** to install the new bundled cloze templates.
+
 ## 1.3.0 - 2026-07-14
 
 > [!WARNING]

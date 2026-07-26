@@ -25,20 +25,63 @@ data` advances whenever a concurrent page job finishes, followed by `Parsing
 page data` as each prepared page is reconciled sequentially.
 
 1. Expiring signature parameters are removed from media URLs before hashing.
-2. The cleaned full-page hash is stored in `pages.content_hash`.
+2. The cleaned full-page hash is stored in `pages.content_hash` only after
+   enabled top-level cloze parsing completes without errors. While cloze
+   parsing is paused, the last processed hash is retained so re-enabling it
+   reparses changes made during the pause.
 3. Top-level regular-toggle Markdown sources are aligned by order with shallow
    Notion `toggle` blocks, which provide stable block IDs.
-4. Each successfully handled toggle source hash is stored separately.
+4. Each successfully parsed toggle source hash is stored separately. Excluded,
+   disabled-cloze, and otherwise unparsed toggles retain their last processed
+   hash. Unexcluding a card clears its toggle and page-level source gates so a
+   later eligible sync retries it without changing the card's last-written
+   payload hash.
 5. Only new, changed, repair-required, or parser-refresh toggles have their
    descendants fetched recursively.
 
-If the Markdown response is truncated, malformed, or cannot be aligned
-unambiguously with the shallow root toggles, Noteck retrieves the complete block
-tree for that page. This preserves correctness instead of guessing identities.
+When the Markdown response is truncated, Noteck requests each advertised
+`unknown_block_id` through the same Markdown endpoint and replaces its
+`<unknown>` tag in place when usable Markdown is returned. Inaccessible or
+unsupported blocks remain explicit `<unknown>` tags. Malformed Markdown or
+content that still cannot be aligned unambiguously with the shallow root
+toggles uses the complete block-tree path instead of guessing identities.
 
 Top-level cloze paragraphs are already complete in the shallow block response,
-so they do not require descendant retrieval. Parsed payload hashes still decide
-whether an Anki note needs to be created or updated.
+so they do not require descendant retrieval. They are parsed only when the
+full-page Markdown hash changed, a parser/settings refresh is pending, or a
+mapped note needs repair. Parsed payload hashes still decide whether an Anki
+note needs to be created or updated.
+
+The sync log records one page-level parsing outcome. Skipped pages report
+`reason=markdown_unchanged`; parsed pages report the content, refresh, or repair
+reason that required parsing. Full-tree fallbacks report the Markdown snapshot
+or alignment problem that made selective parsing unsafe.
+
+Advanced cloze toggles are reconciled by the root-toggle pass and are excluded
+from stale top-level-paragraph cleanup. If a mapped Anki note is missing, the
+toggle is expanded even when its Markdown source hash is unchanged. Before
+creating a replacement, Noteck searches the managed `Notion Block ID` field and
+relinks the oldest compatible existing note. This protects against duplicates
+when a profile restore or local database reset invalidates only Noteck's numeric
+note mapping. A replacement is created only when no compatible note remains.
+The shallow toggle title and color also identify `[cloze]` and enabled
+gray-background containers before descendant retrieval, so their stored
+`cloze` mapping is not mistaken for a change from the page's selectable default.
+Parser revision refreshes also expand root toggles once so mappings detached by
+an earlier parser or reconciliation bug can be recovered.
+
+Pending images and Mermaid source fallbacks are repaired from the saved Anki
+note HTML. They do not cause unchanged Notion toggle descendants to be fetched
+or parsed again. A successful local retry updates the note and media files; a
+failed retry preserves the usable fallback and reports a warning. Legacy
+single-theme Mermaid notes remain a recursive repair case because their saved
+HTML may not contain the source needed to build the current light/dark pair.
+
+The marker palette from the last successful cloze sync is stored in the internal
+settings row `_internal_cloze_marker_colors`. A changed palette forces cloze
+re-rendering even when Notion timestamps are unchanged. After each updated cloze
+note, sync removes only the Anki card instances whose cloze ordinals are now empty;
+surviving cards and their scheduling data remain untouched.
 
 - [Page object](https://developers.notion.com/reference/page)
 - [Block object](https://developers.notion.com/reference/block)
@@ -49,9 +92,9 @@ whether an Anki note needs to be created or updated.
 ## Warnings
 
 `SyncResult.warnings` contains structured `SyncWarning` entries with a stable code,
-message, page id, and optional block id. Parsing failures, empty toggles, stale
-sources, recoverable missing-note recreation, and usable media fallbacks are
-warnings rather than sync errors.
+message, page id, and optional block id. Parsing failures, invalid cloze payloads,
+empty toggles, stale sources, recoverable missing-note recreation, and usable media
+fallbacks are warnings rather than sync errors.
 
 Warnings do not prevent page edit timestamps or completed parser-refresh revisions
 from being stored. A confirmed stale source detaches its Noteck mapping and override
@@ -60,7 +103,8 @@ mapping so a future parser revision can retry it.
 
 ## Errors
 
-`SyncResult.errors` is reserved for failures in synchronization itself: source
-access, required local configuration, database persistence, Anki note operations,
-or unexpected orchestration failures. A failed page does not stop later pages, but
-its edit timestamp is not advanced and the final result has `ok=False`.
+`SyncResult.errors` is reserved for infrastructure failures in synchronization:
+source access, required local configuration, database persistence, Anki collection
+write operations, or unexpected orchestration failures. A failed page does not stop
+later pages, but its edit timestamp is not advanced and the final result has
+`ok=False`.

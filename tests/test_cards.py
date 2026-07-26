@@ -23,6 +23,7 @@ from Noteck.modules.cards import (  # noqa: E402
     _MODEL_DEFINITIONS,
     _build_managed_css,
     _ensure_model,
+    _load_model_css,
     _model_differs_from_defaults,
     _model_template_status,
     _strip_template_version,
@@ -110,17 +111,56 @@ class CardModelTests(unittest.TestCase):
         self.assertRegex(css, r"body\s*\{[^}]*padding:\s*1rem;[^}]*min-height:\s*100vh;")
         self.assertRegex(css, r"\.notion-card\s*\{[^}]*width:\s*100%;[^}]*margin:\s*0 auto;")
 
-    def test_toggle_templates_use_the_managed_card_background_field(self) -> None:
+    def test_all_templates_use_the_managed_card_background_field(self) -> None:
         for definition in _MODEL_DEFINITIONS:
-            if definition.name == MODEL_NAME_CLOZE:
-                self.assertNotIn(NOTION_CARD_BACKGROUND_FIELD, definition.fields)
-                continue
             self.assertIn(NOTION_CARD_BACKGROUND_FIELD, definition.fields)
             for template in definition.templates:
                 with self.subTest(model=definition.name, template=template.name):
                     dynamic_class = f"notion-card-background-{{{{{NOTION_CARD_BACKGROUND_FIELD}}}}}"
                     self.assertIn(dynamic_class, template.front)
                     self.assertIn(dynamic_class, template.back)
+
+    def test_cloze_back_omits_empty_extra_container(self) -> None:
+        """Anki should add the padded back section only for a populated Extra field."""
+        definition = next(item for item in _MODEL_DEFINITIONS if item.name == MODEL_NAME_CLOZE)
+        back = definition.templates[0].back
+
+        self.assertIn(
+            '{{#Extra}}<hr id="answer"><div class="notion-back">'
+            "{{Extra}}</div>{{/Extra}}",
+            back,
+        )
+        self.assertNotIn("font-style: italic", back)
+
+    def test_existing_cloze_model_adds_background_field_without_overwriting_templates(self) -> None:
+        definition = next(item for item in _MODEL_DEFINITIONS if item.name == MODEL_NAME_CLOZE)
+        model = {
+            "name": MODEL_NAME_CLOZE,
+            "flds": [
+                {"name": name}
+                for name in definition.fields
+                if name != NOTION_CARD_BACKGROUND_FIELD
+            ],
+            "tmpls": [
+                {
+                    "name": definition.templates[0].name,
+                    "qfmt": "<custom-cloze-front>",
+                    "afmt": "<custom-cloze-back>",
+                }
+            ],
+            "type": definition.model_type,
+            "css": "/* custom cloze css */",
+        }
+        models = _FakeModels(model)
+
+        _ensure_model(models, definition, "/* default css */")
+
+        self.assertTrue(models.updated)
+        fields_by_name = {field["name"]: field for field in model["flds"]}
+        self.assertIs(fields_by_name[NOTION_CARD_BACKGROUND_FIELD]["collapsed"], True)
+        self.assertEqual(model["tmpls"][0]["qfmt"], "<custom-cloze-front>")
+        self.assertEqual(model["tmpls"][0]["afmt"], "<custom-cloze-back>")
+        self.assertEqual(model["css"], "/* custom cloze css */")
 
     def test_existing_model_adds_background_field_without_overwriting_templates(self) -> None:
         definition = _MODEL_DEFINITIONS[0]
@@ -215,6 +255,88 @@ class CardModelTests(unittest.TestCase):
         self.assertNotIn("mix-blend-mode", css)
         self.assertIn(".code > code {", css)
         self.assertIn("background: none !important;", css)
+
+    def test_table_cell_highlights_override_root_card_header_surfaces(self) -> None:
+        """Explicit cell colors must beat the root-card fallback on th and td elements."""
+        css_path = Path(__file__).resolve().parents[1] / "src" / "Noteck" / "docs" / "Notion_Card_Stylesheet.css"
+        css = css_path.read_text(encoding="utf-8")
+
+        for color in (
+            "gray",
+            "brown",
+            "orange",
+            "yellow",
+            "green",
+            "blue",
+            "purple",
+            "pink",
+            "red",
+        ):
+            with self.subTest(color=color):
+                self.assertIn(
+                    f".notion-card :is(th, td).highlight-{color}_background "
+                    f"{{ background: var(--hl-{color}-bg) !important; }}",
+                    css,
+                )
+
+    def test_active_table_cloze_overrides_root_card_header_surface(self) -> None:
+        """A hidden cloze inside th/td must retain Anki's yellow cell surface."""
+        css_path = Path(__file__).resolve().parents[1] / "src" / "Noteck" / "docs" / "Notion_Card_Stylesheet.css"
+        css = css_path.read_text(encoding="utf-8")
+        root_header_rule = '.notion-card[class*="notion-card-background-"] th {'
+        active_cloze_rule = (
+            ".notion-card table "
+            ":is(td, th).notion-whole-cell-cloze:has(.cloze) {"
+        )
+
+        self.assertIn(active_cloze_rule, css)
+        self.assertIn("background: var(--hl-yellow-bg) !important;", css)
+        self.assertNotIn(".notion-card table :is(td, th):has(.cloze) {", css)
+        self.assertNotIn("td .cloze,", css)
+        # Keep the active rule after the fallback as an additional safeguard;
+        # its table context also gives it strictly greater specificity.
+        self.assertLess(css.index(root_header_rule), css.index(active_cloze_rule))
+
+    def test_advanced_cloze_root_foreground_styles_visible_block_text(self) -> None:
+        """Bundled CSS propagates the root color without adding block spacing."""
+        css = _load_model_css()
+
+        self.assertIn(
+            ".notion-cloze-root-foreground :is(h1, h2, h3, h4, h5, h6, p, li, td, th, summary)",
+            css,
+        )
+        self.assertIn(
+            ".notion-cloze-root-foreground .notion-block-color-background",
+            css,
+        )
+        self.assertEqual(
+            css.count(
+                ":where(.notion-front, .notion-back, .notion-cloze-root-foreground, "
+                "blockquote, .callout > div, .notion-toggle, li)"
+            ),
+            2,
+        )
+
+    def test_advanced_cloze_extra_toggle_color_styles_exported_section(self) -> None:
+        """Bundled CSS scopes Extra foregrounds and complete backgrounds."""
+        css = _load_model_css()
+
+        self.assertIn(
+            ".notion-cloze-extra-color :is(h1, h2, h3, h4, h5, h6, p, li, td, th, summary)",
+            css,
+        )
+        self.assertIn(
+            ".notion-cloze-extra-color.notion-block-color-background",
+            css,
+        )
+        self.assertIn("display: block;", css)
+        self.assertIn("margin: 0.5em 0;", css)
+        self.assertIn("padding: 5px;", css)
+        self.assertIn("border-radius: 0;", css)
+        self.assertIn(".notion-cloze-extra-color > :first-child", css)
+        self.assertIn(".notion-cloze-extra-color > :last-child", css)
+        self.assertIn("margin-block-start: 0;", css)
+        self.assertIn("margin-block-end: 0;", css)
 
     def test_existing_template_html_and_css_are_preserved(self) -> None:
         definition = _MODEL_DEFINITIONS[0]

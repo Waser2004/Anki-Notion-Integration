@@ -272,6 +272,18 @@ th {
 	color: var(--hl-yellow);
 }
 
+/* Color only parser-confirmed whole-cell clozes across the complete cell. */
+.notion-card table :is(td, th).notion-whole-cell-cloze:has(.cloze) {
+	background: var(--hl-yellow-bg) !important;
+}
+
+/* Whole-cell clozes use the cell surface; partial clozes keep inline styling. */
+.notion-card table :is(td, th).notion-whole-cell-cloze .cloze {
+	background: transparent !important;
+	color: var(--hl-yellow);
+	padding: 0;
+}
+
 .notion-input {
 	margin: 0 auto;
 	max-width: 700px;
@@ -551,6 +563,13 @@ html.night_mode .notion-mermaid .notion-mermaid-dark,
 	font-size: 1.1em;
 }
 
+.notion-callout-icon-image {
+	display: block;
+	width: 1.1em;
+	height: 1.1em;
+	object-fit: contain;
+}
+
 /* ============================================================
    Multi-Column Layouts
    ============================================================ */
@@ -633,10 +652,51 @@ html.night_mode .notion-mermaid .notion-mermaid-dark,
 	color: inherit !important;
 }
 
+/* Advanced cloze titles stay hidden, so a root toggle foreground colors the
+   visible card contents while nested block colors can override the variable. */
+.notion-cloze-root-foreground :is(h1, h2, h3, h4, h5, h6, p, li, td, th, summary) {
+	color: var(--notion-block-foreground, var(--notion-text)) !important;
+}
+
+.notion-cloze-root-foreground .notion-block-color-background {
+	--notion-block-foreground: var(--notion-text);
+}
+
+/* Extra toggle titles are omitted, so their foreground colors scope the
+   exported body while explicit nested block and inline colors still win. */
+.notion-cloze-extra-color :is(h1, h2, h3, h4, h5, h6, p, li, td, th, summary) {
+	color: var(--notion-block-foreground, var(--notion-text)) !important;
+}
+
+.notion-cloze-extra-color .notion-block-color-background {
+	--notion-block-foreground: var(--notion-text);
+}
+
+/* Give exported Extra groups the same vertical rhythm as ordinary text blocks. */
+.notion-cloze-extra-color {
+	display: block;
+	margin: 0.5em 0;
+}
+
 .notion-block-color-background {
 	border-radius: 4px;
 	background: var(--notion-block-background) !important;
 	color: var(--notion-text) !important;
+}
+
+/* A colored Extra toggle is one Notion-like block surface around its children. */
+.notion-cloze-extra-color.notion-block-color-background {
+	padding: 5px;
+	border-radius: 4px;
+}
+
+/* Let the wrapper's padding alone define the inset at its outer edges. */
+.notion-cloze-extra-color > :first-child {
+	margin-block-start: 0;
+}
+
+.notion-cloze-extra-color > :last-child {
+	margin-block-end: 0;
 }
 
 /* Text-line blocks need compact padding similar to Notion's block highlights. */
@@ -725,6 +785,18 @@ blockquote.notion-block-color-background {
 .highlight-pink_background { background: var(--hl-pink-bg) !important; }
 .highlight-red_background { background: var(--hl-red-bg) !important; }
 
+/* Root-colored cards give table headers a backdrop-aware surface with the
+   same important specificity. Keep explicit cell colors authoritative. */
+.notion-card :is(th, td).highlight-gray_background { background: var(--hl-gray-bg) !important; }
+.notion-card :is(th, td).highlight-brown_background { background: var(--hl-brown-bg) !important; }
+.notion-card :is(th, td).highlight-orange_background { background: var(--hl-orange-bg) !important; }
+.notion-card :is(th, td).highlight-yellow_background { background: var(--hl-yellow-bg) !important; }
+.notion-card :is(th, td).highlight-green_background { background: var(--hl-green-bg) !important; }
+.notion-card :is(th, td).highlight-blue_background { background: var(--hl-blue-bg) !important; }
+.notion-card :is(th, td).highlight-purple_background { background: var(--hl-purple-bg) !important; }
+.notion-card :is(th, td).highlight-pink_background { background: var(--hl-pink-bg) !important; }
+.notion-card :is(th, td).highlight-red_background { background: var(--hl-red-bg) !important; }
+
 /* Ensure text remains readable on colored backgrounds */
 .highlight-gray_background,
 .highlight-brown_background,
@@ -738,8 +810,9 @@ blockquote.notion-block-color-background {
 	color: var(--notion-text) !important;
 }
 
-/* Final spacing override so all rendered block objects keep a consistent 1em vertical gap. */
-:where(.notion-front, .notion-back, blockquote, .callout > div, .notion-toggle, li) > :where(
+/* Treat the root foreground wrapper like the card face so its first block does
+   not regain the browser's default top margin. */
+:where(.notion-front, .notion-back, .notion-cloze-root-foreground, blockquote, .callout > div, .notion-toggle, li) > :where(
 	p,
 	blockquote,
 	ul,
@@ -757,7 +830,7 @@ blockquote.notion-block-color-background {
 	margin-bottom: 0 !important;
 }
 
-:where(.notion-front, .notion-back, blockquote, .callout > div, .notion-toggle, li) > :where(
+:where(.notion-front, .notion-back, .notion-cloze-root-foreground, blockquote, .callout > div, .notion-toggle, li) > :where(
 	p,
 	blockquote,
 	ul,

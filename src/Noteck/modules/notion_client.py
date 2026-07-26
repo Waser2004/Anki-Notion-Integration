@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import html
 import json
+import re
 import threading
 import time
 from typing import Any, Callable, Iterable, Mapping, Optional
@@ -86,6 +88,349 @@ class NotionBlock:
     children: tuple["NotionBlock", ...] = ()
 
 
+_MARKDOWN_TABLE_RE = re.compile(
+    r"<table\b[^>]*>(?P<body>.*?)</table>", re.IGNORECASE | re.DOTALL
+)
+_MARKDOWN_COLGROUP_RE = re.compile(
+    r"<colgroup\b[^>]*>(?P<body>.*?)</colgroup>", re.IGNORECASE | re.DOTALL
+)
+_MARKDOWN_COL_RE = re.compile(r"<col\b(?P<attrs>[^>]*)/?>", re.IGNORECASE)
+_MARKDOWN_ROW_RE = re.compile(
+    r"<tr\b(?P<attrs>[^>]*)>(?P<body>.*?)</tr>", re.IGNORECASE | re.DOTALL
+)
+_MARKDOWN_CELL_RE = re.compile(
+    r"<(?:td|th)\b(?P<attrs>[^>]*)>(?P<body>.*?)</(?:td|th)>",
+    re.IGNORECASE | re.DOTALL,
+)
+_MARKDOWN_ATTRIBUTE_RE = re.compile(
+    r"([A-Za-z][\w-]*)\s*=\s*([\"'])(.*?)\2", re.DOTALL
+)
+_MARKDOWN_LINK_START_RE = re.compile(
+    r"(?<!!)\[(?P<label>(?:\\.|[^\]])*)\]\("
+)
+_MARKDOWN_CODE_RE = re.compile(
+    r"(?P<fence>`+)(?P<body>.*?)(?P=fence)", re.DOTALL
+)
+_MARKDOWN_MATH_RE = re.compile(
+    r"(?<!\\)\$(?P<body>.*?)(?<!\\)\$", re.DOTALL
+)
+_MARKDOWN_BOLD_RE = re.compile(r"\*\*(?P<body>.+?)\*\*", re.DOTALL)
+_MARKDOWN_ITALIC_RE = re.compile(
+    r"(?<!\*)\*(?!\*)(?P<body>.+?)(?<!\*)\*(?!\*)", re.DOTALL
+)
+_MARKDOWN_STRIKETHROUGH_RE = re.compile(r"~~(?P<body>.+?)~~", re.DOTALL)
+_MARKDOWN_ESCAPE_RE = re.compile(r"\\([\\*~`$\[\]<>^|{}])")
+_MARKDOWN_BREAK_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+_MARKDOWN_DATE_MENTION_RE = re.compile(
+    r"<mention-date\b(?P<attrs>[^>]*)/?>",
+    re.IGNORECASE,
+)
+_MARKDOWN_TAG_RE = re.compile(r"<[^>]+>")
+_MARKDOWN_UNKNOWN_RE = re.compile(
+    r"<unknown\b(?P<attrs>[^>]*)/?>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def merge_markdown_table_colors(
+    blocks: Iterable[NotionBlock],
+    markdown: str,
+) -> list[NotionBlock]:
+    """Overlay enhanced-Markdown table colors onto the block-API tree."""
+    markdown_tables = _extract_markdown_table_colors(markdown)
+    if not markdown_tables:
+        return list(blocks)
+
+    used_tables: set[int] = set()
+
+    def enrich(block: NotionBlock) -> NotionBlock:
+        """Recursively enrich tables without mutating cached block objects."""
+        prepared_children = tuple(enrich(child) for child in block.children)
+        current = block
+        if block.block_type == "table":
+            table_index = _match_markdown_table(block, markdown_tables, used_tables)
+            if table_index is not None:
+                current = _apply_table_colors(block, markdown_tables[table_index])
+        if current is block and prepared_children != block.children:
+            current = _copy_block(block, children=prepared_children)
+        return current
+
+    return [enrich(block) for block in blocks]
+
+
+def _extract_markdown_table_colors(markdown: str) -> list[dict[str, Any]]:
+    """Parse table color attributes from enhanced Markdown."""
+    tables: list[dict[str, Any]] = []
+    for table_match in _MARKDOWN_TABLE_RE.finditer(markdown or ""):
+        body = table_match.group("body")
+        column_colors: list[str | None] = []
+        colgroup_match = _MARKDOWN_COLGROUP_RE.search(body)
+        if colgroup_match:
+            column_colors = [
+                _markdown_color(_markdown_attributes(match.group("attrs")).get("color"))
+                for match in _MARKDOWN_COL_RE.finditer(colgroup_match.group("body"))
+            ]
+
+        rows: list[dict[str, Any]] = []
+        for row_match in _MARKDOWN_ROW_RE.finditer(body):
+            row_color = _markdown_color(
+                _markdown_attributes(row_match.group("attrs")).get("color")
+            )
+            cells = [
+                {
+                    "text": _normalize_table_text(
+                        cell_match.group("body"),
+                        enhanced_markdown=True,
+                    ),
+                    "color": _markdown_color(
+                        _markdown_attributes(cell_match.group("attrs")).get("color")
+                    ),
+                }
+                for cell_match in _MARKDOWN_CELL_RE.finditer(row_match.group("body"))
+            ]
+            rows.append({"color": row_color, "cells": cells})
+        tables.append({"column_colors": column_colors, "rows": rows})
+    return tables
+
+
+def _markdown_attributes(raw_attributes: str) -> dict[str, str]:
+    """Return lowercase enhanced-Markdown attributes from one tag."""
+    return {
+        name.lower(): value.strip()
+        for name, _, value in _MARKDOWN_ATTRIBUTE_RE.findall(raw_attributes)
+    }
+
+
+def _notion_id_key(value: Any) -> str:
+    """Normalize dashed and compact Notion IDs for URL-fragment matching."""
+    return str(value or "").strip().lower().replace("-", "")
+
+
+def _replace_unknown_markdown_tags(
+    markdown: str,
+    replacements: Mapping[str, str],
+) -> str:
+    """Replace fetched ``<unknown>`` placeholders at their original positions."""
+    normalized_replacements = {
+        _notion_id_key(block_id): replacement
+        for block_id, replacement in replacements.items()
+        if _notion_id_key(block_id) and replacement
+    }
+
+    def replace(match: re.Match[str]) -> str:
+        """Match an unknown block through the ID in its Notion URL."""
+        attributes = _markdown_attributes(match.group("attrs"))
+        block_url = attributes.get("url", "")
+        parsed_url = parse.urlparse(block_url)
+        candidates = (
+            parsed_url.fragment,
+            parsed_url.path.rstrip("/").rsplit("/", 1)[-1],
+        )
+        for candidate in candidates:
+            replacement = normalized_replacements.get(_notion_id_key(candidate))
+            if replacement is not None:
+                return replacement
+        return match.group(0)
+
+    return _MARKDOWN_UNKNOWN_RE.sub(replace, markdown or "")
+
+
+def _markdown_color(value: Any) -> str | None:
+    """Normalize an enhanced-Markdown color value."""
+    color = str(value or "").strip().lower()
+    return color or None
+
+
+def _normalize_table_text(value: str, *, enhanced_markdown: bool = False) -> str:
+    """Normalize table cell text for matching the two API representations."""
+    prepared = value or ""
+    protected: list[str] = []
+
+    if enhanced_markdown:
+        # Inline code and equations are literal content. Protect them before removing Markdown delimiters or XML-like formatting tags.
+        def protect_value(literal: str) -> str:
+            token = f"\ue000{len(protected)}\ue001"
+            protected.append(literal)
+            return token
+
+        def protect_literal(match: re.Match[str]) -> str:
+            return protect_value(match.group("body"))
+
+        # Protect literal content before removing Markdown formatting or HTML-like tags.
+        prepared = _MARKDOWN_CODE_RE.sub(protect_literal, prepared)
+        prepared = _MARKDOWN_MATH_RE.sub(protect_literal, prepared)
+        prepared = _MARKDOWN_ESCAPE_RE.sub(
+            lambda match: protect_value(match.group(1)),
+            prepared,
+        )
+        prepared = _strip_markdown_link_destinations(prepared)
+        for formatting_pattern in (
+            _MARKDOWN_BOLD_RE,
+            _MARKDOWN_STRIKETHROUGH_RE,
+            _MARKDOWN_ITALIC_RE,
+        ):
+            # Repeating handles nested combinations such as bold italic text.
+            while True:
+                normalized = formatting_pattern.sub(
+                    lambda match: match.group("body"),
+                    prepared,
+                )
+                if normalized == prepared:
+                    break
+                prepared = normalized
+        prepared = _MARKDOWN_BREAK_RE.sub(" ", prepared)
+        prepared = _MARKDOWN_DATE_MENTION_RE.sub(
+            lambda match: _markdown_date_mention_text(match.group("attrs")),
+            prepared,
+        )
+
+    plain = html.unescape(_MARKDOWN_TAG_RE.sub("", prepared))
+    for index, literal in enumerate(protected):
+        plain = plain.replace(f"\ue000{index}\ue001", literal)
+    return " ".join(plain.split()).strip()
+
+
+def _strip_markdown_link_destinations(value: str) -> str:
+    """Keep link labels while consuming balanced Markdown destinations."""
+    parts: list[str] = []
+    cursor = 0
+    while True:
+        match = _MARKDOWN_LINK_START_RE.search(value, cursor)
+        if match is None:
+            parts.append(value[cursor:])
+            break
+
+        depth = 1
+        destination_index = match.end()
+        while destination_index < len(value) and depth:
+            character = value[destination_index]
+            if character == "\\" and destination_index + 1 < len(value):
+                destination_index += 2
+                continue
+
+            # Consume balanced parentheses in the Markdown link destination.
+            if character == "(":
+                depth += 1
+            elif character == ")":
+                depth -= 1
+                
+            destination_index += 1
+
+        # link never closed, preserve the rest of the string as-is
+        if depth:
+            # Preserve malformed or incomplete input rather than dropping text.
+            parts.append(value[cursor:])
+            break
+
+        parts.append(value[cursor:match.start()])
+        parts.append(match.group("label"))
+        cursor = destination_index
+
+    return "".join(parts)
+
+
+def _markdown_date_mention_text(raw_attributes: str) -> str:
+    """Return the block-API-style visible text for one Markdown date mention."""
+    attributes = _markdown_attributes(raw_attributes)
+    start = attributes.get("start", "")
+    end = attributes.get("end", "")
+    if start and end:
+        return f"{start} → {end}"
+    return start
+
+
+def _table_text_matrix(block: NotionBlock) -> list[list[str]]:
+    """Extract a normalized text matrix from a block-API table."""
+    matrix: list[list[str]] = []
+    for row in block.children:
+        if row.block_type != "table_row":
+            continue
+        payload = row.raw.get("table_row")
+        cells = payload.get("cells") if isinstance(payload, dict) else None
+        row_text: list[str] = []
+        for cell in cells if isinstance(cells, list) else []:
+            fragments = cell if isinstance(cell, list) else []
+            values = [
+                str(item.get("plain_text") or item.get("text", {}).get("content") or "")
+                for item in fragments
+                if isinstance(item, dict)
+            ]
+            row_text.append(_normalize_table_text("".join(values)))
+        matrix.append(row_text)
+    return matrix
+
+
+def _match_markdown_table(
+    block: NotionBlock,
+    tables: list[dict[str, Any]],
+    used_tables: set[int],
+) -> int | None:
+    """Find the unused enhanced-Markdown table with the same cell text."""
+    block_matrix = _table_text_matrix(block)
+    for index, table in enumerate(tables):
+        if index in used_tables:
+            continue
+        markdown_matrix = [
+            [cell["text"] for cell in row["cells"]] for row in table["rows"]
+        ]
+        if markdown_matrix == block_matrix:
+            used_tables.add(index)
+            return index
+    return None
+
+
+def _apply_table_colors(block: NotionBlock, table: dict[str, Any]) -> NotionBlock:
+    """Store effective Markdown cell colors on matching table-row payloads."""
+    rows = table["rows"]
+    column_colors = table["column_colors"]
+    prepared_children: list[NotionBlock] = []
+    row_index = 0
+    for child in block.children:
+        if child.block_type != "table_row" or row_index >= len(rows):
+            prepared_children.append(child)
+            continue
+
+        row = rows[row_index]
+        payload = child.raw.get("table_row")
+        if not isinstance(payload, dict):
+            prepared_children.append(child)
+            row_index += 1
+            continue
+
+        colors = [
+            cell["color"]
+            or row["color"]
+            or (column_colors[index] if index < len(column_colors) else None)
+            for index, cell in enumerate(row["cells"])
+        ]
+        raw = dict(child.raw)
+        row_payload = dict(payload)
+        row_payload["_noteck_cell_colors"] = colors
+        raw["table_row"] = row_payload
+        prepared_children.append(_copy_block(child, raw=raw))
+        row_index += 1
+
+    return _copy_block(block, children=tuple(prepared_children))
+
+
+def _copy_block(
+    block: NotionBlock,
+    *,
+    raw: dict[str, Any] | None = None,
+    children: tuple[NotionBlock, ...] | None = None,
+) -> NotionBlock:
+    """Copy one immutable normalized block with selected replacements."""
+    return NotionBlock(
+        block_id=block.block_id,
+        block_type=block.block_type,
+        has_children=block.has_children,
+        parent_id=block.parent_id,
+        parent_type=block.parent_type,
+        raw=block.raw if raw is None else raw,
+        children=block.children if children is None else children,
+    )
+
+
 @dataclass(frozen=True)
 class NotionMarkdownSnapshot:
     """Complete enhanced-Markdown response for one Notion page or subtree."""
@@ -138,7 +483,7 @@ class _AsyncRateLimiter:
     def __init__(self, requests_per_second: float) -> None:
         self._interval = 1.0 / requests_per_second
         self._next_request_at = 0.0
-        
+
         self._next_request_at_lock = threading.Lock()
 
     async def acquire(self) -> None:
@@ -150,7 +495,7 @@ class _AsyncRateLimiter:
                 if delay <= 0:
                     self._next_request_at = now + self._interval
                     return
-            
+
             await asyncio.sleep(delay)
 
     async def defer(self, delay_seconds: float) -> None:
@@ -305,17 +650,15 @@ class NotionClient:
     def get_page_markdown(self, page_id: str) -> NotionMarkdownSnapshot:
         """Return a page's complete enhanced Markdown representation."""
         payload = asyncio.run(
-            self._request_json_with_rate_limit_retry(
-                "GET",
-                f"/pages/{page_id}/markdown",
-                None,
-                limiter=self._tree_rate_limiter,
+            self._fetch_complete_markdown_payload(
+                page_id,
+                visited=frozenset(),
             )
         )
         unknown_block_ids = payload.get("unknown_block_ids")
         if not isinstance(unknown_block_ids, list):
             unknown_block_ids = []
-        
+
         return NotionMarkdownSnapshot(
             page_id=str(payload.get("id") or page_id),
             markdown=str(payload.get("markdown") or ""),
@@ -600,11 +943,9 @@ class NotionClient:
             None,
             limiter=self._tree_rate_limiter,
         )
-        markdown_payload = await self._request_json_with_rate_limit_retry(
-            "GET",
-            f"/pages/{page_id}/markdown",
-            None,
-            limiter=self._tree_rate_limiter,
+        markdown_payload = await self._fetch_complete_markdown_payload(
+            page_id,
+            visited=frozenset(),
         )
         shallow_blocks = await self._fetch_block_children_async(
             page_id,
@@ -629,6 +970,76 @@ class NotionClient:
             ),
             shallow_blocks    = tuple(shallow_blocks),
         )
+
+    async def _fetch_complete_markdown_payload(
+        self,
+        page_id: str,
+        *,
+        visited: frozenset[str],
+    ) -> dict[str, Any]:
+        """Resolve truncated Markdown subtrees while retaining inaccessible tags."""
+        page_key = _notion_id_key(page_id)
+        payload = await self._request_json_with_rate_limit_retry(
+            "GET",
+            f"/pages/{page_id}/markdown",
+            None,
+            limiter=self._tree_rate_limiter,
+        )
+        if not bool(payload.get("truncated")):
+            return payload
+
+        unknown_block_ids = payload.get("unknown_block_ids")
+        if not isinstance(unknown_block_ids, list):
+            unknown_block_ids = []
+
+        replacements: dict[str, str] = {}
+        unresolved_ids: list[str] = []
+        next_visited = visited | ({page_key} if page_key else set())
+        for raw_block_id in unknown_block_ids:
+            block_id = str(raw_block_id)
+            block_key = _notion_id_key(block_id)
+            if not block_key or block_key in next_visited:
+                unresolved_ids.append(block_id)
+                continue
+            try:
+                subtree = await self._fetch_complete_markdown_payload(
+                    block_id,
+                    visited=next_visited,
+                )
+            except NotionApiError as exc:
+                error_code = (
+                    exc.payload.get("code")
+                    if isinstance(exc.payload, Mapping)
+                    else None
+                )
+                if exc.status == 404 and error_code == "object_not_found":
+                    # Notion deliberately conceals inaccessible blocks as
+                    # object_not_found, so retain their explicit placeholders.
+                    unresolved_ids.append(block_id)
+                    continue
+                # Authentication, rate-limit, and server failures must abort
+                # the snapshot instead of making incomplete Markdown look final.
+                raise
+
+            subtree_markdown = str(subtree.get("markdown") or "")
+            if not subtree_markdown.strip():
+                unresolved_ids.append(block_id)
+                continue
+            replacements[block_id] = subtree_markdown
+            nested_unknown_ids = subtree.get("unknown_block_ids")
+            if isinstance(nested_unknown_ids, list):
+                unresolved_ids.extend(str(value) for value in nested_unknown_ids)
+
+        resolved_payload = dict(payload)
+        resolved_payload["markdown"] = _replace_unknown_markdown_tags(
+            str(payload.get("markdown") or ""),
+            replacements,
+        )
+        # Every advertised unknown block has now been attempted. Remaining tags
+        # represent unsupported or inaccessible content, not a fallback signal.
+        resolved_payload["truncated"] = False
+        resolved_payload["unknown_block_ids"] = unresolved_ids
+        return resolved_payload
 
     def _normalize_icon(self, icon_payload: dict[str, Any] | None) -> dict[str, Any] | None:
         """Return the icon payload if present."""

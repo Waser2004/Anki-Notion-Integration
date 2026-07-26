@@ -88,8 +88,8 @@ def extract_root_toggle_markdown(markdown: str) -> tuple[str, ...] | None:
         details_depth -= 1
         if details_depth < 0:
             return None
-        
-        # When the depth returns to zero, we have a complete top-level <details> block. 
+
+        # When the depth returns to zero, we have a complete top-level <details> block.
         # Add details content to sources and reset the start index for the next block.
         if details_depth == 0:
             sources.append("\n".join(lines[start_index : index + 1]))

@@ -32,6 +32,11 @@ from ..modules.cards_store import CardsStore
 from ..modules.db import Database
 from ..modules.notion_client import NotionClient
 from ..modules.pages import PagesStore, StoredPage
+from ..modules.parser.cloze_card_parser import (
+    ClozeCardParser,
+    paragraph_has_cloze_marker,
+)
+from ..modules.settings import SettingsStore
 from .context_menu_schema import ContextMenuEntry, load_context_menu_schema
 from .ui import UiContext
 
@@ -220,19 +225,33 @@ class CardsPage(QWidget):
         try:
             db = Database(self._context.db_path)
             client = NotionClient.from_settings(db, profile_name=self._resolve_profile_name(self._context))
+            settings = SettingsStore(db, profile_name=self._resolve_profile_name(self._context))
+            enable_gray_toggle_cloze = bool(settings.get_value("enable_gray_toggle_cloze_parsing"))
+            cloze_marker_colors = list(settings.get_value("cloze_marker_colors"))
             blocks = client.get_page_blocks_shallow(page_id)
+            cloze_parser = ClozeCardParser(cloze_marker_colors)
             cards: list[dict[str, str]] = []
             for block in blocks:
                 if block.block_type == "toggle":
+                    card_kind = (
+                        "cloze"
+                        if cloze_parser.is_advanced_container(
+                            block,
+                            enable_gray_toggle_cloze=enable_gray_toggle_cloze,
+                        )
+                        else "toggle"
+                    )
                     cards.append(
                         {
                             "notion_block_id": block.block_id,
                             "front_text": self._toggle_front_plain_text(block.raw),
-                            "card_kind": "toggle",
+                            "card_kind": card_kind,
                         }
                     )
                     continue
-                if block.block_type == "paragraph" and self._paragraph_has_cloze_marker(block.raw):
+                if block.block_type == "paragraph" and paragraph_has_cloze_marker(
+                    block.raw, cloze_marker_colors
+                ):
                     cards.append(
                         {
                             "notion_block_id": block.block_id,
@@ -785,28 +804,6 @@ class CardsPage(QWidget):
             if isinstance(plain_text, str) and plain_text:
                 parts.append(plain_text)
         return "".join(parts)
-
-    @staticmethod
-    def _paragraph_has_cloze_marker(raw_payload: dict[str, Any]) -> bool:
-        """Return whether one paragraph contains cloze-marker rich-text annotations."""
-        paragraph_payload = raw_payload.get("paragraph")
-        if not isinstance(paragraph_payload, dict):
-            return False
-        rich_text = paragraph_payload.get("rich_text")
-        if not isinstance(rich_text, list):
-            return False
-
-        for item in rich_text:
-            if not isinstance(item, dict):
-                continue
-            annotations = item.get("annotations")
-            if not isinstance(annotations, dict):
-                continue
-            color = str(annotations.get("color") or "").strip().lower()
-            background_color = str(annotations.get("background_color") or "").strip().lower()
-            if color == "yellow_background" or background_color == "yellow":
-                return True
-        return False
 
     @staticmethod
     def _resolve_profile_name(context: UiContext) -> str | None:

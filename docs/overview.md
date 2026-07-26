@@ -10,7 +10,7 @@ Noteck syncs content from Notion into Anki so you can maintain notes in Notion a
   - Basic
   - Basic (Reversed)
   - Input
-  - Cloze (from highlighted text in top-level paragraphs)
+  - Cloze (from inline and whole-block markers in paragraphs and advanced cloze containers)
 - Exclude specific toggle cards from sync.
 - Set page-level default card types.
 - Open an Image Occlusion workflow for images on a page.

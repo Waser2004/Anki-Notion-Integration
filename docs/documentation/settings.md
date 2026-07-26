@@ -13,6 +13,8 @@ Each setting can provide both:
 - `cards`:
   - `default_card_type` (`basic`, `basic_reversed`, `input`)
   - `enable_cloze_parsing` (bool)
+  - `enable_gray_toggle_cloze_parsing` (bool; enabled by default; applies only to toggles with `gray_background`)
+  - `cloze_marker_colors` (multi-select; Yellow, Green, Blue, and Purple are enabled by default; unselected colors remain background formatting)
   - `enable_image_occlusion_parsing` (bool)
   - `restore_default_card_templates` (button action)
 - `sync`:
@@ -27,6 +29,7 @@ Each setting can provide both:
 - Dropdown values are validated against schema options.
 - Settings UI hover text uses each setting's `tooltip` field when present, falling back to `description`.
 - `page_selection_behavior` option labels, mode descriptions, and option-specific tooltips are shared from `Noteck.modules.pages` so the Settings dropdown, Settings description, and Pages status tooltip describe the same modes.
+- The cloze-marker selector shows a yellow Notion-style warning callout whenever its selection differs from the marker palette recorded after the last successful Notion sync. Every UI-triggered sync refreshes the comparison immediately, so the callout disappears as soon as a successful sync records the new palette.
 - Button settings are action-only and are not persisted.
 - The card template action is hidden when templates match the bundled defaults. It is shown
   as an update action for older bundled template versions and as a restore action for
