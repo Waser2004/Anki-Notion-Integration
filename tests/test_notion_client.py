@@ -397,6 +397,124 @@ class NotionClientPageTreeQueueTests(unittest.TestCase):
         self.assertEqual(snapshot.unknown_block_ids, (unknown_id,))
         self.assertIn("<unknown", snapshot.markdown)
 
+    def test_get_page_markdown_keeps_object_not_found_subtree_as_unknown(self) -> None:
+        """An inaccessible subtree remains explicit after its protected fetch."""
+        unknown_id = "unknown-1"
+
+        def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> NotionResponse:
+            _ = (method, headers, body, timeout)
+            if url.endswith("/pages/page-1/markdown"):
+                return _json_response(
+                    {
+                        "id": "page-1",
+                        "markdown": f'<unknown url="https://www.notion.so/Page#{unknown_id}"/>',
+                        "truncated": True,
+                        "unknown_block_ids": [unknown_id],
+                    }
+                )
+            return NotionResponse(
+                status=404,
+                headers={},
+                body=json.dumps(
+                    {
+                        "object": "error",
+                        "status": 404,
+                        "code": "object_not_found",
+                        "message": "Could not find block.",
+                    }
+                ).encode("utf-8"),
+            )
+
+        with patch.object(notion_client_module, "NOTION_REQUESTS_PER_SECOND", 1_000_000.0):
+            snapshot = NotionClient(api_token="token", transport=transport).get_page_markdown("page-1")
+
+        self.assertFalse(snapshot.truncated)
+        self.assertEqual(snapshot.unknown_block_ids, (unknown_id,))
+        self.assertIn("<unknown", snapshot.markdown)
+
+    def test_get_page_markdown_retries_rate_limited_subtree_fetch(self) -> None:
+        """Independent subtree requests use the shared rate-limit retry path."""
+        unknown_id = "unknown-1"
+        subtree_attempts = 0
+
+        def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> NotionResponse:
+            nonlocal subtree_attempts
+            _ = (method, headers, body, timeout)
+            if url.endswith("/pages/page-1/markdown"):
+                return _json_response(
+                    {
+                        "id": "page-1",
+                        "markdown": f'<unknown url="https://www.notion.so/Page#{unknown_id}"/>',
+                        "truncated": True,
+                        "unknown_block_ids": [unknown_id],
+                    }
+                )
+            subtree_attempts += 1
+            if subtree_attempts == 1:
+                return NotionResponse(
+                    status=429,
+                    headers={"Retry-After": "0"},
+                    body=json.dumps(
+                        {"code": "rate_limited", "message": "slow down"}
+                    ).encode("utf-8"),
+                )
+            return _json_response(
+                {
+                    "id": unknown_id,
+                    "markdown": "Recovered subtree",
+                    "truncated": False,
+                    "unknown_block_ids": [],
+                }
+            )
+
+        with patch.object(notion_client_module, "NOTION_REQUESTS_PER_SECOND", 1_000_000.0):
+            snapshot = NotionClient(api_token="token", transport=transport).get_page_markdown("page-1")
+
+        self.assertEqual(subtree_attempts, 2)
+        self.assertEqual(snapshot.markdown, "Recovered subtree")
+        self.assertEqual(snapshot.unknown_block_ids, ())
+
+    def test_get_page_markdown_propagates_non_permission_subtree_errors(self) -> None:
+        """Incomplete Markdown must not conceal API failures as unsupported blocks."""
+        unknown_id = "unknown-1"
+
+        for status, code in (
+            (401, "unauthorized"),
+            (429, "rate_limited"),
+            (500, "internal_server_error"),
+        ):
+            with self.subTest(status=status, code=code):
+                def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> NotionResponse:
+                    _ = (method, headers, body, timeout)
+                    if url.endswith("/pages/page-1/markdown"):
+                        return _json_response(
+                            {
+                                "id": "page-1",
+                                "markdown": f'<unknown url="https://www.notion.so/Page#{unknown_id}"/>',
+                                "truncated": True,
+                                "unknown_block_ids": [unknown_id],
+                            }
+                        )
+                    return NotionResponse(
+                        status=status,
+                        headers={"Retry-After": "0"},
+                        body=json.dumps(
+                            {"code": code, "message": "subtree request failed"}
+                        ).encode("utf-8"),
+                    )
+
+                with patch.object(
+                    notion_client_module,
+                    "NOTION_REQUESTS_PER_SECOND",
+                    1_000_000.0,
+                ), patch.object(notion_client_module, "NOTION_RATE_LIMIT_RETRIES", 0):
+                    client = NotionClient(api_token="token", transport=transport)
+                    with self.assertRaises(NotionApiError) as raised:
+                        client.get_page_markdown("page-1")
+
+                self.assertEqual(raised.exception.status, status)
+                self.assertEqual(raised.exception.payload.get("code"), code)
+
     def test_get_page_content_fetches_paginated_descendants_with_bounded_workers(self) -> None:
         calls: list[str] = []
         active_requests = 0

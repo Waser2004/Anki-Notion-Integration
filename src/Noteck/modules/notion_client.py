@@ -891,11 +891,20 @@ class NotionClient:
                     block_id,
                     visited=next_visited,
                 )
-            except NotionApiError:
-                # Permission-limited unknown blocks return object_not_found and
-                # remain explicit unsupported placeholders in the parent.
-                unresolved_ids.append(block_id)
-                continue
+            except NotionApiError as exc:
+                error_code = (
+                    exc.payload.get("code")
+                    if isinstance(exc.payload, Mapping)
+                    else None
+                )
+                if exc.status == 404 and error_code == "object_not_found":
+                    # Notion deliberately conceals inaccessible blocks as
+                    # object_not_found, so retain their explicit placeholders.
+                    unresolved_ids.append(block_id)
+                    continue
+                # Authentication, rate-limit, and server failures must abort
+                # the snapshot instead of making incomplete Markdown look final.
+                raise
 
             subtree_markdown = str(subtree.get("markdown") or "")
             if not subtree_markdown.strip():
