@@ -31,3 +31,11 @@ The Pages tab shows the active selection behavior in its status label. The dropd
 - `dynamic_descendants` (`Dynamic`): selecting a parent keeps its whole subtree selected. Child pages discovered on later refreshes are selected automatically as long as the parent remains selected.
 
 The row context menu action `Select Page and All Children` remains available for explicit one-time subtree selection regardless of the configured behavior.
+
+The local page cache is refreshed quietly in the background whenever an Anki
+profile opens when startup auto-sync is disabled. When startup auto-sync is
+enabled, page discovery is part of that sync instead. The first Pages tab opened
+in a session reuses whichever startup discovery ran: it displays
+`Refreshing pages... loaded X` while work is active and renders the resulting
+cache without starting a duplicate Notion request. Later explicit refreshes
+still fetch the current page list normally.

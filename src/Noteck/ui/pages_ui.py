@@ -36,15 +36,20 @@ from ..modules.db import Database
 from ..modules.notion_client import NotionApiError, NotionClient, NotionPage, NotionTransportError
 from ..modules.pages import (
     DEFAULT_PAGE_SELECTION_BEHAVIOR,
+    DYNAMIC_SELECTION_PARENT_IDS_SETTING,
     PAGE_SELECTION_BEHAVIOR_DETAILS,
     PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS,
     PagesStore,
+    StartupPageRefreshStatus,
     StoredPage,
     apply_default_card_type_rule,
     apply_selection_rule,
     build_children_map_from_pages,
     build_deck_names_from_pages,
+    claim_startup_page_refresh_status,
+    get_startup_page_refresh_status,
     get_descendant_ids,
+    load_dynamic_selection_parent_ids,
     normalize_page_selection_behavior,
     page_selection_behavior_tooltip,
 )
@@ -52,9 +57,6 @@ from ..modules.settings import SettingsError, SettingsStore
 from .ui import navigate_to_page
 from .ui import UiContext
 from .context_menu_schema import ContextMenuEntry, load_context_menu_schema
-
-
-_DYNAMIC_SELECTION_PARENT_IDS_SETTING = "page_selection_dynamic_parent_ids"
 
 
 class PagesPage(QWidget):
@@ -151,6 +153,10 @@ class PagesPage(QWidget):
         self._fetch_timer = QTimer(self)
         self._fetch_timer.setInterval(40)
         self._fetch_timer.timeout.connect(self._drain_fetch_queue)
+        self._startup_refresh_timer = QTimer(self)
+        self._startup_refresh_timer.setInterval(100)
+        self._startup_refresh_timer.timeout.connect(self._poll_startup_refresh)
+        self._startup_refresh_generation: int | None = None
         # Cache action icons and refresh them when palette/theme changes.
         self._image_button_icon = QIcon()
         self._cards_button_icon = QIcon()
@@ -188,6 +194,9 @@ class PagesPage(QWidget):
 
     def reload(self) -> None:
         """Load pages progressively and update the tree while data is being fetched."""
+        self._startup_refresh_timer.stop()
+        self._startup_refresh_generation = None
+        startup_refresh_status = claim_startup_page_refresh_status()
         self._page_selection_behavior = self._load_page_selection_behavior()
         self._refresh_selection_behavior_label()
         self._load_generation += 1
@@ -222,9 +231,22 @@ class PagesPage(QWidget):
 
         cached_count = len(self._pages_by_id)
         if cached_count > 0:
-            self._groupbox.setTitle(f"Refreshing pages...")
+            self._groupbox.setTitle("Refreshing pages...")
         else:
             self._groupbox.setTitle("Loading Notion pages...")
+
+        # The first Pages tab reuses startup discovery instead of issuing the
+        # same Notion page-list request again during this session.
+        if startup_refresh_status is not None:
+            self._startup_refresh_generation = startup_refresh_status.generation
+            if startup_refresh_status.running:
+                self._groupbox.setTitle(
+                    f"Refreshing pages... loaded {startup_refresh_status.loaded_count}"
+                )
+                self._startup_refresh_timer.start()
+            else:
+                self._apply_completed_startup_refresh(startup_refresh_status)
+            return
         
         # Start background fetch.
         self._fetch_timer.start()
@@ -234,6 +256,65 @@ class PagesPage(QWidget):
             daemon=True,
         )
         worker.start()
+
+    def _poll_startup_refresh(self) -> None:
+        """Mirror startup discovery progress without launching another request."""
+        generation = self._startup_refresh_generation
+        if generation is None:
+            self._startup_refresh_timer.stop()
+            return
+
+        status = get_startup_page_refresh_status(generation)
+        if status is None:
+            self._startup_refresh_timer.stop()
+            return
+
+        self._groupbox.setTitle(f"Refreshing pages... loaded {status.loaded_count}")
+        if not status.running:
+            self._apply_completed_startup_refresh(status)
+
+    def _apply_completed_startup_refresh(
+        self,
+        status: StartupPageRefreshStatus,
+    ) -> None:
+        """Render the cache written by startup discovery and finalize its label."""
+        self._startup_refresh_timer.stop()
+        self._startup_refresh_generation = None
+        self._is_loading = False
+        self._page_count = status.loaded_count
+
+        previous_suspend_state = self._suspend_item_events
+        self._suspend_item_events = True
+        try:
+            self._tree.clear()
+            self._items_by_id.clear()
+            self._pages_by_id.clear()
+            self._hovered_page_id = None
+            self._children_map = {}
+            self._deck_names_by_page_id = {}
+            self._page_default_card_types = {}
+            self._ordered_child_ids_by_parent = dict(
+                status.ordered_child_ids_by_parent or {}
+            )
+            self._selected_ids = self._store.get_selected_page_ids()
+            self._cascade_selected_parent_ids = self._load_dynamic_selection_parent_ids()
+            self._preload_cached_pages()
+        finally:
+            self._suspend_item_events = previous_suspend_state
+
+        if status.error_message:
+            self._groupbox.setTitle("Failed to load pages.")
+            self._error_label.setText(status.error_message)
+            self._error_label.show()
+            return
+
+        self._groupbox.setTitle(f"Loaded {status.loaded_count} pages.")
+        self._error_label.clear()
+        self._error_label.hide()
+        if not self._has_expansion_snapshot:
+            self._tree.expandToDepth(0)
+        else:
+            self._apply_expanded_ids()
 
     def _fetch_pages_worker(self, generation: int) -> None:
         """Fetch pages in a worker thread and push events to the UI queue."""
@@ -887,23 +968,7 @@ class PagesPage(QWidget):
 
     def _load_dynamic_selection_parent_ids(self) -> set[str]:
         """Read persisted dynamic-selection roots from the settings table."""
-        raw_value = self._db.get_setting(_DYNAMIC_SELECTION_PARENT_IDS_SETTING)
-        if not raw_value:
-            return set()
-
-        try:
-            payload = json.loads(raw_value)
-        except json.JSONDecodeError:
-            return set()
-
-        if not isinstance(payload, list):
-            return set()
-
-        return {
-            page_id
-            for page_id in payload
-            if isinstance(page_id, str) and page_id.strip()
-        }
+        return load_dynamic_selection_parent_ids(self._db)
 
     def _persist_dynamic_selection_parent_ids(self) -> None:
         """Persist dynamic-selection roots so refreshes include future children."""
@@ -912,7 +977,7 @@ class PagesPage(QWidget):
             for page_id in self._cascade_selected_parent_ids
             if page_id in self._selected_ids
         )
-        self._db.set_setting(_DYNAMIC_SELECTION_PARENT_IDS_SETTING, json.dumps(parent_ids))
+        self._db.set_setting(DYNAMIC_SELECTION_PARENT_IDS_SETTING, json.dumps(parent_ids))
 
     def _position_selection_behavior_label(self) -> None:
         """Place the page-sync status in the group box's top-right title area."""

@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import logging
 import sqlite3
-from typing import Mapping
+import threading
+from pathlib import Path
+from typing import Any, Callable, Mapping
 
 from .card_types import normalize_default_selectable_card_type
 from .db import Database
 from .notion_client import NotionPage, PageNode
+from .notion_client import NotionClient
+from .settings import SettingsStore
 
 PAGE_SELECTION_BEHAVIOR_MANUAL               = "manual"
 PAGE_SELECTION_BEHAVIOR_EXISTING_DESCENDANTS = "existing_descendants"
@@ -19,6 +25,7 @@ PAGE_SELECTION_BEHAVIORS = (
     PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS,
 )
 DEFAULT_PAGE_SELECTION_BEHAVIOR = PAGE_SELECTION_BEHAVIOR_EXISTING_DESCENDANTS
+DYNAMIC_SELECTION_PARENT_IDS_SETTING = "page_selection_dynamic_parent_ids"
 PAGE_SELECTION_BEHAVIOR_DETAILS = {
     PAGE_SELECTION_BEHAVIOR_MANUAL: (
         "Manual",
@@ -68,6 +75,283 @@ class StoredPage:
     parent_id: str | None
     parent_type: str | None
     default_card_type: str | None
+
+
+@dataclass(frozen=True)
+class PageRefreshResult:
+    """Summarize one completed refresh of the locally cached Notion pages."""
+    loaded_count: int
+    ordered_child_ids_by_parent: Mapping[str, tuple[str, ...]]
+
+
+PageRefreshProgressCallback = Callable[[int], None]
+PageRefreshCancelCheck = Callable[[], bool]
+
+
+class PageRefreshCancelled(RuntimeError):
+    """Raised when a page refresh is canceled before it can be persisted."""
+
+
+@dataclass(frozen=True)
+class StartupPageRefreshStatus:
+    """Expose startup page-discovery progress to the first Pages-tab instance."""
+
+    generation: int
+    running: bool
+    loaded_count: int
+    error_message: str | None = None
+    ordered_child_ids_by_parent: Mapping[str, tuple[str, ...]] | None = None
+
+
+_PAGE_REFRESH_LOCK          = threading.Lock() # lock to serialize page refreshes within the add-on process
+_STARTUP_REFRESH_STATE_LOCK = threading.Lock() # lock to serialize access to the startup refresh state
+
+_startup_refresh_status: StartupPageRefreshStatus | None = None
+_startup_refresh_available = False
+_LOG = logging.getLogger("noteck.pages")
+
+
+def begin_startup_page_refresh() -> int:
+    """Start a session-scoped refresh that the first Pages tab can observe."""
+    global _startup_refresh_status, _startup_refresh_available
+    with _STARTUP_REFRESH_STATE_LOCK:
+        generation = (
+            1
+            if _startup_refresh_status is None
+            else _startup_refresh_status.generation + 1
+        )
+        _startup_refresh_status = StartupPageRefreshStatus(
+            generation   = generation,
+            running      = True,
+            loaded_count = 0,
+        )
+        _startup_refresh_available = True
+        return generation
+
+
+def claim_startup_page_refresh_status() -> StartupPageRefreshStatus | None:
+    """Return startup refresh state once so only the first Pages tab consumes it."""
+    global _startup_refresh_available
+    with _STARTUP_REFRESH_STATE_LOCK:
+        if not _startup_refresh_available:
+            return None
+        _startup_refresh_available = False
+        return _startup_refresh_status
+
+
+def get_startup_page_refresh_status(
+    generation: int,
+) -> StartupPageRefreshStatus | None:
+    """Return current state for one claimed startup refresh generation."""
+    with _STARTUP_REFRESH_STATE_LOCK:
+        if (
+            _startup_refresh_status is None
+            or _startup_refresh_status.generation != generation
+        ):
+            return None
+        return _startup_refresh_status
+
+
+def _update_startup_page_refresh(generation: int, loaded_count: int) -> None:
+    """Publish a new loaded-page count for an active startup refresh."""
+    global _startup_refresh_status
+    with _STARTUP_REFRESH_STATE_LOCK:
+        if (
+            _startup_refresh_status is None
+            or _startup_refresh_status.generation != generation
+        ):
+            return
+        _startup_refresh_status = StartupPageRefreshStatus(
+            generation   = generation,
+            running      = True,
+            loaded_count = loaded_count,
+        )
+
+
+def finish_startup_page_refresh(
+    generation: int,
+    *,
+    loaded_count: int,
+    error_message: str | None = None,
+    ordered_child_ids_by_parent: Mapping[str, tuple[str, ...]] | None = None,
+) -> None:
+    """Mark startup discovery complete while retaining state for the Pages tab."""
+    global _startup_refresh_status
+    with _STARTUP_REFRESH_STATE_LOCK:
+        if (
+            _startup_refresh_status is None
+            or _startup_refresh_status.generation != generation
+        ):
+            return
+        _startup_refresh_status = StartupPageRefreshStatus(
+            generation    = generation,
+            running       = False,
+            loaded_count  = loaded_count,
+            error_message = error_message,
+            ordered_child_ids_by_parent = ordered_child_ids_by_parent,
+        )
+
+
+def load_dynamic_selection_parent_ids(db: Database) -> set[str]:
+    """Return persisted roots whose future descendants should stay selected."""
+    raw_value = db.get_setting(DYNAMIC_SELECTION_PARENT_IDS_SETTING)
+    if not raw_value:
+        return set()
+
+    try:
+        payload = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return set()
+    if not isinstance(payload, list):
+        return set()
+
+    return {
+        page_id
+        for page_id in payload
+        if isinstance(page_id, str) and page_id.strip()
+    }
+
+
+def refresh_pages(
+    db: Database,
+    *,
+    profile_name:       str | None                         = None,
+    progress_callback:  PageRefreshProgressCallback | None = None,
+    should_cancel:      PageRefreshCancelCheck | None      = None,
+    client:             NotionClient | None                = None,
+    startup_generation: int | None                         = None,
+) -> PageRefreshResult:
+    """Refresh cached pages and apply dynamic descendant selection after fetching.
+
+    Fetching is serialized within the add-on process so a startup refresh and a
+    user-triggered sync cannot write competing snapshots to the pages table.
+    """
+    if progress_callback is not None:
+        progress_callback(0)
+    if startup_generation is not None:
+        _update_startup_page_refresh(startup_generation, 0)
+
+    with _PAGE_REFRESH_LOCK:
+        pages_by_id: dict[str, NotionPage] = {}
+        ordered_child_ids_by_parent: dict[str, tuple[str, ...]] = {}
+        try:
+            notion_client = client or NotionClient.from_settings(db, profile_name=profile_name)
+
+            # Fetch pages from Notion and build a page-id indexed view.
+            for page in notion_client.iter_pages():
+                if should_cancel is not None and should_cancel():
+                    raise PageRefreshCancelled("Page refresh was canceled.")
+
+                pages_by_id[page.page_id] = page
+                if progress_callback is not None:
+                    progress_callback(len(pages_by_id))
+                if startup_generation is not None:
+                    _update_startup_page_refresh(startup_generation, len(pages_by_id))
+
+            # load pages store
+            store             = PagesStore(db)
+            selected_page_ids = store.get_selected_page_ids().intersection(pages_by_id)
+
+            # load settings store
+            settings_store    = SettingsStore(db, profile_name=profile_name)
+            behavior          = normalize_page_selection_behavior(
+                settings_store.get_value("page_selection_behavior")
+            )
+
+            # Apply dynamic descendant selection if the user has chosen that behavior.
+            if behavior == PAGE_SELECTION_BEHAVIOR_DYNAMIC_DESCENDANTS:
+                children_map = build_children_map_from_pages(pages_by_id)
+                for parent_id in load_dynamic_selection_parent_ids(db):
+                    if parent_id in selected_page_ids:
+                        selected_page_ids.update(get_descendant_ids(parent_id, children_map))
+
+            # Preserve Notion's sibling block order for the Pages tab.
+            build_order_map = getattr(notion_client, "build_child_page_order_map", None)
+            if startup_generation is not None and callable(build_order_map):
+                try:
+                    ordered_child_ids_by_parent = dict(build_order_map(pages_by_id))
+                except Exception:
+                    _LOG.exception("Notion child-page ordering could not be refreshed.")
+
+            # Persist the refreshed pages and the updated selection state.
+            deck_names = build_deck_names_from_pages(pages_by_id)
+            store.upsert_page_selection(
+                deck_names,
+                selected_page_ids,
+                pages_by_id=pages_by_id,
+            )
+            store.delete_pages_not_in(set(pages_by_id))
+
+        except Exception as exc:
+            if startup_generation is not None:
+                finish_startup_page_refresh(
+                    startup_generation,
+                    loaded_count=len(pages_by_id),
+                    error_message=str(exc),
+                )
+            raise
+
+        if startup_generation is not None:
+            finish_startup_page_refresh(
+                startup_generation,
+                loaded_count=len(pages_by_id),
+                ordered_child_ids_by_parent=ordered_child_ids_by_parent,
+            )
+
+        return PageRefreshResult(
+            loaded_count=len(pages_by_id),
+            ordered_child_ids_by_parent=ordered_child_ids_by_parent,
+        )
+
+
+def trigger_startup_page_refresh(
+    mw: Any,
+    db_path: str | Path,
+    *,
+    on_done: Callable[[], None] | None = None,
+) -> bool:
+    """Start a quiet background page refresh when an Anki profile opens."""
+    taskman           = getattr(mw, "taskman", None)
+    run_in_background = getattr(taskman, "run_in_background", None)
+    if not callable(run_in_background):
+        return False
+
+    startup_generation = begin_startup_page_refresh()
+
+    def work() -> PageRefreshResult:
+        db = Database(db_path)
+        return refresh_pages(
+            db,
+            profile_name       = _resolve_profile_name(mw),
+            startup_generation = startup_generation,
+        )
+
+    def done(future: Any) -> None:
+        # Consume background errors here; opening Anki must remain usable when
+        # Notion is offline or its credentials have not been configured yet.
+        try:
+            future.result()
+        except Exception:
+            _LOG.exception("The startup Notion page refresh failed.")
+        if on_done is not None:
+            on_done()
+
+    run_in_background(work, done, uses_collection=False)
+    return True
+
+
+def _resolve_profile_name(mw: Any) -> str | None:
+    """Resolve the active Anki profile name without importing UI modules."""
+    pm = getattr(mw, "pm", None)
+    if pm is None:
+        return None
+    name_attr = getattr(pm, "name", None)
+    if callable(name_attr):
+        try:
+            return str(name_attr())
+        except Exception:
+            return None
+    return name_attr if isinstance(name_attr, str) else None
 
 
 def flatten_page_tree(roots: list[PageNode]) -> dict[str, PageNode]:
