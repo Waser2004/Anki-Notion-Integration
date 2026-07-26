@@ -19,8 +19,16 @@ from .renderer import (
 )
 
 
-_CLOZE_CONTAINER_PREFIX_RE = re.compile(r"^\s*(?:cloze\s*:|\[cloze\])(?:\s|$)", re.IGNORECASE) # search for "cloze:" or "[cloze]" in a toggle title
-_EXTRA_PREFIX_RE           = re.compile(r"^\s*(?:extra\s*:|\[extra\])(?:\s|$)", re.IGNORECASE) # search for "extra:" or "[extra]" in a toggle title and top level paragraph
+# Prefixes are anchored but do not require a separator, so existing compact
+# forms such as ``Cloze:Question`` and ``[extra]Details`` remain valid.
+_CLOZE_CONTAINER_PREFIX_RE = re.compile(
+    r"^\s*(?:cloze\s*:|\[cloze\])\s*",
+    re.IGNORECASE,
+)
+_EXTRA_PREFIX_RE = re.compile(
+    r"^\s*(?:extra\s*:|\[extra\])\s*",
+    re.IGNORECASE,
+)
 
 _CLOZE_NUMBERS = {
     "yellow": 1,

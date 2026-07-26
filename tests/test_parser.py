@@ -1692,6 +1692,76 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(payloads[0].fields["Text"], "<p>{{c1::Front}}</p>")
         self.assertEqual(payloads[0].fields["Extra"], "<p>Back detail</p>")
 
+    def test_cloze_prefixes_do_not_require_trailing_whitespace(self) -> None:
+        """Both cloze title conventions accept content immediately after the marker."""
+        for title in ("[cloze]Question", "Cloze:Question"):
+            with self.subTest(title=title):
+                advanced_toggle = _block(
+                    "advanced-toggle",
+                    "toggle",
+                    {"rich_text": [_text_item(title)]},
+                    children=(
+                        _block(
+                            "text-p",
+                            "paragraph",
+                            {
+                                "rich_text": [
+                                    _text_item(
+                                        "Front",
+                                        annotations=_annotations(
+                                            background_color="yellow"
+                                        ),
+                                    )
+                                ]
+                            },
+                        ),
+                    ),
+                )
+
+                payloads = parse_page_to_cards(
+                    "page-1",
+                    [advanced_toggle],
+                    enable_cloze=True,
+                )
+
+                self.assertEqual(len(payloads), 1)
+                self.assertEqual(
+                    payloads[0].fields["Text"],
+                    "<p>{{c1::Front}}</p>",
+                )
+
+    def test_extra_prefixes_do_not_require_trailing_whitespace(self) -> None:
+        """Both Extra conventions consume compact markers without leaking labels."""
+        for marker in ("Extra:Details", "[extra]Details"):
+            with self.subTest(marker=marker):
+                cloze_paragraph = _block(
+                    "paragraph-cloze",
+                    "paragraph",
+                    {
+                        "rich_text": [
+                            _text_item(
+                                "Answer",
+                                annotations=_annotations(
+                                    background_color="yellow"
+                                ),
+                            )
+                        ]
+                    },
+                )
+                extra_paragraph = _block(
+                    "paragraph-extra",
+                    "paragraph",
+                    {"rich_text": [_text_item(marker)]},
+                )
+
+                payload = parse_page_to_cards(
+                    "page-1",
+                    [cloze_paragraph, extra_paragraph],
+                    enable_cloze=True,
+                )[0]
+
+                self.assertEqual(payload.fields["Extra"], "Details")
+
     def test_advanced_cloze_extra_marker_colors_remain_visual(self) -> None:
         """An Extra block never converts configured marker colors into cloze syntax."""
         advanced_toggle = _block(
@@ -1758,7 +1828,7 @@ class ParserTests(unittest.TestCase):
         extra_toggle = _block(
             "extra-toggle",
             "toggle",
-            {"rich_text": [_text_item("[extra] Details")]},
+            {"rich_text": [_text_item("[extra]Details")]},
             children=(_block("extra-body", "paragraph", {"rich_text": [_text_item("Toggle body")]}),),
         )
         advanced_toggle = _block(
@@ -1771,7 +1841,7 @@ class ParserTests(unittest.TestCase):
         payload = parse_page_to_cards("page-1", [advanced_toggle], enable_cloze=True)[0]
 
         self.assertEqual(payload.fields["Extra"], "<p>Toggle body</p>")
-        self.assertNotIn("[extra] Details", payload.fields["Text"])
+        self.assertNotIn("[extra]Details", payload.fields["Text"])
         self.assertNotIn("Toggle body", payload.fields["Text"])
 
     def test_advanced_cloze_deep_extra_toggle_preserves_wrapper_in_text(self) -> None:

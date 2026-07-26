@@ -120,6 +120,8 @@ After accepting a source paragraph, the parser inspects exactly the next
 top-level block. If it is a paragraph whose combined plain text begins with
 `Extra:` (case-insensitive, with surrounding prefix whitespace allowed), that
 block supplies `Extra` and is consumed.
+Whitespace after `Extra:` or `[extra]` is optional, so compact forms such as
+`Extra:Details` remain valid.
 
 Recognition and prefix removal use the combined visible text, so the marker may
 span formatting runs such as italic `Ext` followed by `ra:`. The remaining
@@ -141,7 +143,8 @@ An advanced source is a root `toggle` matching either convention:
   is enabled.
 
 The title marker is matched against combined visible text, so formatting part
-of `[cloze]` does not prevent recognition.
+of `[cloze]` does not prevent recognition. No separator is required after the
+marker, so `[cloze]Question` and `Cloze:Question` are valid.
 The title is only a recognition marker. It is not included in `Text`. A gray
 foreground text annotation is not equivalent to a gray block background.
 The root toggle background is stored as the complete card surface, including
@@ -192,6 +195,7 @@ A nested toggle whose title starts with either `Extra:` or `[extra]`, ignoring
 leading whitespace and case, also supplies `Extra`. The marker title and toggle
 shell are omitted; only its child blocks are exported. Matching uses combined
 visible title text, so formatting part of the marker does not prevent detection.
+Whitespace after the marker is optional.
 Matching toggles are recognized at any depth below the advanced cloze root,
 which lets Extra contain
 the shared renderer's supported images, tables, callouts, lists, and other rich
