@@ -630,37 +630,64 @@ class ClozeCardParser:
 
     @staticmethod
     def _plain_text(rich_text: Iterable[dict[str, Any]]) -> str:
-        return "".join(str(item.get("plain_text") or item.get("text", {}).get("content") or "") for item in rich_text)
+        return "".join(
+            ClozeCardParser._rich_text_item_plain_text(item)
+            for item in rich_text
+        )
+
+    @staticmethod
+    def _rich_text_item_plain_text(item: dict[str, Any]) -> str:
+        """Return one item's visible text without formatting annotations."""
+        plain_text = item.get("plain_text")
+        if isinstance(plain_text, str):
+            return plain_text
+        text_payload = item.get("text")
+        if isinstance(text_payload, dict):
+            content = text_payload.get("content")
+            if isinstance(content, str):
+                return content
+        return ""
 
     def _without_extra_prefix(self, block: NotionBlock) -> NotionBlock:
-        """Return a copy of an ``Extra:`` paragraph with its prefix removed."""
-        # Extract block data
+        """Remove a visible ``Extra:`` prefix across formatted rich-text runs."""
         raw     = dict(block.raw)
         payload = dict(self._payload(block))
         items   = self._rich_text(block)
+        prefix_match = _EXTRA_PREFIX_RE.match(self._plain_text(items))
+        if prefix_match is None:
+            return block
 
-        for index, original_item in enumerate(items):
-            text_payload = original_item.get("text")
-            if not isinstance(text_payload, dict) or not isinstance(text_payload.get("content"), str):
+        remaining_prefix_length = prefix_match.end()
+        stripped_items: list[dict[str, Any]] = []
+        for original_item in items:
+            visible_text = self._rich_text_item_plain_text(original_item)
+            if remaining_prefix_length <= 0 or not visible_text:
+                stripped_items.append(original_item)
                 continue
-            
-            # Remove the "Extra:" prefix from the content field of the first rich text item if it exists.
-            item         = dict(original_item)
-            text_payload = dict(text_payload)
-            text_payload["content"] = _EXTRA_PREFIX_RE.sub("", text_payload["content"], count=1)
-            item["text"] = text_payload
+            if len(visible_text) <= remaining_prefix_length:
+                # This complete formatting run belongs to the marker.
+                remaining_prefix_length -= len(visible_text)
+                continue
 
-            # Remove the "Extra:" prefix from the plain_text field if it exists.
-            if isinstance(item.get("plain_text"), str):
-                item["plain_text"] = _EXTRA_PREFIX_RE.sub("", item["plain_text"], count=1)
+            # Only the beginning of this run belongs to the marker. Clone the
+            # item so its remaining text keeps links and formatting annotations.
+            item = dict(original_item)
+            text_payload = original_item.get("text")
+            if isinstance(text_payload, dict) and isinstance(text_payload.get("content"), str):
+                copied_text_payload = dict(text_payload)
+                copied_text_payload["content"] = text_payload["content"][
+                    remaining_prefix_length:
+                ]
+                item["text"] = copied_text_payload
+            if isinstance(original_item.get("plain_text"), str):
+                item["plain_text"] = original_item["plain_text"][
+                    remaining_prefix_length:
+                ]
+            stripped_items.append(item)
+            remaining_prefix_length = 0
 
-            items[index] = item
-            break
-        
-        # Update the block's rich_text payload with the modified items.
-        payload["rich_text"]  = items
+        payload["rich_text"]  = stripped_items
         raw[block.block_type] = payload
-        
         return replace(block, raw=raw)
 
     def _cloze_number(self, item: Any) -> int | None:

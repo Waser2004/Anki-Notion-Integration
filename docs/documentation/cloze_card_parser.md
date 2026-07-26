@@ -121,9 +121,10 @@ top-level block. If it is a paragraph whose combined plain text begins with
 `Extra:` (case-insensitive, with surrounding prefix whitespace allowed), that
 block supplies `Extra` and is consumed.
 
-The prefix is removed from the first text rich-text item that contains it. The
-remaining items are rendered with the shared rich-text HTML renderer, so their
-formatting is preserved. A colored Extra paragraph uses the shared block
+Recognition and prefix removal use the combined visible text, so the marker may
+span formatting runs such as italic `Ext` followed by `ra:`. The remaining
+items are rendered with the shared rich-text HTML renderer, so their formatting
+is preserved. A colored Extra paragraph uses the shared block
 renderer as well, retaining its foreground or background class. The parser does
 not search past an intervening block.
 A consumed extra paragraph cannot also become its own cloze card, even if it
@@ -139,6 +140,8 @@ An advanced source is a root `toggle` matching either convention:
 - its block payload has `color == "gray_background"` and gray-toggle parsing
   is enabled.
 
+The title marker is matched against combined visible text, so formatting part
+of `[cloze]` does not prevent recognition.
 The title is only a recognition marker. It is not included in `Text`. A gray
 foreground text annotation is not equivalent to a gray block background.
 The root toggle background is stored as the complete card surface, including
@@ -187,8 +190,10 @@ next top-level block.
 
 A nested toggle whose title starts with either `Extra:` or `[extra]`, ignoring
 leading whitespace and case, also supplies `Extra`. The marker title and toggle
-shell are omitted; only its child blocks are exported. Matching toggles are
-recognized at any depth below the advanced cloze root, which lets Extra contain
+shell are omitted; only its child blocks are exported. Matching uses combined
+visible title text, so formatting part of the marker does not prevent detection.
+Matching toggles are recognized at any depth below the advanced cloze root,
+which lets Extra contain
 the shared renderer's supported images, tables, callouts, lists, and other rich
 block structures. Any unmarked ancestor remains in `Text`, minus the extracted
 toggle subtree. Each matching toggle creates an independent color scope around

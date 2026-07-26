@@ -1602,6 +1602,96 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(payloads[0].fields["Extra"], "<p>Shown on back</p>")
         self.assertNotIn("Shown on back", payloads[0].fields["Text"])
 
+    def test_formatted_extra_prefix_is_removed_across_rich_text_runs(self) -> None:
+        """Visible Extra markers may span formatting boundaries without leaking."""
+        cloze_paragraph = _block(
+            "paragraph-cloze",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item(
+                        "Answer",
+                        annotations=_annotations(background_color="yellow"),
+                    )
+                ]
+            },
+        )
+        extra_paragraph = _block(
+            "paragraph-extra",
+            "paragraph",
+            {
+                "rich_text": [
+                    _text_item("Ext", annotations=_annotations(italic=True)),
+                    _text_item("ra: detail", annotations=_annotations(bold=True)),
+                ]
+            },
+        )
+
+        payload = parse_page_to_cards(
+            "page-1",
+            [cloze_paragraph, extra_paragraph],
+            enable_cloze=True,
+        )[0]
+
+        self.assertEqual(payload.fields["Extra"], "<strong>detail</strong>")
+        self.assertNotIn("Ext", payload.fields["Extra"])
+        self.assertNotIn("ra:", payload.fields["Extra"])
+
+    def test_formatted_cloze_and_extra_toggle_markers_are_recognized(self) -> None:
+        """Marker detection uses visible text rather than rendered formatting tags."""
+        extra_toggle = _block(
+            "extra-toggle",
+            "toggle",
+            {
+                "rich_text": [
+                    _text_item("[ext", annotations=_annotations(bold=True)),
+                    _text_item("ra] Details"),
+                ]
+            },
+            children=(
+                _block(
+                    "extra-body",
+                    "paragraph",
+                    {"rich_text": [_text_item("Back detail")]},
+                ),
+            ),
+        )
+        advanced_toggle = _block(
+            "advanced-toggle",
+            "toggle",
+            {
+                "rich_text": [
+                    _text_item("[cl", annotations=_annotations(italic=True)),
+                    _text_item("oze] Formatted"),
+                ]
+            },
+            children=(
+                _block(
+                    "text-p",
+                    "paragraph",
+                    {
+                        "rich_text": [
+                            _text_item(
+                                "Front",
+                                annotations=_annotations(background_color="yellow"),
+                            )
+                        ]
+                    },
+                ),
+                extra_toggle,
+            ),
+        )
+
+        payloads = parse_page_to_cards(
+            "page-1",
+            [advanced_toggle],
+            enable_cloze=True,
+        )
+
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0].fields["Text"], "<p>{{c1::Front}}</p>")
+        self.assertEqual(payloads[0].fields["Extra"], "<p>Back detail</p>")
+
     def test_advanced_cloze_extra_marker_colors_remain_visual(self) -> None:
         """An Extra block never converts configured marker colors into cloze syntax."""
         advanced_toggle = _block(
