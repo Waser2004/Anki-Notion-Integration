@@ -30,7 +30,7 @@ The Pages tab shows the active selection behavior in its status label. The dropd
 - `existing_descendants` (`Smart`): default compatibility mode. Selecting a parent with no already selected child pages also selects the child pages currently visible in the Pages tab. New child pages created in Notion later are not selected automatically.
 - `dynamic_descendants` (`Dynamic`): selecting a parent keeps its whole subtree selected. Child pages discovered on later refreshes are selected automatically and cannot be unselected independently while the parent remains selected.
 
-The row context menu action `Select Page and All Children` remains available for explicit one-time subtree selection regardless of the configured behavior.
+The row context menu action `Select Page and All Children` performs an explicit one-time subtree selection in Manual and Smart modes. In Dynamic mode, selecting the parent establishes a persistent subtree selection: its descendants remain selected and future descendants are included automatically.
 
 The local page cache is refreshed quietly in the background whenever an Anki
 profile opens when startup auto-sync is disabled. When startup auto-sync is

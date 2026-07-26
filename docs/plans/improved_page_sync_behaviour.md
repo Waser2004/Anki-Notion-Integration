@@ -23,6 +23,8 @@
 3. **Dynamic** (`dynamic_descendants`)
    - Treats each selected parent as a live subtree subscription.
    - When a Pages refresh discovers new Notion child pages below a selected parent, those children are selected and persisted automatically.
+   - Descendants cannot be unselected independently while their selected parent remains an active subtree subscription.
+   - `Select Page and All Children` establishes the same persistent subtree selection as checking the parent.
 
 ## Implementation
 
