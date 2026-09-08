@@ -11,6 +11,7 @@ from ..cards import (
     MODEL_NAME_BASIC_REVERSED,
     MODEL_NAME_INPUT,
     NOTION_CARD_BACKGROUND_FIELD,
+    NOTION_PAGE_ID_FIELD,
 )
 from ..notion_client import NotionBlock
 
@@ -27,6 +28,7 @@ class BasicCardParser:
             raise ValueError("empty_toggle_content")
 
         fields = self._build_fields(
+            page_id,
             block.block_id,
             front_html,
             back_html,
@@ -91,6 +93,7 @@ class BasicCardParser:
 
     @staticmethod
     def _build_fields(
+        page_id:     str,
         block_id:    str,
         front_html:  str,
         back_html:   str,
@@ -105,6 +108,7 @@ class BasicCardParser:
                 "Back": back_html,
                 "Expected Answer": shared._raw_text_from_blocks(back_blocks),
                 "Notion Block ID": block_id,
+                NOTION_PAGE_ID_FIELD: page_id,
                 NOTION_CARD_BACKGROUND_FIELD: card_background,
             }
         
@@ -112,5 +116,6 @@ class BasicCardParser:
             "Front": front_html,
             "Back": back_html,
             "Notion Block ID": block_id,
+            NOTION_PAGE_ID_FIELD: page_id,
             NOTION_CARD_BACKGROUND_FIELD: card_background,
         }

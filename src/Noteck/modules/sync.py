@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 from .card_types import BASIC, CLOZE, DEFAULT_SELECTABLE_CARD_TYPES, normalize_card_type, normalize_default_selectable_card_type
 from .parser.cloze_card_parser import CLOZE_MARKER_COLORS, ClozeCardParser
 from .card_type_overrides import CardTypeOverrideStore
-from .cards import MODEL_NAME_BASIC, ensure_notion_toggle_model
+from .cards import MODEL_NAME_BASIC, NOTION_PAGE_ID_FIELD, ensure_notion_toggle_model
 from .db import Database
 from .logging_utils import configure_file_logging, log_file_path
 from .markdown_snapshot import extract_root_toggle_markdown, hash_notion_markdown
@@ -111,9 +111,9 @@ _MERMAID_FIGURE_RE = re.compile(
 )
 _HTTP_TIMEOUT_SECONDS = 20.0
 _CLOZE_REFRESH_REVISION_SETTING_KEY = "_internal_cloze_refresh_revision"
-_CLOZE_REFRESH_REVISION = "2026-07-cloze-block-colors-v1"
+_CLOZE_REFRESH_REVISION = "2026-09-notion-source-link-v1"
 _TOGGLE_REFRESH_REVISION_SETTING_KEY = "_internal_toggle_refresh_revision"
-_TOGGLE_REFRESH_REVISION = "2026-07-block-colors-v1"
+_TOGGLE_REFRESH_REVISION = "2026-09-notion-source-link-v1"
 _GRAY_TOGGLE_CLOZE_ENABLED_SETTING_KEY = "_internal_gray_toggle_cloze_enabled"
 _CLOZE_MARKER_COLORS_SETTING_KEY = "_internal_cloze_marker_colors"
 
@@ -2092,6 +2092,8 @@ def _apply_payload_to_note(note: Any, payload: ToggleCardPayload) -> None:
 
     if "Notion Block ID" not in field_values:
         field_values["Notion Block ID"] = payload.notion_block_id
+    if NOTION_PAGE_ID_FIELD not in field_values:
+        field_values[NOTION_PAGE_ID_FIELD] = payload.notion_page_id
 
     for field_name, field_value in field_values.items():
         try:

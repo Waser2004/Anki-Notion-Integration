@@ -9,7 +9,7 @@ from typing import Any, Iterable
 
 from . import parser as shared
 from ..card_types import CLOZE
-from ..cards import MODEL_NAME_CLOZE, NOTION_CARD_BACKGROUND_FIELD
+from ..cards import MODEL_NAME_CLOZE, NOTION_CARD_BACKGROUND_FIELD, NOTION_PAGE_ID_FIELD
 from ..notion_client import NotionBlock
 from .renderer import (
     TABLE_CELL_CLOZE_COLOR_KEY,
@@ -546,6 +546,7 @@ class ClozeCardParser:
 
     def _payload_for_fields(self, page_id: str, block: NotionBlock, fields: dict[str, str]) -> "shared.ToggleCardPayload":
         payload_fields = dict(fields)
+        payload_fields[NOTION_PAGE_ID_FIELD] = page_id
         payload_fields[NOTION_CARD_BACKGROUND_FIELD] = shared._block_background_color(block)
         
         return shared.ToggleCardPayload(

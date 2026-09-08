@@ -12,11 +12,12 @@ MODEL_NAME_BASIC_REVERSED = "Notion (Basic+Reversed)"
 MODEL_NAME_INPUT = "Notion (Input)"
 MODEL_NAME_CLOZE = "Notion (Cloze)"
 NOTION_BLOCK_ID_FIELD = "Notion Block ID"
+NOTION_PAGE_ID_FIELD = "Notion Page ID"
 NOTION_CARD_BACKGROUND_FIELD = "Notion Card Background"
 
 # Keep sync metadata out of the way in Anki's note editor.
 _COLLAPSED_METADATA_FIELDS = frozenset(
-    (NOTION_BLOCK_ID_FIELD, NOTION_CARD_BACKGROUND_FIELD)
+    (NOTION_BLOCK_ID_FIELD, NOTION_PAGE_ID_FIELD, NOTION_CARD_BACKGROUND_FIELD)
 )
 
 BASIC_CARD_NAME = "Notion (Basic)"
@@ -25,7 +26,7 @@ INPUT_CARD_NAME = "Notion (Input)"
 CLOZE_CARD_NAME = "Notion (Cloze)"
 
 # Increment when bundled HTML or CSS changes so installed note types can offer an update.
-CARD_TEMPLATE_VERSION = 3
+CARD_TEMPLATE_VERSION = 4
 CARD_TEMPLATE_STATUS_CURRENT = "current"
 CARD_TEMPLATE_STATUS_UPDATE_AVAILABLE = "update_available"
 CARD_TEMPLATE_STATUS_USER_MODIFIED = "user_modified"
@@ -59,21 +60,74 @@ def _with_template_version(html: str) -> str:
     return f"{HTML_VERSION_PREFIX} {CARD_TEMPLATE_VERSION} -->\n{html}"
 
 
+# Notion's copied page and block links use compact 32-character IDs. The fields
+# retain API UUIDs, so the click handler removes UUID separators before opening.
+# Focus/visibility/pagehide events prevent the fallback from racing app launch.
+_NOTION_SOURCE_LINK_ONCLICK = (
+    "(function(link) {"
+    "var browserUrl = link.href.replace(/-/g, '');"
+    "var appUrl = link.getAttribute('data-notion-app-url').replace(/-/g, '');"
+    "var fallbackTimer;"
+    "function cancelFallback() {"
+    "window.clearTimeout(fallbackTimer);"
+    "document.removeEventListener('visibilitychange', handleVisibilityChange);"
+    "window.removeEventListener('blur', cancelFallback);"
+    "window.removeEventListener('pagehide', cancelFallback);"
+    "}"
+    "function handleVisibilityChange() {"
+    "if (document.hidden) { cancelFallback(); }"
+    "}"
+    "document.addEventListener('visibilitychange', handleVisibilityChange);"
+    "window.addEventListener('blur', cancelFallback);"
+    "window.addEventListener('pagehide', cancelFallback);"
+    "fallbackTimer = window.setTimeout(function() {"
+    "var browserWindow = window.open(browserUrl, '_blank');"
+    "if (!browserWindow) { window.location.href = browserUrl; }"
+    "}, 900);"
+    "window.location.href = appUrl;"
+    "})(this); return false;"
+)
+
+
 def _with_card_wrapper(html: str, *, use_background_field: bool = False) -> str:
-    """Keep the Notion surface inside a bounded, optionally colored card wrapper."""
+    """Wrap card content and append a deep link to its Notion source block."""
     color_class = (
         f" notion-card-background-{{{{{NOTION_CARD_BACKGROUND_FIELD}}}}}"
         if use_background_field
         else ""
     )
-    return f'<div class="notion-card{color_class}">{html}</div>'
+    # Keep the official Notion cube mark inline so the link also works offline.
+    notion_logo = (
+        '<svg class="notion-source-logo" viewBox="0 0 24 24" aria-hidden="true">'
+        '<path fill="currentColor" d="M4.459 4.208c.746.606 1.026.56 2.428.466l13.215-.793c.28 0 '
+        '.047-.28-.046-.326l-2.194-1.588c-.42-.326-.98-.7-2.054-.607L3.012 2.294c-.466.046-.56.28-.374.466zm.793 '
+        '3.08v13.904c0 .747.373 1.027 1.213.98l14.522-.84c.841-.046.935-.56.935-1.167V6.354c0-.606-.234-.933-.748-.886l-15.175.886c-.56.047-.747.327-.747.933zm14.336.746c.093.42 0 .84-.42.888l-.7.14v10.264c-.607.327-1.167.513-1.634.513-.747 0-.934-.233-1.494-.933l-4.574-7.187v6.953l1.447.327s0 .84-1.167.84l-3.22.186c-.093-.186 0-.653.327-.746l.84-.233V8.874L7.826 8.78c-.093-.42.14-1.026.793-1.073l3.454-.233 4.76 7.28V8.314l-1.214-.14c-.093-.513.28-.887.747-.933zM1.931 1.247l13.317-.98c1.634-.14 2.054-.046 3.08.7l4.248 2.987c.7.513.934.653.934 1.213v16.397c0 1.026-.373 1.633-1.68 1.726l-15.455.934c-.98.047-1.447-.093-1.96-.747L1.29 19.419c-.56-.747-.793-1.307-.793-1.96V2.88c0-.84.373-1.54 1.434-1.633z"/>'
+        '</svg>'
+    )
+    source_link = (
+        f'{{{{#{NOTION_PAGE_ID_FIELD}}}}}'
+        f'<a class="notion-source-link" href="https://www.notion.so/{{{{{NOTION_PAGE_ID_FIELD}}}}}'
+        f'#{{{{{NOTION_BLOCK_ID_FIELD}}}}}" '
+        f'data-notion-app-url="notion://www.notion.so/{{{{{NOTION_PAGE_ID_FIELD}}}}}'
+        f'#{{{{{NOTION_BLOCK_ID_FIELD}}}}}" '
+        f'onclick="{_NOTION_SOURCE_LINK_ONCLICK}" target="_blank" rel="noopener noreferrer">'
+        f'{notion_logo}<span>Open in Notion</span></a>'
+        f'{{{{/{NOTION_PAGE_ID_FIELD}}}}}'
+    )
+    return f'<div class="notion-card{color_class}">{html}</div>{source_link}'
 
 
 _MODEL_DEFINITIONS: tuple[ModelDefinition, ...] = (
     # Basic card type
     ModelDefinition(
         name=MODEL_NAME_BASIC,
-        fields=("Front", "Back", NOTION_BLOCK_ID_FIELD, NOTION_CARD_BACKGROUND_FIELD),
+        fields=(
+            "Front",
+            "Back",
+            NOTION_BLOCK_ID_FIELD,
+            NOTION_PAGE_ID_FIELD,
+            NOTION_CARD_BACKGROUND_FIELD,
+        ),
         templates=(
             ModelTemplate(
                 name=BASIC_CARD_NAME,
@@ -97,7 +151,13 @@ _MODEL_DEFINITIONS: tuple[ModelDefinition, ...] = (
     # Basic+Reversed card type
     ModelDefinition(
         name=MODEL_NAME_BASIC_REVERSED,
-        fields=("Front", "Back", NOTION_BLOCK_ID_FIELD, NOTION_CARD_BACKGROUND_FIELD),
+        fields=(
+            "Front",
+            "Back",
+            NOTION_BLOCK_ID_FIELD,
+            NOTION_PAGE_ID_FIELD,
+            NOTION_CARD_BACKGROUND_FIELD,
+        ),
         templates=(
             ModelTemplate(
                 name=BASIC_CARD_NAME,
@@ -141,6 +201,7 @@ _MODEL_DEFINITIONS: tuple[ModelDefinition, ...] = (
             "Back",
             "Expected Answer",
             NOTION_BLOCK_ID_FIELD,
+            NOTION_PAGE_ID_FIELD,
             NOTION_CARD_BACKGROUND_FIELD,
         ),
         templates=(
@@ -168,7 +229,13 @@ _MODEL_DEFINITIONS: tuple[ModelDefinition, ...] = (
     # Cloze card type
     ModelDefinition(
         name=MODEL_NAME_CLOZE,
-        fields=("Text", "Extra", NOTION_BLOCK_ID_FIELD, NOTION_CARD_BACKGROUND_FIELD),
+        fields=(
+            "Text",
+            "Extra",
+            NOTION_BLOCK_ID_FIELD,
+            NOTION_PAGE_ID_FIELD,
+            NOTION_CARD_BACKGROUND_FIELD,
+        ),
         templates=(
             ModelTemplate(
                 name=CLOZE_CARD_NAME,
