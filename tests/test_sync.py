@@ -2885,7 +2885,7 @@ class SyncTests(unittest.TestCase):
         self.assertIn("Updated body", note["Back"])
 
     def test_sync_unchanged_page_refreshes_toggle_once_after_parser_upgrade(self) -> None:
-        """Unchanged Notion timestamps must not prevent the block-color field migration."""
+        """Unchanged Notion timestamps must not prevent metadata-field migrations."""
         collection = _FakeCollection()
         mw = _FakeMw(collection)
         existing_note = collection.new_note({"name": "Notion (Basic)"})
@@ -2944,6 +2944,7 @@ class SyncTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertEqual(result.stats.cards_updated, 1)
+        self.assertEqual(existing_note["Notion Page ID"], "page-1")
         self.assertEqual(existing_note["Notion Card Background"], "brown_background")
         self.assertEqual(
             self._db.get_setting(_SYNC_MODULE._TOGGLE_REFRESH_REVISION_SETTING_KEY),

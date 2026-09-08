@@ -205,6 +205,13 @@ th {
 	background: var(--notion-bg) !important;
 }
 
+@supports (corner-shape: squircle) {
+	.notion-card {
+		border-radius: 27px;
+		corner-shape: squircle;
+	}
+}
+
 /* A validated root-toggle background is supplied by the managed Anki field. */
 .notion-card[class*="notion-card-background-"] {
 	/* Composite translucent Notion highlights over the normal Notion card surface. */
@@ -241,6 +248,39 @@ th {
 /* FrontSide introduces its own wrapper on answer templates; flatten that nested box. */
 .notion-card .notion-card {
 	display: contents;
+}
+
+/* FrontSide repeats the question template inside answer cards; show only the outer footer. */
+.notion-card .notion-source-link {
+	display: none;
+}
+
+.notion-source-link {
+	display: flex;
+	align-items: center;
+	justify-content: flex-start;
+	gap: 0.4em;
+	width: 100%;
+	max-width: 760px;
+	margin: 0.65rem auto 0;
+	padding-left: 5px;
+	font-size: 0.85em;
+	font-weight: 500;
+	line-height: 1.2;
+	opacity: 0.72;
+	text-decoration: none;
+}
+
+.notion-source-link:hover,
+.notion-source-link:focus-visible {
+	opacity: 1;
+	text-decoration: underline;
+}
+
+.notion-source-logo {
+	width: 1em;
+	height: 1em;
+	flex: 0 0 auto;
 }
 
 .notion-front {

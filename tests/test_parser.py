@@ -630,6 +630,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(payloads[0].card_type, "basic_reversed")
         self.assertIn("Front", payloads[0].fields)
         self.assertIn("Back", payloads[0].fields)
+        self.assertEqual(payloads[0].fields["Notion Page ID"], "page-1")
 
     def test_parse_page_to_cards_supports_input_default_type(self) -> None:
         root_toggle = _block(
@@ -727,6 +728,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(payloads[0].card_type, "cloze")
         self.assertIn("{{c1::Paris}}", payloads[0].fields["Text"])
         self.assertEqual(payloads[0].fields["Extra"], "")
+        self.assertEqual(payloads[0].fields["Notion Page ID"], "page-1")
 
     def test_paragraph_cloze_renders_unselected_background_colors(self) -> None:
         """Excluded marker colors remain visible as ordinary text backgrounds."""

@@ -20,6 +20,7 @@ from Noteck.modules.cards import (  # noqa: E402
     MODEL_NAME_CLOZE,
     NOTION_BLOCK_ID_FIELD,
     NOTION_CARD_BACKGROUND_FIELD,
+    NOTION_PAGE_ID_FIELD,
     _MODEL_DEFINITIONS,
     _build_managed_css,
     _ensure_model,
@@ -94,6 +95,7 @@ class CardModelTests(unittest.TestCase):
         self.assertEqual(models.model["tmpls"][0]["afmt"], definition.templates[0].back)
         fields_by_name = {field["name"]: field for field in models.model["flds"]}
         self.assertIs(fields_by_name[NOTION_BLOCK_ID_FIELD]["collapsed"], True)
+        self.assertIs(fields_by_name[NOTION_PAGE_ID_FIELD]["collapsed"], True)
         self.assertIs(fields_by_name[NOTION_CARD_BACKGROUND_FIELD]["collapsed"], True)
 
     def test_all_default_templates_use_the_bounded_card_wrapper(self) -> None:
@@ -102,6 +104,39 @@ class CardModelTests(unittest.TestCase):
                 with self.subTest(model=definition.name, template=template.name):
                     self.assertIn('<div class="notion-card', template.front)
                     self.assertIn('<div class="notion-card', template.back)
+
+    def test_all_default_templates_link_to_the_precise_notion_source(self) -> None:
+        """Every card side should expose one offline, branded source link."""
+        expected_href = (
+            f'href="https://www.notion.so/{{{{{NOTION_PAGE_ID_FIELD}}}}}'
+            f'#{{{{{NOTION_BLOCK_ID_FIELD}}}}}"'
+        )
+        expected_app_url = (
+            f'data-notion-app-url="notion://www.notion.so/{{{{{NOTION_PAGE_ID_FIELD}}}}}'
+            f'#{{{{{NOTION_BLOCK_ID_FIELD}}}}}"'
+        )
+        for definition in _MODEL_DEFINITIONS:
+            self.assertIn(NOTION_PAGE_ID_FIELD, definition.fields)
+            for template in definition.templates:
+                with self.subTest(model=definition.name, template=template.name):
+                    for html in (template.front, template.back):
+                        self.assertIn(expected_href, html)
+                        self.assertIn(expected_app_url, html)
+                        self.assertIn("window.setTimeout", html)
+                        self.assertIn("window.addEventListener('blur'", html)
+                        self.assertIn("replace(/-/g, '')", html)
+                        self.assertIn('class="notion-source-logo"', html)
+                        self.assertIn("Open in Notion", html)
+
+    def test_source_link_is_left_aligned_with_the_card(self) -> None:
+        """The source footer starts at the same left edge as the card surface."""
+        css_path = Path(__file__).resolve().parents[1] / "src" / "Noteck" / "docs" / "Notion_Card_Stylesheet.css"
+        css = css_path.read_text(encoding="utf-8")
+
+        self.assertRegex(css, r"\.notion-source-link\s*\{[^}]*justify-content:\s*flex-start;")
+        self.assertRegex(css, r"\.notion-source-link\s*\{[^}]*width:\s*100%;")
+        self.assertRegex(css, r"\.notion-source-link\s*\{[^}]*max-width:\s*760px;")
+        self.assertRegex(css, r"\.notion-source-link\s*\{[^}]*margin:\s*0\.65rem auto 0;")
 
     def test_card_gutter_does_not_extend_the_viewport_height(self) -> None:
         """The card gutter belongs to body's border box, not the card's outer margin."""
@@ -189,6 +224,7 @@ class CardModelTests(unittest.TestCase):
         self.assertIn(NOTION_CARD_BACKGROUND_FIELD, [field["name"] for field in model["flds"]])
         fields_by_name = {field["name"]: field for field in model["flds"]}
         self.assertIs(fields_by_name[NOTION_BLOCK_ID_FIELD]["collapsed"], True)
+        self.assertIs(fields_by_name[NOTION_PAGE_ID_FIELD]["collapsed"], True)
         self.assertIs(fields_by_name[NOTION_CARD_BACKGROUND_FIELD]["collapsed"], True)
         self.assertEqual(model["tmpls"][0]["qfmt"], "<custom-front>")
         self.assertEqual(model["tmpls"][0]["afmt"], "<custom-back>")

@@ -132,11 +132,28 @@ foreground colors its visible text, while an advanced cloze toggle's title and f
 remain hidden. Inside advanced clozes, configured marker backgrounds create deletions and
 lose their visual marker color; backgrounds excluded from cloze parsing render as ordinary
 block colors.
-The managed `Notion Block ID` and `Notion Card Background` metadata fields are collapsed in Anki's note editor by default.
+The managed `Notion Block ID`, `Notion Page ID`, and `Notion Card Background`
+metadata fields are collapsed in Anki's note editor by default. Every bundled card
+template uses the page and block IDs to show a left-aligned **Open in Notion** link
+below the card surface. Its inline official Notion mark remains available offline, and the
+link opens the precise source block in the Notion app when available on
+Windows, macOS, iOS, or Android. If the app cannot be opened, it falls back to the
+same source block in the browser.
 After upgrading, Noteck performs one successful parser refresh of existing toggle-derived
-and cloze cards so color changes are applied even when their Notion edit timestamps have not
-changed. The bundled cloze template must be updated to display the new background field;
-custom templates are preserved and can add the same managed class manually.
+and cloze cards so color and source-link metadata changes are applied even when their Notion
+edit timestamps have not changed. The bundled templates must be updated to display the new
+footer and background field; customized templates remain preserved unless the user chooses
+the restore action.
+
+The bundled card surface uses smooth squircle corners through native CSS
+`corner-shape: squircle` with a 27px corner extent, roughly matching the previous
+12px circular corner inset. Webviews without this feature
+retain the existing 12px circular corners. The change applies to every Noteck
+card type, including colored surfaces and night mode. Existing note types can
+adopt it through the card-template update action in Settings; customized templates
+require the restore action, which replaces their HTML and styling.
+Native corner shaping was introduced in
+[Chromium 139](https://developer.chrome.com/release-notes/139).
 
 Unsupported or unknown block types are ignored in rendered card content.
 
