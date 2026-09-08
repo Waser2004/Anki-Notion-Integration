@@ -9,6 +9,7 @@ from typing import Any, Iterable
 
 from . import parser as shared
 from ..card_types import CLOZE
+from ..notion_controls import parse_controls
 from ..cards import MODEL_NAME_CLOZE, NOTION_CARD_BACKGROUND_FIELD, NOTION_PAGE_ID_FIELD
 from ..notion_client import NotionBlock
 from .renderer import (
@@ -19,14 +20,9 @@ from .renderer import (
 )
 
 
-# Prefixes are anchored but do not require a separator, so existing compact
-# forms such as ``Cloze:Question`` and ``[extra]Details`` remain valid.
-_CLOZE_CONTAINER_PREFIX_RE = re.compile(
-    r"^\s*(?:cloze\s*:|\[cloze\])\s*",
-    re.IGNORECASE,
-)
+# accept compact extra prefixes without requiring a separator
 _EXTRA_PREFIX_RE = re.compile(
-    r"^\s*(?:extra\s*:|\[extra\])\s*",
+    r"^\s*(?:extra\s*:|\[extra\]|\U0001f4a1)\s*",
     re.IGNORECASE,
 )
 
@@ -236,9 +232,8 @@ class ClozeCardParser:
         if block.block_type != "toggle":
             return False
 
-        # Check for the "[cloze]" prefix in the toggle title.
-        title = self._plain_text(self._rich_text(block))
-        if _CLOZE_CONTAINER_PREFIX_RE.search(title):
+        # recognize cloze anywhere in the leading control sequence
+        if parse_controls(block).cloze:
             return True
 
         # Check for the "gray_background" color in the toggle payload.

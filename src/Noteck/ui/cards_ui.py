@@ -31,6 +31,7 @@ from ..modules.card_types import (
 from ..modules.cards_store import CardsStore
 from ..modules.db import Database
 from ..modules.notion_client import NotionClient
+from ..modules.notion_controls import NotionControls, load_controls, page_controls, save_controls, strip_controls
 from ..modules.pages import PagesStore, StoredPage
 from ..modules.parser.cloze_card_parser import (
     ClozeCardParser,
@@ -54,6 +55,7 @@ class CardsPage(QWidget):
         self._override_store = CardTypeOverrideStore(self._db)
         self._cards_store = CardsStore(self._db)
         self._pages_by_id: dict[str, StoredPage] = {}
+        self._notion_controls = {}
         self._excluded_block_ids: set[str] = set()
         self._card_kind_by_block_id: dict[str, str] = {}
         self._context_menu_schema = load_context_menu_schema().cards
@@ -92,8 +94,8 @@ class CardsPage(QWidget):
         selector_row.addWidget(self._selector_scrollbar_spacer)
 
         self._cards_table = QTableWidget(self)
-        self._cards_table.setColumnCount(2)
-        self._cards_table.setHorizontalHeaderLabels(("Card front", "Card type"))
+        self._cards_table.setColumnCount(3)
+        self._cards_table.setHorizontalHeaderLabels(("Flags", "Card front", "Card type"))
         self._cards_table.horizontalHeader().setVisible(True)
         self._cards_table.setEditTriggers(self._table_edit_trigger_no_edit())
         self._cards_table.setSelectionMode(self._table_selection_mode_no_selection())
@@ -108,8 +110,9 @@ class CardsPage(QWidget):
         self._cards_table.resizeRowsToContents()
         header = self._cards_table.horizontalHeader()
         header.setStretchLastSection(False)
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self._cards_table.verticalScrollBar().rangeChanged.connect(
             lambda _minimum, _maximum: self._sync_table_layout_alignment()
         )
@@ -229,6 +232,12 @@ class CardsPage(QWidget):
             enable_gray_toggle_cloze = bool(settings.get_value("enable_gray_toggle_cloze_parsing"))
             cloze_marker_colors = list(settings.get_value("cloze_marker_colors"))
             blocks = client.get_page_blocks_shallow(page_id)
+
+            # persist source locks separately from the user's local choices
+            controls = page_controls(blocks, enable_gray_toggle_cloze=enable_gray_toggle_cloze)
+            save_controls(db, page_id, controls)
+
+            # retain all toggles in the editor regardless of effective inclusion
             cloze_parser = ClozeCardParser(cloze_marker_colors)
             cards: list[dict[str, str]] = []
             for block in blocks:
@@ -244,7 +253,7 @@ class CardsPage(QWidget):
                     cards.append(
                         {
                             "notion_block_id": block.block_id,
-                            "front_text": self._toggle_front_plain_text(block.raw),
+                            "front_text": self._toggle_front_plain_text(strip_controls(block, controls[block.block_id]).raw),
                             "card_kind": card_kind,
                         }
                     )
@@ -287,6 +296,8 @@ class CardsPage(QWidget):
 
     def _show_db_rows(self, page_id: str, overrides: dict[str, str]) -> None:
         """Render quick DB-backed placeholder rows while live Notion data is loading."""
+        # load source locks alongside existing manual state
+        self._notion_controls = load_controls(self._db, page_id)
         connection = self._db.connect()
         try:
             rows = connection.execute(
@@ -318,7 +329,7 @@ class CardsPage(QWidget):
                 "cloze" if normalize_card_type(str(row["card_type"]), default="") == CLOZE else "toggle"
             )
 
-        block_ids = set(excluded_by_block_id)
+        block_ids = set(excluded_by_block_id) | self._notion_controls.keys()
         block_ids.update(overrides.keys())
         ordered_block_ids = sorted(block_ids)
 
@@ -378,6 +389,7 @@ class CardsPage(QWidget):
             return
 
         overrides = self._override_store.get_card_type_overrides_for_page(page_id)
+        self._notion_controls = load_controls(self._db, page_id)
         self._excluded_block_ids = self._cards_store.get_excluded_block_ids_for_page(page_id)
         self._card_kind_by_block_id = {
             row["notion_block_id"]: str(row["card_kind"])
@@ -426,13 +438,20 @@ class CardsPage(QWidget):
 
     def _populate_cards_item_context_menu(self, menu: QMenu, block_id: str) -> None:
         """Populate row-specific card actions from schema entries."""
+        # show explanations when hovering disabled inclusion actions
+        menu.setToolTipsVisible(True)
         for entry in self._context_menu_schema.on_item:
             if entry.type != "action":
                 continue
+            control      = self._notion_controls.get(block_id, NotionControls())
             action_label = entry.label
             if entry.key == "toggle_card_excluded":
-                action_label = "Unexclude Card" if block_id in self._excluded_block_ids else "Exclude Card"
+                is_excluded  = block_id in self._excluded_block_ids or control.locked
+                action_label = "Unexclude Card" if is_excluded else "Exclude Card"
             action = menu.addAction(action_label)
+            if entry.key == "toggle_card_excluded" and control.locked:
+                action.setEnabled(False)
+                action.setToolTip(control.explanation)
             action.triggered.connect(
                 lambda _checked=False, e=entry, bid=block_id: self._run_cards_action_entry(e, bid)
             )
@@ -462,6 +481,10 @@ class CardsPage(QWidget):
         if page_id is None:
             return
 
+        # source-enforced exclusion cannot be changed by local actions
+        if self._notion_controls.get(block_id, NotionControls()).locked:
+            return
+
         should_exclude = block_id not in self._excluded_block_ids
         self._cards_store.set_card_excluded(page_id, block_id, should_exclude)
         if should_exclude:
@@ -473,7 +496,7 @@ class CardsPage(QWidget):
         if row_index < 0:
             return
 
-        front_item = self._cards_table.item(row_index, 0)
+        front_item = self._cards_table.item(row_index, 1)
         front_text = front_item.text() if isinstance(front_item, QTableWidgetItem) else "Untitled toggle"
         self._set_row_front_item(
             row_index=row_index,
@@ -500,9 +523,9 @@ class CardsPage(QWidget):
         self._override_store.clear_card_type_overrides_for_page(page_id)
         for row_index in range(self._cards_table.rowCount()):
             block_id = self._block_id_for_row(row_index)
-            if block_id is None or block_id in self._excluded_block_ids:
+            if block_id is None or block_id in self._excluded_block_ids or self._notion_controls.get(block_id, NotionControls()).card_type:
                 continue
-            widget = self._cards_table.cellWidget(row_index, 1)
+            widget = self._cards_table.cellWidget(row_index, 2)
             if not isinstance(widget, QComboBox):
                 continue
             previous = widget.blockSignals(True)
@@ -514,13 +537,28 @@ class CardsPage(QWidget):
 
     def _set_row_front_item(self, *, row_index: int, block_id: str, front_text: str, is_excluded: bool) -> None:
         """Render the row front text and apply strike-through style for excluded rows."""
+        # retain source warnings and inclusion details in the front tooltip
         front_item = QTableWidgetItem(front_text)
-        front_item.setToolTip(block_id)
+        control    = self._notion_controls.get(block_id, NotionControls())
+        reasons    = [control.explanation] if control.explanation else []
+        if is_excluded:
+            reasons.append("Excluded in Noteck")
+        if control.warning and control.warning not in reasons:
+            reasons.append(control.warning)
+
+        # retain source identity and effective exclusion styling
+        front_item.setToolTip("\n".join([block_id] + reasons))
         front_item.setData(self._item_data_user_role(), block_id)
         font = front_item.font()
-        font.setStrikeOut(is_excluded)
+        font.setStrikeOut(is_excluded or control.locked)
         front_item.setFont(font)
-        self._cards_table.setItem(row_index, 0, front_item)
+        self._cards_table.setItem(row_index, 1, front_item)
+
+        # keep source markers separate from the exported title and local settings
+        marker_item = QTableWidgetItem(control.marker_icons)
+        marker_item.setToolTip("\n".join([control.marker_description] + reasons).strip())
+        marker_item.setData(self._item_data_user_role(), block_id)
+        self._cards_table.setItem(row_index, 0, marker_item)
 
     def _set_row_card_type_widget(
         self,
@@ -532,19 +570,25 @@ class CardsPage(QWidget):
         is_excluded: bool,
     ) -> None:
         """Render row card-type cell as combo or empty placeholder for excluded rows."""
-        existing_widget = self._cards_table.cellWidget(row_index, 1)
+        existing_widget = self._cards_table.cellWidget(row_index, 2)
         if existing_widget is not None:
-            self._cards_table.removeCellWidget(row_index, 1)
+            self._cards_table.removeCellWidget(row_index, 2)
             existing_widget.deleteLater()
 
-        if is_excluded:
+        # explain source locks and warnings directly in the card row
+        control = self._notion_controls.get(block_id, NotionControls())
+        if control.card_type:
+            combo = self._build_card_type_combo(page_id=page_id, block_id=block_id, selected_override=control.card_type)
+            combo.setEnabled(False)
+            combo.setToolTip(control.explanation)
+            self._cards_table.setCellWidget(row_index, 2, combo)
             return
-        if self._card_kind_by_block_id.get(block_id) == "cloze":
+        if control.locked or is_excluded or self._card_kind_by_block_id.get(block_id) == "cloze":
             return
 
         self._cards_table.setCellWidget(
             row_index,
-            1,
+            2,
             self._build_card_type_combo(
                 page_id=page_id,
                 block_id=block_id,
@@ -556,7 +600,7 @@ class CardsPage(QWidget):
         """Return block id stored on a table row, or None for missing rows."""
         if row_index < 0:
             return None
-        front_item = self._cards_table.item(row_index, 0)
+        front_item = self._cards_table.item(row_index, 1)
         if not isinstance(front_item, QTableWidgetItem):
             return None
         block_id = front_item.data(self._item_data_user_role())
@@ -650,6 +694,10 @@ class CardsPage(QWidget):
 
     def _on_card_type_selected(self, page_id: str, block_id: str, combo: QComboBox) -> None:
         """Persist one per-card override update."""
+        # ignore queued local changes while a source override owns the setting
+        if self._notion_controls.get(block_id, NotionControls()).card_type:
+            return
+
         selected = combo.currentData()
         selected_type = None if selected is None else normalize_default_selectable_card_type(str(selected))
         self._override_store.set_card_type_override(page_id, block_id, selected_type)
@@ -737,12 +785,12 @@ class CardsPage(QWidget):
 
         combo_width = 0
         for row_index in range(self._cards_table.rowCount()):
-            widget = self._cards_table.cellWidget(row_index, 1)
+            widget = self._cards_table.cellWidget(row_index, 2)
             if isinstance(widget, QComboBox):
                 combo_width = max(combo_width, int(widget.sizeHint().width()))
 
         target_width = max(header_text_width, combo_width)
-        self._cards_table.setColumnWidth(1, target_width)
+        self._cards_table.setColumnWidth(2, target_width)
 
     def _apply_selector_row_scrollbar_spacer_width(self) -> None:
         """Apply current scrollbar-based spacer width after table geometry settles."""

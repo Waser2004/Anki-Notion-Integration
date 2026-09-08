@@ -236,3 +236,57 @@ If sync does not work as expected:
 5. Check that your content uses supported Notion blocks.
 6. For cloze cards, confirm a supported marker color is present; toggle clozes may use a `[cloze]` title or, when enabled, a gray block background.
 7. For image occlusion, confirm images are outside toggles.
+
+## Notion card controls
+
+Top-level toggle titles can start with a sequence of control markers. Order does
+not matter, and parsing stops at the first ordinary content. Recognized markers
+are removed from exported card titles while links and formatting are retained.
+Markers later in a question remain literal text.
+
+| Function | Emoji | Text marker |
+| --- | --- | --- |
+| Cherry-pick | 🍒 | `[cherry-pick]` |
+| Exclude | 🚫 | `[exclude]` |
+| Basic | ➡️ | `[Basic]` |
+| Basic + Reversed | ↔️ | `[Basic + Reversed]` |
+| Input | ⌨️ | `[Input]` |
+| Advanced Cloze | 🧩 | `[cloze]`, `Cloze:` |
+| Extra content | 💡 | `[extra]`, `Extra:` |
+
+For example, `🍒 ⌨️ What is polymorphism?` selects an Input card and exports
+`What is polymorphism?` as its title. Text markers are case-insensitive.
+
+A page enters cherry-pick mode when any root toggle has a cherry-pick marker.
+Only marked root toggles are eligible in that mode, including advanced Cloze
+toggles. Paragraph Cloze cards are unaffected. Explicit exclusion always wins:
+`🍒 🚫 Question` is excluded. Remove all cherry-pick markers to restore ordinary
+page eligibility, or add a cherry-pick marker to another toggle to include it.
+
+Effective exclusion is **manual Noteck exclusion OR Notion exclusion OR
+cherry-pick filtering**. As with manual exclusion, existing Anki notes are
+preserved and skipped during sync; exclusion does not delete or suspend them.
+The Cards page lists excluded and unselected toggles, disables local inclusion actions until the relevant Notion markers change,
+and explains the restriction in a tooltip on the disabled action.
+Removing a Notion exclusion marker clears only the Notion exclusion.
+
+Card-type precedence is **Notion marker > Noteck per-card override > page
+default > global default**. A Notion type marker locks the Cards page selector; its tooltip explains how to unlock it.
+Removing it restores the saved local override or the applicable default.
+Conflicting type markers produce a warning and fall back to local/page/global
+selection; repeated aliases of the same type are not a conflict. Cloze cards
+retain their normal color-based numbering and cannot be converted by non-cloze
+type markers; such combinations produce a warning. The 💡 alias follows the
+existing Extra paragraph and nested Extra toggle conventions.
+
+Source controls are persisted separately in `notion_card_controls`; manual
+exclusions remain in `cards.excluded` and manual type overrides remain in
+`card_type_overrides`. Source-state changes invalidate affected toggle snapshots,
+including unchanged siblings whose cherry-pick eligibility changes. The first
+sync after this update refreshes existing toggle and Cloze parsing once.
+
+The Cards page starts with a compact **Markers** column showing the source
+markers for each toggle as icons, including text aliases. Hover over the icons
+for their names and any marker warnings. Repeated aliases appear once; toggles
+without source markers have an empty cell. Icons are cached for offline display
+and refreshed when the page is loaded or synced.
