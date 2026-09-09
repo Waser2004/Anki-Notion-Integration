@@ -6,7 +6,7 @@ The add-on persists per-profile state in SQLite.
 
 - Ordered schema migrations live in `MIGRATIONS`.
 - `Database.initialize()` applies pending migrations and records applied versions in `schema_migrations`.
-- Current latest schema version: **2**.
+- Current latest schema version: **3**.
 - The baseline schema is intentionally squashed for the first public release.
 - Compatibility with pre-release database variants is intentionally unsupported.
 
@@ -62,6 +62,20 @@ Snapshots are independent from `cards` rows. This lets Noteck remember a
 successfully parsed empty or otherwise non-card-producing toggle after its card
 mapping is detached, preventing the same unchanged warning and recursive fetch
 from repeating on every sync.
+
+### `notion_card_controls`
+
+- `notion_block_id` (TEXT, PK)
+- `notion_page_id` (TEXT, FK → pages)
+- `excluded` (INTEGER, NOT NULL; whether Notion explicitly excludes the card)
+- `filtered` (INTEGER, NOT NULL; whether page-level cherry-pick mode filters the card)
+- `card_type` (TEXT, nullable; card type selected by a Notion marker)
+- `warning` (TEXT, NOT NULL; marker conflict or compatibility warning)
+- `marker_icons` (TEXT, NOT NULL; normalized source markers for the Cards page)
+
+These rows store Notion-authored controls separately from local exclusions and
+card-type overrides. Each successful page parse replaces that page's control
+snapshot so removed source markers cannot remain active.
 
 ## Helpers
 

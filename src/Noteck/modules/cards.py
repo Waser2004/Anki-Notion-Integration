@@ -26,7 +26,7 @@ INPUT_CARD_NAME = "Notion (Input)"
 CLOZE_CARD_NAME = "Notion (Cloze)"
 
 # Increment when bundled HTML or CSS changes so installed note types can offer an update.
-CARD_TEMPLATE_VERSION = 4
+CARD_TEMPLATE_VERSION = 5
 CARD_TEMPLATE_STATUS_CURRENT = "current"
 CARD_TEMPLATE_STATUS_UPDATE_AVAILABLE = "update_available"
 CARD_TEMPLATE_STATUS_USER_MODIFIED = "user_modified"
@@ -114,7 +114,10 @@ def _with_card_wrapper(html: str, *, use_background_field: bool = False) -> str:
         f'{notion_logo}<span>Open in Notion</span></a>'
         f'{{{{/{NOTION_PAGE_ID_FIELD}}}}}'
     )
-    return f'<div class="notion-card{color_class}">{html}</div>{source_link}'
+
+    # anki omits the entire tags group when the note has no tags
+    tags = '{{#Tags}}<span class="notion-review-tags">{{Tags}}</span>{{/Tags}}'
+    return f'<div class="notion-card{color_class}">{html}</div><div class="notion-footer">{source_link}{tags}</div>'
 
 
 _MODEL_DEFINITIONS: tuple[ModelDefinition, ...] = (
@@ -268,6 +271,31 @@ def ensure_notion_toggle_model(mw: Any) -> None:
     _ensure_notion_toggle_model(mw, overwrite_existing_templates=False)
 
 
+_TAG_VISIBILITY_CSS = "\n/* Noteck tag visibility */\n:root { --noteck-tags-display: inline; }"
+
+
+def set_review_tags_visible(mw: Any, enabled: bool) -> None:
+    """Persist tag visibility in Noteck models so it also syncs to mobile review."""
+    # update only the setting-owned CSS marker and preserve custom styling
+    collection = getattr(mw, "col", None)
+    models     = getattr(collection, "models", None)
+    if models is None:
+        return
+
+    # persist only models whose display setting changed
+    for definition in _MODEL_DEFINITIONS:
+        model = _model_by_name(models, definition.name)
+        if model is None:
+            continue
+        current = str(model.get("css") or "")
+        css     = current.replace(_TAG_VISIBILITY_CSS, "")
+        if enabled:
+            css += _TAG_VISIBILITY_CSS
+        if css != current:
+            model["css"] = css
+            _update_model(models, model)
+
+
 def restore_default_card_templates(mw: Any) -> None:
     """Restore Noteck's default card template HTML and CSS."""
     _ensure_notion_toggle_model(mw, overwrite_existing_templates=True)
@@ -376,6 +404,8 @@ def _ensure_model(
 
     # Initialize CSS for new or empty note types, or when explicitly restoring defaults.
     current_css = str(model.get("css") or "")
+    if _TAG_VISIBILITY_CSS in current_css:
+        css += _TAG_VISIBILITY_CSS
     if created or overwrite_existing_templates or not current_css.strip():
         if current_css != css:
             model["css"] = css
@@ -413,7 +443,7 @@ def _model_template_status(models: Any, definition: ModelDefinition, css: str) -
             return CARD_TEMPLATE_STATUS_UPDATE_AVAILABLE
 
     current_css = str(model.get("css") or "")
-    if current_css == css:
+    if current_css.removesuffix(_TAG_VISIBILITY_CSS) == css:
         return CARD_TEMPLATE_STATUS_CURRENT
     if _installed_css_version(current_css) < CARD_TEMPLATE_VERSION:
         return CARD_TEMPLATE_STATUS_UPDATE_AVAILABLE

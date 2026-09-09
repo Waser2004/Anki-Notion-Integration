@@ -94,6 +94,23 @@ MIGRATIONS: tuple[Migration, ...] = (
             """,
         ),
     ),
+    Migration(
+        version=3,
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS notion_card_controls (
+                notion_block_id TEXT PRIMARY KEY,
+                notion_page_id TEXT NOT NULL REFERENCES pages(notion_page_id) ON DELETE CASCADE,
+                excluded INTEGER NOT NULL DEFAULT 0,
+                filtered INTEGER NOT NULL DEFAULT 0,
+                card_type TEXT,
+                warning TEXT NOT NULL DEFAULT '',
+                marker_icons TEXT NOT NULL DEFAULT ''
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_notion_card_controls_page ON notion_card_controls(notion_page_id)",
+        ),
+    ),
 )
 
 
@@ -169,12 +186,13 @@ class Database:
             )
             """
         )
-        row = connection.execute(
-            "SELECT MAX(version) AS version FROM schema_migrations"
-        ).fetchone()
+        rows = connection.execute(
+            "SELECT version FROM schema_migrations"
+        ).fetchall()
+        applied_versions = {int(row["version"]) for row in rows}
 
-        current_version = 0 if row is None or row["version"] is None else int(row["version"])
-        for migration in self._pending_migrations(current_version):
+        # apply missing migrations even when a newer version was recorded by another build
+        for migration in self._pending_migrations(applied_versions):
             for statement in migration.statements:
                 connection.execute(statement)
                 
@@ -183,6 +201,6 @@ class Database:
                 (migration.version,),
             )
 
-    def _pending_migrations(self, current_version: int) -> Iterable[Migration]:
-        """Yield migrations newer than the given schema version."""
-        return tuple(m for m in MIGRATIONS if m.version > current_version)
+    def _pending_migrations(self, applied_versions: set[int]) -> Iterable[Migration]:
+        """Yield known migrations that have not been recorded yet."""
+        return tuple(migration for migration in MIGRATIONS if migration.version not in applied_versions)

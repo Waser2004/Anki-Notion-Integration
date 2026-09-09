@@ -12,6 +12,28 @@ Convert Notion page blocks into typed card payloads for sync.
 
 See `cloze_card_parser.md` for the detailed cloze-parser architecture, control flow, rendering differences, payload contract, and extension guidance.
 
+## Tags
+
+A standard paragraph beginning with `🏷️`, `[Tags]`, or `Tags:` supplies Anki
+tags, separated by spaces; `Analysis::Series` creates a hierarchical tag.
+Formatting across text runs is supported. Empty tags, control characters, and
+empty hierarchy components are ignored for the entire metadata paragraph.
+
+Direct child Tags paragraphs belong to their parent toggle card and are removed
+from its rendered content and typed answer. Nested paragraphs remain ordinary
+content. A paragraph Cloze can consume one adjacent Tags paragraph and one Extra
+paragraph in either order. A duplicate or ordinary paragraph ends this metadata
+sequence; later paragraphs remain ordinary content.
+
+Tags are added on note creation and updates, preserving existing Anki tags.
+Removing a tag in Notion does not delete it from Anki. Tag-only changes participate
+in content hashing, and the next sync reparses existing cards for this feature.
+
+In **Settings → Cards**, **Show tags during review** controls visibility beside
+the Open in Notion link (off by default). Update existing Noteck card templates
+to use the footer. The setting takes effect without a Notion sync and syncs with
+Anki's note types to other devices. Notes with no tags show no tag separator.
+
 ## Card outputs
 
 `parse_page_to_cards(page_id, blocks, *, default_card_type, enable_cloze, enable_gray_toggle_cloze)` emits:

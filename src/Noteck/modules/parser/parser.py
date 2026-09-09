@@ -13,6 +13,7 @@ from ..cards import MODEL_NAME_BASIC
 from .basic_card_parser import BasicCardParser
 from .cloze_card_parser import ClozeCardParser
 from ..notion_client import NotionBlock
+from ..notion_controls import page_controls, strip_controls
 from .renderer import (
     _block_background_color,
     _block_foreground_color,
@@ -39,6 +40,7 @@ class ToggleCardPayload:
     fields:           dict[str, str] = field(default_factory=dict)
     content_hash:     str            = ""
     last_edited_time: str | None     = None
+    tags:            tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -101,12 +103,22 @@ def parse_page_to_cards(
     cloze_parser = ClozeCardParser(cloze_marker_colors)
     payloads: list[ToggleCardPayload] = []
 
+    # resolve page-wide selection before parsing individual toggles
+    controls = page_controls(top_level_blocks, enable_gray_toggle_cloze=enable_gray_toggle_cloze)
+
     # Parse top-level toggles
     for block in extract_root_toggle_blocks(top_level_blocks):
         # Skip excluded/non-target blocks before rendering payload fields.
         if normalized_include_block_ids is not None and block.block_id not in normalized_include_block_ids:
             continue
         
+        # preserve source diagnostics even when selection prevents conversion
+        control = controls[block.block_id]
+        if control.warning and warnings is not None:
+            warnings.append(CardParseWarning("notion_marker_conflict", control.warning, block.block_id))
+        if control.locked:
+            continue
+
         # Recognized cloze toggles are parsed only when the single cloze option is enabled.
         is_cloze_toggle = cloze_parser.is_advanced_container(
             block,
@@ -119,7 +131,8 @@ def parse_page_to_cards(
             continue
 
         # Apply a card-specific card type override and parse the toggle with the selected non-cloze card type.
-        resolved_card_type = normalized_overrides.get(block.block_id, resolved_default_card_type)
+        resolved_card_type = control.card_type or normalized_overrides.get(block.block_id, resolved_default_card_type)
+        block = strip_controls(block, control)
         try:
             payloads.append(basic_parser.parse(page_id, block, resolved_card_type))
         except ValueError as exc:
@@ -209,10 +222,16 @@ def _compute_payload_content_hash(
     card_type: str,
     model_name: str,
     fields: dict[str, str],
+    tags: tuple[str, ...] = (),
 ) -> str:
     """Compute a deterministic content hash for any typed payload."""
     ordered_fields = "\n".join(f"{key}={fields[key]}" for key in sorted(fields))
     payload = f"{page_id}\n{block_id}\n{card_type}\n{model_name}\n{ordered_fields}".encode("utf-8")
+
+    # include metadata so tag-only edits update the note
+    if tags:
+        payload += ("\ntags=" + " ".join(tags)).encode("utf-8")
+    
     return hashlib.sha256(payload).hexdigest()
 
 

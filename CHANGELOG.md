@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.5.0 - 2026-09-09
+
+> [!WARNING]
+> **Parser, sync, and card template changes**
+>
+> This update adds Notion controls and updated card templates. Existing installations
+> skip the automatic startup sync once after upgrading to this version. Run a manual
+> sync when convenient; normal automatic startup syncing resumes the next time Anki starts.
+
+- Added Notion controls for selecting card types, cherry-picking cards, and locking cards from synchronization.
+- Added Notion card-control markers.
+- Added Notion-authored Anki tags, including hierarchical tags, while preserving tags managed directly in Anki.
+- Added Notion page IDs to synced notes and an **Open in Notion** link on generated cards.
+
+Below you can see an overview of the new Notion card-control markers and their effects.
+
+| Function | Emoji marker | Text marker | Effect |
+| --- | --- | --- | --- |
+| Cherry-pick | 🍒 | `[cherry-pick]` | When used on a page, only marked root toggles are eligible. |
+| Exclude | 🚫 | `[exclude]` | Excludes the toggle from sync; existing notes are preserved. |
+| Basic | ➡️ | `[Basic]` | Selects a Basic card. |
+| Basic + Reversed | ↔️ | `[Basic + Reversed]` | Selects a reversed Basic card. |
+| Input | ⌨️ | `[Input]` | Selects an Input card. |
+| Advanced Cloze | 🧩 | `[cloze]`, `Cloze:` | Creates an advanced Cloze card from the toggle contents. |
+| Extra content | 💡 | `[extra]`, `Extra:` | Identifies extra cloze content according to the existing cloze rules. |
+| Tags | 🏷️ | `[Tags]`, `Tags:` | Adds Notion-authored Anki tags, including hierarchical tags. |
+
+For more details, see the [Noteck documentation](https://app.notion.com/p/noteck/Documentation-30524ef63480806ea3fdf015a0fd7963?source=copy_link).
+
 ## 1.4.0 - 2026-07-26
 
 > [!WARNING]

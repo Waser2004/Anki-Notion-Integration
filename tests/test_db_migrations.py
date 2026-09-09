@@ -62,7 +62,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             latest_version = connection.execute(
                 "SELECT MAX(version) FROM schema_migrations"
             ).fetchone()[0]
-            self.assertEqual(latest_version, 2)
+            self.assertEqual(latest_version, 3)
         finally:
             connection.close()
 
@@ -76,7 +76,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             versions = connection.execute(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
-            self.assertEqual([int(row[0]) for row in versions], [1, 2])
+            self.assertEqual([int(row[0]) for row in versions], [1, 2, 3])
 
             page_columns = _column_names(connection, "pages")
             self.assertIn("anki_deck_id", page_columns)
@@ -89,6 +89,35 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("source_hash", snapshot_columns)
         finally:
             connection.close()
+
+    def test_initialize_applies_missing_migration_before_newer_recorded_version(self) -> None:
+        """A database from another build receives holes below its highest version."""
+        db = Database(self._db_path)
+        db.initialize()
+
+        connection = sqlite3.connect(self._db_path)
+        try:
+            connection.execute("DROP TABLE notion_card_controls")
+            connection.execute("DELETE FROM schema_migrations WHERE version >= 3")
+            connection.execute("INSERT INTO schema_migrations (version) VALUES (5)")
+            connection.commit()
+        finally:
+            connection.close()
+
+        db.initialize()
+
+        connection = sqlite3.connect(self._db_path)
+        try:
+            versions = connection.execute(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            ).fetchall()
+            control_columns = _column_names(connection, "notion_card_controls")
+        finally:
+            connection.close()
+
+        self.assertEqual([int(row[0]) for row in versions], [1, 2, 3, 5])
+        self.assertIn("notion_page_id", control_columns)
+        self.assertIn("marker_icons", control_columns)
 
     def test_version_one_database_is_upgraded_with_toggle_snapshots(self) -> None:
         """The only released predecessor receives the version-two snapshot table."""
@@ -125,5 +154,5 @@ class DatabaseMigrationTests(unittest.TestCase):
             )
         finally:
             connection.close()
-        self.assertEqual(latest_version, 2)
+        self.assertEqual(latest_version, 3)
         self.assertIn("source_hash", snapshot_columns)

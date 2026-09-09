@@ -18,7 +18,8 @@ from urllib.parse import urlsplit
 from .card_types import BASIC, CLOZE, DEFAULT_SELECTABLE_CARD_TYPES, normalize_card_type, normalize_default_selectable_card_type
 from .parser.cloze_card_parser import CLOZE_MARKER_COLORS, ClozeCardParser
 from .card_type_overrides import CardTypeOverrideStore
-from .cards import MODEL_NAME_BASIC, NOTION_PAGE_ID_FIELD, ensure_notion_toggle_model
+from .notion_controls import load_controls, page_controls, parse_controls, save_controls
+from .cards import MODEL_NAME_BASIC, NOTION_PAGE_ID_FIELD, ensure_notion_toggle_model, set_review_tags_visible
 from .db import Database
 from .logging_utils import configure_file_logging, log_file_path
 from .markdown_snapshot import extract_root_toggle_markdown, hash_notion_markdown
@@ -111,9 +112,9 @@ _MERMAID_FIGURE_RE = re.compile(
 )
 _HTTP_TIMEOUT_SECONDS = 20.0
 _CLOZE_REFRESH_REVISION_SETTING_KEY = "_internal_cloze_refresh_revision"
-_CLOZE_REFRESH_REVISION = "2026-09-notion-source-link-v1"
+_CLOZE_REFRESH_REVISION = "2026-09-notion-tags-v1"
 _TOGGLE_REFRESH_REVISION_SETTING_KEY = "_internal_toggle_refresh_revision"
-_TOGGLE_REFRESH_REVISION = "2026-09-notion-source-link-v1"
+_TOGGLE_REFRESH_REVISION = "2026-09-notion-tags-v1"
 _GRAY_TOGGLE_CLOZE_ENABLED_SETTING_KEY = "_internal_gray_toggle_cloze_enabled"
 _CLOZE_MARKER_COLORS_SETTING_KEY = "_internal_cloze_marker_colors"
 
@@ -139,6 +140,7 @@ def sync_notion_to_anki(
         db = Database(db_path)
         _ensure_db_ready(db)
         ensure_notion_toggle_model(mw)
+        set_review_tags_visible(mw, bool(SettingsStore(db).get_value("show_tags_during_review")))
     except Exception as exc:
         _LOG.exception("Sync aborted during local initialization.")
         return SyncResult(ok=False, message=f"Sync failed: {exc}", errors=(str(exc),))
@@ -833,6 +835,10 @@ def _sync_page_content_selective(
     toggle_sources:       tuple[str, ...],
 ) -> tuple[SyncStats, list[str], bool]:
     """Synchronize one trusted Markdown/shallow-block snapshot."""
+    # refresh source controls before selective eligibility and cache checks
+    controls = page_controls(shallow_blocks, enable_gray_toggle_cloze=enable_gray_toggle_cloze)
+    save_controls(db, page_id, controls)
+    
     existing_cards       = _load_existing_cards_for_page(db, page_id)
     stored_source_hashes = _load_toggle_source_hashes(db, page_id)
     stored_page_hash     = _load_page_content_hash(db, page_id)
@@ -883,7 +889,7 @@ def _sync_page_content_selective(
 
         # Excluded cards did not reach Anki, so retain the source hash from the
         # last payload that was actually processed.
-        if mapping is not None and mapping["excluded"]:
+        if controls[block_id].locked or (mapping is not None and mapping["excluded"]):
             stats = _replace_stats(stats, cards_skipped=stats.cards_skipped + 1)
             continue
 
@@ -1270,7 +1276,6 @@ def _sync_page_content_full(
     warnings: list[SyncWarning] | None = None,
 ) -> tuple[SyncStats, list[str], bool]:
     """Sync a page by recursively inspecting every eligible toggle."""
-    existing_cards = _load_existing_cards_for_page(db, page_id)
     toggle_payloads: list[ToggleCardPayload] = []
     errors: list[str] = []
 
@@ -1279,6 +1284,11 @@ def _sync_page_content_full(
     blocks = client.get_page_content(page_id)
     if markdown:
         blocks = merge_markdown_table_colors(blocks, markdown)
+
+    # use the complete root set for cherry-pick selection
+    controls = page_controls(blocks, enable_gray_toggle_cloze=enable_gray_toggle_cloze)
+    save_controls(db, page_id, controls)
+    existing_cards = _load_existing_cards_for_page(db, page_id)
     toggles = [block for block in blocks if block.block_type == "toggle"]
     toggle_ids = {block.block_id for block in toggles}
     _LOG.debug("Fetched complete page tree. page_id=%s blocks=%d toggles=%d", page_id, len(blocks), len(toggles))
@@ -1308,7 +1318,7 @@ def _sync_page_content_full(
         stats = _replace_stats(stats, cards_seen=stats.cards_seen + 1)
 
         mapping = existing_cards.get(toggle.block_id)
-        if mapping is not None and mapping["excluded"]:
+        if controls[toggle.block_id].locked or (mapping is not None and mapping["excluded"]):
             # Excluded cards must be skipped before expansion/parsing.
             _LOG.info("Card skipped because it is excluded. page_id=%s block_id=%s", page_id, toggle.block_id)
             stats = _replace_stats(stats, cards_skipped=stats.cards_skipped + 1)
@@ -1680,7 +1690,7 @@ def _expected_card_type_for_toggle(
     ):
         return CLOZE
     
-    return _effective_card_type_for_block(
+    return parse_controls(toggle).card_type or _effective_card_type_for_block(
         toggle.block_id,
         default_card_type=default_card_type,
         card_type_overrides=card_type_overrides,
@@ -2080,6 +2090,10 @@ def _add_note(collection: Any, note: Any, deck_id: int) -> None:
 
 def _apply_payload_to_note(note: Any, payload: ToggleCardPayload) -> None:
     """Apply parsed payload fields to an Anki note."""
+    # preserve tags maintained directly in Anki
+    for tag in payload.tags:
+        note.add_tag(tag)
+
     field_values: dict[str, str]
     if payload.fields:
         field_values = dict(payload.fields)
@@ -2215,6 +2229,7 @@ def _prepare_payload_media(collection: Any, payload: ToggleCardPayload) -> Toggl
         model_name=payload.model_name,
         fields=rewritten_fields,
         content_hash=payload.content_hash,
+        tags=payload.tags,
         last_edited_time=payload.last_edited_time,
     )
 
@@ -2780,13 +2795,15 @@ def _load_existing_cards_for_page(db: Database, page_id: str) -> dict[str, dict[
     finally:
         connection.close()
 
+    # combine source locks only in the effective mapping view
+    controls = load_controls(db, page_id)
     return {
         str(row["notion_block_id"]): {
             "anki_note_id": int(row["anki_note_id"]) if row["anki_note_id"] is not None else None,
             "card_type": str(row["card_type"]) if row["card_type"] is not None else BASIC,
             "content_hash": str(row["content_hash"]),
             "last_seen_notion_edit_time": _as_optional_string(row["last_seen_notion_edit_time"]),
-            "excluded": bool(row["excluded"]),
+            "excluded": bool(row["excluded"]) or (row["notion_block_id"] in controls and controls[row["notion_block_id"]].locked),
         }
         for row in rows
     }
