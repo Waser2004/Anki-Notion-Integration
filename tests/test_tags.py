@@ -120,6 +120,6 @@ class TagTests(unittest.TestCase):
         css = _load_model_css()
 
         self.assertRegex(css, r"\.notion-footer\s*\{[^}]*align-items:\s*center;")
-        self.assertRegex(css, r"\.notion-footer \.notion-source-link\s*\{[^}]*top:\s*1px;")
+        self.assertRegex(css, r"\.notion-footer \.notion-source-link\s*\{[^}]*margin:\s*0;")
         self.assertRegex(css, r"\.notion-review-tags\s*\{[^}]*line-height:\s*1\.2;")
         self.assertRegex(css, r'\.notion-source-link \+ \.notion-review-tags::before\s*\{[^}]*content:\s*"·";')
