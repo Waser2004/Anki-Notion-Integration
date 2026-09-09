@@ -10,7 +10,7 @@ from Noteck.modules.parser import parse_page_to_cards
 from Noteck.modules.parser.tags import parse_tags
 from Noteck.modules.sync import _apply_payload_to_note, _prepare_payload_media
 from Noteck.modules.cards import (
-    _MODEL_DEFINITIONS, _build_managed_css, _load_model_css, _ensure_model,
+    _MODEL_DEFINITIONS, _TAG_VISIBILITY_CSS, _build_managed_css, _load_model_css, _ensure_model,
     _model_template_status, set_review_tags_visible,
 )
 
@@ -95,6 +95,25 @@ class TagTests(unittest.TestCase):
         self.assertEqual(models.model["css"], css)
         for template in definition.templates:
             self.assertIn('{{#Tags}}<span class="notion-review-tags">{{Tags}}</span>{{/Tags}}', template.front)
+
+    def test_visibility_supports_legacy_models_and_custom_css(self):
+        """Remove every owned marker through Anki's legacy model API without changing custom CSS."""
+        definition = _MODEL_DEFINITIONS[0]
+        css        = _build_managed_css(_load_model_css())
+        model      = {"name": definition.name, "css": css}
+        models     = SimpleNamespace(
+            byName      = lambda name: model if name == definition.name else None,
+            update_dict = Mock(),
+        )
+        mw         = SimpleNamespace(col=SimpleNamespace(models=models))
+
+        set_review_tags_visible(mw, True)
+        model["css"] += "\n.custom { color: red; }"
+        set_review_tags_visible(mw, True)
+        set_review_tags_visible(mw, False)
+
+        self.assertEqual(model["css"], css + "\n.custom { color: red; }")
+        self.assertNotIn(_TAG_VISIBILITY_CSS, model["css"])
 
     def test_footer_aligns_link_and_tags(self):
         """The footer optically aligns link and tag text around a middle dot."""

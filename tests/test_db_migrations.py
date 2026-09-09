@@ -62,7 +62,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             latest_version = connection.execute(
                 "SELECT MAX(version) FROM schema_migrations"
             ).fetchone()[0]
-            self.assertEqual(latest_version, 4)
+            self.assertEqual(latest_version, 3)
         finally:
             connection.close()
 
@@ -76,7 +76,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             versions = connection.execute(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
-            self.assertEqual([int(row[0]) for row in versions], [1, 2, 3, 4])
+            self.assertEqual([int(row[0]) for row in versions], [1, 2, 3])
 
             page_columns = _column_names(connection, "pages")
             self.assertIn("anki_deck_id", page_columns)
@@ -115,7 +115,7 @@ class DatabaseMigrationTests(unittest.TestCase):
         finally:
             connection.close()
 
-        self.assertEqual([int(row[0]) for row in versions], [1, 2, 3, 4, 5])
+        self.assertEqual([int(row[0]) for row in versions], [1, 2, 3, 5])
         self.assertIn("notion_page_id", control_columns)
         self.assertIn("marker_icons", control_columns)
 
@@ -154,5 +154,5 @@ class DatabaseMigrationTests(unittest.TestCase):
             )
         finally:
             connection.close()
-        self.assertEqual(latest_version, 4)
+        self.assertEqual(latest_version, 3)
         self.assertIn("source_hash", snapshot_columns)

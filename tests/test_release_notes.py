@@ -125,18 +125,18 @@ class ReleaseNotesTests(unittest.TestCase):
         self.assertTrue(
             consume_startup_sync_suppression(
                 db,
-                latest_release="1.4.0",
+                latest_release="1.5.0",
                 database_existed=True,
             )
         )
         self.assertFalse(
             consume_startup_sync_suppression(
                 db,
-                latest_release="1.4.0",
+                latest_release="1.5.0",
                 database_existed=True,
             )
         )
-        self.assertEqual(db.get_setting(STARTUP_SYNC_RELEASE_KEY), "1.4.0")
+        self.assertEqual(db.get_setting(STARTUP_SYNC_RELEASE_KEY), "1.5.0")
 
     def test_startup_sync_is_not_skipped_for_fresh_install_or_normal_release(self) -> None:
         temp_dir = tempfile.TemporaryDirectory()
@@ -157,7 +157,7 @@ class ReleaseNotesTests(unittest.TestCase):
         self.assertFalse(
             consume_startup_sync_suppression(
                 existing_db,
-                latest_release="1.5.0",
+                latest_release="1.3.0",
                 database_existed=True,
             )
         )
@@ -266,8 +266,8 @@ class ReleaseNotesTests(unittest.TestCase):
 
     def test_repository_changelog_uses_supported_format(self) -> None:
         document = load_release_notes()
-        self.assertEqual(document.latest.version, "1.4.0")
-        self.assertIn("advanced cloze parsing", document.latest.markdown)
+        self.assertEqual(document.latest.version, "1.5.0")
+        self.assertIn("Notion card-control markers", document.latest.markdown)
         self.assertIn(
             "docs/release-notes-assets/notion_anki_colored_blocks_visualisation.png",
             document.markdown,

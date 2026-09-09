@@ -276,7 +276,7 @@ _TAG_VISIBILITY_CSS = "\n/* Noteck tag visibility */\n:root { --noteck-tags-disp
 
 def set_review_tags_visible(mw: Any, enabled: bool) -> None:
     """Persist tag visibility in Noteck models so it also syncs to mobile review."""
-    # update only the setting-owned CSS suffix and preserve custom styling
+    # update only the setting-owned CSS marker and preserve custom styling
     collection = getattr(mw, "col", None)
     models     = getattr(collection, "models", None)
     if models is None:
@@ -284,11 +284,11 @@ def set_review_tags_visible(mw: Any, enabled: bool) -> None:
 
     # persist only models whose display setting changed
     for definition in _MODEL_DEFINITIONS:
-        model = models.by_name(definition.name)
+        model = _model_by_name(models, definition.name)
         if model is None:
             continue
         current = str(model.get("css") or "")
-        css     = current.removesuffix(_TAG_VISIBILITY_CSS)
+        css     = current.replace(_TAG_VISIBILITY_CSS, "")
         if enabled:
             css += _TAG_VISIBILITY_CSS
         if css != current:
