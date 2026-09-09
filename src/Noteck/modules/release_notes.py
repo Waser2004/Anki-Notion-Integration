@@ -15,7 +15,7 @@ STARTUP_SYNC_RELEASE_KEY = "startup_sync_release_seen"
 FORCE_RELEASE_NOTES_SENTINEL = ".force_release_notes_on_startup"
 # These releases require the user to start the first sync manually because their
 # parser changes can make that sync considerably longer than a normal startup sync.
-MANUAL_FIRST_SYNC_RELEASES = frozenset({"1.4.0"})
+MANUAL_FIRST_SYNC_RELEASES = frozenset({"1.4.0", "1.5.0"})
 
 _RELEASE_HEADING = re.compile(
     r"^##\s+(?P<version>\S+)\s+-\s+(?P<date>\d{4}-\d{2}-\d{2})\s*$",
