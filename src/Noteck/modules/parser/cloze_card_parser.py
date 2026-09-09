@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Iterable
 
+from .tags import parse_tags, split_toggle_tags
 from . import parser as shared
 from ..card_types import CLOZE
 from ..notion_controls import parse_controls
@@ -126,7 +127,7 @@ class ClozeCardParser:
     # Normal paragraph clozes -------------------------------------------------
 
     def parse_top_level_paragraphs(self, page_id: str, blocks: list[NotionBlock], *, include_block_ids: set[str] | None = None) -> list["shared.ToggleCardPayload"]:
-        """Parse marked top-level paragraphs and consume an adjacent ``Extra:`` paragraph."""
+        """Parse marked top-level paragraphs and consume adjacent Extra and Tags metadata."""
         payloads:         list["shared.ToggleCardPayload"] = []
         consumed_indices: set[int] = set()
 
@@ -148,13 +149,25 @@ class ClozeCardParser:
             if not text.strip():
                 continue
 
-            # Check if the next paragraph is an "Extra:" paragraph and consume it if so.
+            # consume at most one of each metadata type in either adjacent order
             extra = ""
-            if index + 1 < len(blocks) and self._is_extra_paragraph(blocks[index + 1]):
-                extra = self._render_extra_without_prefix(blocks[index + 1])
-                consumed_indices.add(index + 1)
-            
-            payloads.append(self._payload_for_fields(page_id, block, {"Text": text, "Extra": extra, "Notion Block ID": block.block_id}))
+            tags  = ()
+            seen  = set()
+            for following in range(index + 1, min(index + 3, len(blocks))):
+                candidate = blocks[following]
+                parsed    = parse_tags(candidate)
+                kind      = "tags" if parsed is not None else "extra" if self._is_extra_paragraph(candidate) else None
+                if kind is None or kind in seen:
+                    break
+                
+                seen.add(kind)
+                consumed_indices.add(following)
+                if kind == "tags":
+                    tags = parsed
+                else:
+                    extra = self._render_extra_without_prefix(candidate)
+
+            payloads.append(self._payload_for_fields(page_id, block, {"Text": text, "Extra": extra, "Notion Block ID": block.block_id}, tags))
         
         return payloads
 
@@ -243,7 +256,9 @@ class ClozeCardParser:
 
     def parse_advanced(self, page_id: str, block: NotionBlock) -> "shared.ToggleCardPayload":
         """Parse one advanced cloze toggle into an Anki cloze payload."""
-        text_blocks, extra_sections = self._split_advanced_children(block.children)
+        # extract metadata owned directly by this toggle
+        children, tags              = split_toggle_tags(block.children)
+        text_blocks, extra_sections = self._split_advanced_children(children)
         text_blocks = self._prepare_advanced_blocks(text_blocks)
         text = render_blocks_with_renderer(
             text_blocks,
@@ -256,7 +271,7 @@ class ClozeCardParser:
             "Extra":           self._render_advanced_extra(extra_sections),
             "Notion Block ID": block.block_id,
         }
-        return self._payload_for_fields(page_id, block, fields)
+        return self._payload_for_fields(page_id, block, fields, tags)
 
     def _wrap_advanced_root_foreground(self, block: NotionBlock, text: str) -> str:
         """Apply a root toggle foreground to its visible advanced-cloze content."""
@@ -539,7 +554,9 @@ class ClozeCardParser:
 
         return ClozeValidationResult(not errors, tuple(errors))
 
-    def _payload_for_fields(self, page_id: str, block: NotionBlock, fields: dict[str, str]) -> "shared.ToggleCardPayload":
+    def _payload_for_fields(self, page_id: str, block: NotionBlock, fields: dict[str, str], tags: tuple[str, ...] = ()) -> "shared.ToggleCardPayload":
+        """Build a cloze payload with metadata included in change detection."""
+        # retain source fields alongside the rendered cloze fields
         payload_fields = dict(fields)
         payload_fields[NOTION_PAGE_ID_FIELD] = page_id
         payload_fields[NOTION_CARD_BACKGROUND_FIELD] = shared._block_background_color(block)
@@ -550,12 +567,14 @@ class ClozeCardParser:
             card_type        = CLOZE,
             model_name       = MODEL_NAME_CLOZE,
             fields           = payload_fields,
+            tags             = tags,
             content_hash     = shared._compute_payload_content_hash(
                 page_id    = page_id,
                 block_id   = block.block_id,
                 card_type  = CLOZE,
                 model_name = MODEL_NAME_CLOZE,
                 fields     = payload_fields,
+                tags       = tags,
             ),
             last_edited_time = shared._as_optional_string(block.raw.get("last_edited_time")),
         )

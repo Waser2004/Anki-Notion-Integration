@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .tags import split_toggle_tags
 from . import parser as shared
 from ..card_types import BASIC_REVERSED, INPUT
 from ..cards import (
@@ -20,24 +21,28 @@ class BasicCardParser:
 
     def parse(self, page_id: str, block: NotionBlock, card_type: str) -> shared.ToggleCardPayload:
         """Parse one top-level toggle using the selected non-cloze card type."""
-        front_html = self._render_toggle_front(block)
-        back_html  = shared.render_blocks(block.children)
+        # keep tag metadata out of rendered and typed answers
+        children, tags = split_toggle_tags(block.children)
+        front_html     = self._render_toggle_front(block)
+        back_html      = shared.render_blocks(children)
         if not shared._rich_text_to_plain(shared._block_rich_text(block)).strip():
             raise ValueError("empty_toggle_title")
         if not shared._has_usable_card_content(back_html):
             raise ValueError("empty_toggle_content")
 
+        # build the note fields from visible content
         fields = self._build_fields(
             page_id,
             block.block_id,
             front_html,
             back_html,
-            block.children,
+            children,
             card_type,
             shared._block_background_color(block),
         )
         model_name = self.model_name_for(card_type)
 
+        # keep metadata in the payload and its change fingerprint
         return shared.ToggleCardPayload(
             notion_page_id   = page_id,
             notion_block_id  = block.block_id,
@@ -46,12 +51,14 @@ class BasicCardParser:
             card_type        = card_type,
             model_name       = model_name,
             fields           = fields,
+            tags             = tags,
             content_hash     = shared._compute_payload_content_hash(
-                page_id=page_id,
-                block_id=block.block_id,
-                card_type=card_type,
-                model_name=model_name,
-                fields=fields,
+                page_id    = page_id,
+                block_id   = block.block_id,
+                card_type  = card_type,
+                model_name = model_name,
+                fields     = fields,
+                tags       = tags,
             ),
             last_edited_time = shared._as_optional_string(block.raw.get("last_edited_time")),
         )

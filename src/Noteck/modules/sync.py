@@ -19,7 +19,7 @@ from .card_types import BASIC, CLOZE, DEFAULT_SELECTABLE_CARD_TYPES, normalize_c
 from .parser.cloze_card_parser import CLOZE_MARKER_COLORS, ClozeCardParser
 from .card_type_overrides import CardTypeOverrideStore
 from .notion_controls import load_controls, page_controls, parse_controls, save_controls
-from .cards import MODEL_NAME_BASIC, NOTION_PAGE_ID_FIELD, ensure_notion_toggle_model
+from .cards import MODEL_NAME_BASIC, NOTION_PAGE_ID_FIELD, ensure_notion_toggle_model, set_review_tags_visible
 from .db import Database
 from .logging_utils import configure_file_logging, log_file_path
 from .markdown_snapshot import extract_root_toggle_markdown, hash_notion_markdown
@@ -112,9 +112,9 @@ _MERMAID_FIGURE_RE = re.compile(
 )
 _HTTP_TIMEOUT_SECONDS = 20.0
 _CLOZE_REFRESH_REVISION_SETTING_KEY = "_internal_cloze_refresh_revision"
-_CLOZE_REFRESH_REVISION = "2026-09-notion-controls-v1"
+_CLOZE_REFRESH_REVISION = "2026-09-notion-tags-v1"
 _TOGGLE_REFRESH_REVISION_SETTING_KEY = "_internal_toggle_refresh_revision"
-_TOGGLE_REFRESH_REVISION = "2026-09-notion-controls-v1"
+_TOGGLE_REFRESH_REVISION = "2026-09-notion-tags-v1"
 _GRAY_TOGGLE_CLOZE_ENABLED_SETTING_KEY = "_internal_gray_toggle_cloze_enabled"
 _CLOZE_MARKER_COLORS_SETTING_KEY = "_internal_cloze_marker_colors"
 
@@ -140,6 +140,7 @@ def sync_notion_to_anki(
         db = Database(db_path)
         _ensure_db_ready(db)
         ensure_notion_toggle_model(mw)
+        set_review_tags_visible(mw, bool(SettingsStore(db).get_value("show_tags_during_review")))
     except Exception as exc:
         _LOG.exception("Sync aborted during local initialization.")
         return SyncResult(ok=False, message=f"Sync failed: {exc}", errors=(str(exc),))
@@ -2089,6 +2090,10 @@ def _add_note(collection: Any, note: Any, deck_id: int) -> None:
 
 def _apply_payload_to_note(note: Any, payload: ToggleCardPayload) -> None:
     """Apply parsed payload fields to an Anki note."""
+    # preserve tags maintained directly in Anki
+    for tag in payload.tags:
+        note.add_tag(tag)
+
     field_values: dict[str, str]
     if payload.fields:
         field_values = dict(payload.fields)
@@ -2224,6 +2229,7 @@ def _prepare_payload_media(collection: Any, payload: ToggleCardPayload) -> Toggl
         model_name=payload.model_name,
         fields=rewritten_fields,
         content_hash=payload.content_hash,
+        tags=payload.tags,
         last_edited_time=payload.last_edited_time,
     )
 

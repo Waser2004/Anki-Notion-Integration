@@ -40,6 +40,7 @@ class ToggleCardPayload:
     fields:           dict[str, str] = field(default_factory=dict)
     content_hash:     str            = ""
     last_edited_time: str | None     = None
+    tags:            tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -221,10 +222,16 @@ def _compute_payload_content_hash(
     card_type: str,
     model_name: str,
     fields: dict[str, str],
+    tags: tuple[str, ...] = (),
 ) -> str:
     """Compute a deterministic content hash for any typed payload."""
     ordered_fields = "\n".join(f"{key}={fields[key]}" for key in sorted(fields))
     payload = f"{page_id}\n{block_id}\n{card_type}\n{model_name}\n{ordered_fields}".encode("utf-8")
+
+    # include metadata so tag-only edits update the note
+    if tags:
+        payload += ("\ntags=" + " ".join(tags)).encode("utf-8")
+    
     return hashlib.sha256(payload).hexdigest()
 
 

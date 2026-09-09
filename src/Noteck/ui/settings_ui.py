@@ -40,6 +40,7 @@ from ..modules.cards import (
     CARD_TEMPLATE_STATUS_USER_MODIFIED,
     card_template_status,
     restore_default_card_templates,
+    set_review_tags_visible,
 )
 from ..modules.db import Database
 from ..modules.pages import (
@@ -478,6 +479,9 @@ class SettingsPage(QWidget):
             self._show_error(f"Failed to save setting '{key}'.\n\n{exc}")
             return
 
+        # apply review visibility without requiring a Notion sync
+        if key == "show_tags_during_review":
+            set_review_tags_visible(self._context.mw, bool(new_value))
         if key == "cloze_marker_colors":
             self._refresh_cloze_marker_sync_warning()
 
@@ -531,6 +535,7 @@ class SettingsPage(QWidget):
 
         try:
             restore_default_card_templates(self._context.mw)
+            set_review_tags_visible(self._context.mw, bool(self._store.get_value("show_tags_during_review")))
         except Exception as exc:
             self._show_error(f"Failed to restore default card templates.\n\n{exc}")
             return

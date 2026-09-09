@@ -22,6 +22,14 @@
       "description": "Card generation defaults and parser options.",
       "settings": [
         {
+          "key": "show_tags_during_review",
+          "type": "checkbox",
+          "name": "Show tags during review",
+          "description": "Display note tags beside the Open in Notion link.",
+          "tooltip": "Requires the current Noteck card templates.",
+          "default": false
+        },
+        {
           "key": "default_card_type",
           "type": "dropdown",
           "name": "Default card type",
